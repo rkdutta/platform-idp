@@ -1,0 +1,46 @@
+# Angular build for docker-compose.
+# The SPA's API and Keycloak URLs are baked in at build time and must be
+# reachable from the browser, so they are passed in as build args.
+FROM node:18-alpine AS build
+
+WORKDIR /app
+
+# Browser-facing endpoints (defaults match docker-compose.yml)
+ARG API_URL=http://localhost:8000
+ARG KEYCLOAK_URL=http://localhost:8080
+
+COPY package*.json ./
+# Full install (Angular CLI lives in devDependencies and is needed to build)
+RUN npm ci
+
+COPY . .
+
+# Point the SPA at the docker-compose endpoints. Note: angular.json's production
+# build config has no fileReplacements, so the base environment.ts is what's
+# actually bundled — overwrite both to be safe. keycloak.config.ts is imported
+# directly by app.module; environment.apiUrl feeds TeamsService.
+RUN for f in src/environments/environment.ts src/environments/environment.prod.ts; do \
+      printf '%s\n' \
+        "export const environment = {" \
+        "  production: true," \
+        "  apiUrl: '${API_URL}'," \
+        "  keycloak: { url: '${KEYCLOAK_URL}', realm: 'teams', clientId: 'teams-ui' }," \
+        "};" > "$f"; \
+    done \
+ && printf '%s\n' \
+    "import { KeycloakConfig } from 'keycloak-js';" \
+    "const keycloakConfig: KeycloakConfig = {" \
+    "  url: '${KEYCLOAK_URL}'," \
+    "  realm: 'teams'," \
+    "  clientId: 'teams-ui'," \
+    "};" \
+    "export default keycloakConfig;" > src/app/config/keycloak.config.ts
+
+RUN npm run build:prod
+
+# Serve the built app with nginx
+FROM nginx:1.27-alpine
+COPY --from=build /app/dist/teams-ui /usr/share/nginx/html
+COPY nginx.compose.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]

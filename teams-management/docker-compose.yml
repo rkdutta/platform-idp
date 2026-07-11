@@ -1,0 +1,81 @@
+name: teams-management
+
+services:
+  # PostgreSQL backing store for Keycloak (mirrors the k8s setup)
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: keycloak
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - keycloak-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Keycloak identity provider — imports the "teams" realm on first start
+  keycloak:
+    image: quay.io/keycloak/keycloak:22.0
+    command:
+      - start-dev
+      - --import-realm
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: keycloak
+      KC_HTTP_ENABLED: "true"
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
+    ports:
+      - "8180:8080"
+    volumes:
+      - ./keycloak/teams-realm.json:/opt/keycloak/data/import/teams-realm.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # FastAPI backend (in-memory team store)
+  teams-api:
+    build:
+      context: ./teams-api
+    ports:
+      - "8085:8000"
+    # Override the image's curl-based healthcheck (curl isn't in python:slim)
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # Angular SPA served by nginx. Browser-facing URLs are baked in at build time.
+  teams-app:
+    build:
+      context: ./teams-app
+      dockerfile: Dockerfile.compose
+      args:
+        API_URL: http://localhost:8085
+        KEYCLOAK_URL: http://localhost:8180
+    ports:
+      - "4201:80"
+    depends_on:
+      - teams-api
+      - keycloak
+    restart: unless-stopped
+
+volumes:
+  keycloak-postgres-data:
