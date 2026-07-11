@@ -37,7 +37,7 @@ services:
     ports:
       - "8180:8080"
     volumes:
-      - ./keycloak/teams-realm.json:/opt/keycloak/data/import/teams-realm.json:ro
+      - ./teams-realm.json:/opt/keycloak/data/import/teams-realm.json:ro
     depends_on:
       postgres:
         condition: service_healthy
