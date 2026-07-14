@@ -27,6 +27,7 @@ logger = logging.getLogger("teams-api.workloads")
 TEAM_ID_LABEL = "teams.example.com/team-id"
 NAME_LABEL = "app.kubernetes.io/name"
 VERSION_LABEL = "app.kubernetes.io/version"
+PART_OF_LABEL = "app.kubernetes.io/part-of"
 
 ROLLOUT_GROUP = "argoproj.io"
 ROLLOUT_VERSION = "v1alpha1"
@@ -233,6 +234,7 @@ class ApplicationsReader:
             "image": image,
             "replicas": replicas or 0,
             "ready_replicas": ready or 0,
+            "part_of": labels.get(PART_OF_LABEL),
             "rollout": None,  # populated for Rollout kind by _rollouts()
         }
 

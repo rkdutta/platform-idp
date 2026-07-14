@@ -6,13 +6,6 @@ WORKDIR /app
 RUN groupadd -r appuser -g 1001 && \
     useradd -u 1001 -r -g appuser -m -d /app -s /sbin/nologin -c "App user" appuser
 
-# Bundle the Argo Rollouts kubectl plugin so the API can promote / set-image.
-# TARGETARCH is provided by BuildKit so the binary matches the build platform.
-ARG TARGETARCH
-ARG ROLLOUTS_VERSION=v1.7.2
-ADD https://github.com/argoproj/argo-rollouts/releases/download/${ROLLOUTS_VERSION}/kubectl-argo-rollouts-linux-${TARGETARCH} /usr/local/bin/kubectl-argo-rollouts
-RUN chmod 0755 /usr/local/bin/kubectl-argo-rollouts
-
 # Copy requirements first to leverage Docker cache
 COPY requirements.txt .
 
@@ -20,7 +13,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY main.py compliance.py workloads.py rollouts.py ./
+COPY main.py compliance.py workloads.py ./
 
 # Change ownership to non-root user
 RUN chown -R appuser:appuser /app

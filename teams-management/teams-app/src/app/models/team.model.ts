@@ -51,7 +51,13 @@ export interface Application {
   image: string;
   replicas: number;
   ready_replicas: number;
+  part_of?: string | null; // app.kubernetes.io/part-of (grouping key)
   rollout?: RolloutStatus | null;
+}
+
+export interface ApplicationGroup {
+  name: string;
+  apps: Application[];
 }
 
 export interface TeamApplications {

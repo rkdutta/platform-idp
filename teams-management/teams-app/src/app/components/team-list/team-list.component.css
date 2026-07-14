@@ -105,36 +105,64 @@
   color: #95a5a6;
 }
 
-.app-list {
+.app-groups {
   display: flex;
   flex-direction: column;
+  gap: 12px;
+}
+
+/* Application card (grouped by part-of) */
+.app-group {
+  border: 1px solid #dfe6ea;
+  border-radius: 10px;
+  background: #f7fafc;
+  padding: 10px 12px;
+}
+
+.app-group-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.app-group-name {
+  font-weight: 800;
+  color: #2c3e50;
+  font-size: 15px;
+  text-transform: capitalize;
+}
+
+.app-group-count {
+  font-size: 11px;
+  color: #95a5a6;
+}
+
+/* Component cards nested inside an application card */
+.component-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
   gap: 10px;
 }
 
-.app-item {
+.component-card {
   border: 1px solid #e3e9ec;
   border-radius: 8px;
   padding: 10px 12px;
   background: #fff;
 }
 
-.app-row {
+.component-head {
   display: flex;
   align-items: center;
   gap: 8px;
+  margin-bottom: 8px;
 }
 
 .app-name {
   font-weight: 700;
   color: #2c3e50;
   font-size: 14px;
-}
-
-.app-kind {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  color: #8a97a0;
 }
 
 .app-phase {
@@ -164,32 +192,36 @@
   color: #e74c3c;
 }
 
-.app-versions {
+.meta {
+  margin: 0;
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.meta-row {
+  display: flex;
   gap: 8px;
-  margin-top: 8px;
-}
-
-.ver {
-  font-family: "Courier New", monospace;
   font-size: 12px;
-  font-weight: 700;
-  padding: 3px 9px;
-  border-radius: 12px;
+  align-items: baseline;
 }
 
-.ver-active {
-  background: #eaf4fc;
-  color: #2471a3;
-  border: 1px solid #d0e6f7;
+.meta-row dt {
+  flex: 0 0 62px;
+  color: #95a5a6;
+  font-weight: 600;
 }
 
-.ver-preview {
-  background: #eafaf1;
-  color: #1e8449;
-  border: 1px solid #cdebd9;
+.meta-row dd {
+  margin: 0;
+  color: #2c3e50;
+  word-break: break-all;
+}
+
+.meta-row dd.mono {
+  font-family: "Courier New", monospace;
+  font-size: 11px;
+  color: #566573;
 }
 
 .promote-flag {
@@ -197,53 +229,9 @@
   font-weight: 700;
   color: #e67e22;
   background: #fef5e7;
-  padding: 2px 8px;
+  padding: 1px 7px;
   border-radius: 10px;
-}
-
-.app-actions {
-  margin-top: 10px;
-  border-top: 1px dashed #e3e9ec;
-  padding-top: 10px;
-}
-
-.deploy-row {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-
-.deploy-input {
-  flex: 1;
-  min-width: 0;
-  padding: 6px 8px;
-  border: 1px solid #d5dbde;
-  border-radius: 6px;
-  font-size: 13px;
-}
-
-.btn-promote {
-  background-color: #27ae60;
-  color: #fff;
-}
-
-.btn-promote:hover:not([disabled]) {
-  background-color: #1e8449;
-}
-
-.btn[disabled] {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.action-msg {
-  margin: 8px 0 0;
-  font-size: 12px;
-  color: #7f8c8d;
-}
-
-.action-err {
-  color: #e74c3c;
+  margin-left: 4px;
 }
 
 .apps-empty {

@@ -30,84 +30,59 @@
         <p class="team-created">Created: {{ formatDate(team.created_at) }}</p>
       </div>
 
-      <!-- Applications -->
+      <!-- Applications, grouped into application cards (by part-of) -->
       <div class="applications">
         <p class="applications-label">Applications</p>
         <div
-          class="app-list"
-          *ngIf="applications[team.id] && applications[team.id].length > 0; else noApps"
+          class="app-groups"
+          *ngIf="appGroups[team.id] && appGroups[team.id].length > 0; else noApps"
         >
-          <div class="app-item" *ngFor="let app of applications[team.id]">
-            <div class="app-row">
-              <span class="app-name">{{ app.name }}</span>
-              <span class="app-kind">{{ app.rollout?.strategy || app.kind }}</span>
-              <span
-                class="app-phase"
-                *ngIf="app.rollout"
-                [ngClass]="'phase-' + app.rollout.phase"
-              >
-                {{ app.rollout.phase }}
-              </span>
+          <div class="app-group" *ngFor="let group of appGroups[team.id]">
+            <div class="app-group-header">
+              <span class="app-group-name">{{ group.name }}</span>
+              <span class="app-group-count">{{ group.apps.length }} components</span>
             </div>
 
-            <div class="app-versions">
-              <span class="ver ver-active"
-                >active v{{ app.rollout?.active_version || app.version }}</span
-              >
-              <span class="ver ver-preview" *ngIf="app.rollout?.preview_version"
-                >preview v{{ app.rollout?.preview_version }}</span
-              >
-              <span class="promote-flag" *ngIf="app.rollout?.awaiting_promotion"
-                >awaiting promotion</span
-              >
-            </div>
+            <div class="component-list">
+              <div class="component-card" *ngFor="let app of group.apps">
+                <div class="component-head">
+                  <span class="app-name">{{ app.name }}</span>
+                  <span
+                    class="app-phase"
+                    *ngIf="app.rollout"
+                    [ngClass]="'phase-' + app.rollout.phase"
+                    >{{ app.rollout.phase }}</span
+                  >
+                </div>
 
-            <!-- Blue/green controls -->
-            <div class="app-actions" *ngIf="app.rollout?.strategy === 'BlueGreen'">
-              <div class="deploy-row">
-                <input
-                  class="deploy-input"
-                  type="text"
-                  placeholder="new tag e.g. 2.0.0"
-                  [(ngModel)]="deployTag[actionKey(team.id, app.name)]"
-                  [disabled]="actionBusy[actionKey(team.id, app.name)]"
-                />
-                <button
-                  class="btn btn-secondary btn-sm"
-                  (click)="deploy(team.id, app)"
-                  [disabled]="actionBusy[actionKey(team.id, app.name)]"
-                  title="Deploy this tag as a new preview (green)"
-                >
-                  Deploy
-                </button>
-                <button
-                  class="btn btn-promote btn-sm"
-                  (click)="promote(team.id, app)"
-                  [disabled]="
-                    actionBusy[actionKey(team.id, app.name)] ||
-                    !app.rollout?.preview_version
-                  "
-                  title="Promote the preview to active"
-                >
-                  Promote
-                </button>
-                <button
-                  class="btn btn-danger btn-sm"
-                  *ngIf="app.rollout?.preview_version"
-                  (click)="discard(team.id, app)"
-                  [disabled]="actionBusy[actionKey(team.id, app.name)]"
-                  title="Discard the preview and keep the active version"
-                >
-                  Discard
-                </button>
+                <dl class="meta">
+                  <div class="meta-row">
+                    <dt>Version</dt>
+                    <dd>v{{ app.rollout?.active_version || app.version }}</dd>
+                  </div>
+                  <div class="meta-row" *ngIf="app.rollout?.preview_version">
+                    <dt>Preview</dt>
+                    <dd>
+                      v{{ app.rollout?.preview_version }}
+                      <span class="promote-flag" *ngIf="app.rollout?.awaiting_promotion"
+                        >awaiting promotion</span
+                      >
+                    </dd>
+                  </div>
+                  <div class="meta-row">
+                    <dt>Type</dt>
+                    <dd>{{ app.rollout?.strategy || app.kind }}</dd>
+                  </div>
+                  <div class="meta-row">
+                    <dt>Replicas</dt>
+                    <dd>{{ app.ready_replicas }}/{{ app.replicas }} ready</dd>
+                  </div>
+                  <div class="meta-row">
+                    <dt>Image</dt>
+                    <dd class="mono">{{ app.image }}</dd>
+                  </div>
+                </dl>
               </div>
-              <p
-                class="action-msg"
-                *ngIf="actionMsg[actionKey(team.id, app.name)]"
-                [ngClass]="{ 'action-err': actionError[actionKey(team.id, app.name)] }"
-              >
-                {{ actionMsg[actionKey(team.id, app.name)] }}
-              </p>
             </div>
           </div>
         </div>

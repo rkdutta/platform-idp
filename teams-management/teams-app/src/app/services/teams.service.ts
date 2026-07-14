@@ -60,24 +60,6 @@ export class TeamsService {
       .pipe(catchError(this.handleError));
   }
 
-  promoteApp(teamId: string, appName: string): Observable<any> {
-    const url = `${this.apiUrl}/teams/${teamId}/apps/${appName}/promote`;
-    return this.http.post(url, {})
-      .pipe(catchError(this.handleError));
-  }
-
-  setAppImage(teamId: string, appName: string, tag: string): Observable<any> {
-    const url = `${this.apiUrl}/teams/${teamId}/apps/${appName}/image`;
-    return this.http.post(url, { tag })
-      .pipe(catchError(this.handleError));
-  }
-
-  discardAppPreview(teamId: string, appName: string): Observable<any> {
-    const url = `${this.apiUrl}/teams/${teamId}/apps/${appName}/discard`;
-    return this.http.post(url, {})
-      .pipe(catchError(this.handleError));
-  }
-
   private handleError = (error: HttpErrorResponse) => {
     let errorMessage = 'An error occurred';
     
