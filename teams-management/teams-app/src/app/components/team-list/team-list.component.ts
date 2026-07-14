@@ -97,6 +97,12 @@ export class TeamListComponent implements OnInit {
       .map((name) => ({ name, apps: groups[name].sort((a, b) => a.name.localeCompare(b.name)) }));
   }
 
+  // Link to the team namespace's rollout list in the Argo Rollouts dashboard.
+  teamDashboardUrl(teamId: string): string | null {
+    const ns = this.teamNamespace[teamId];
+    return ns ? `${environment.rolloutsDashboardUrl}/rollouts/${ns}/` : null;
+  }
+
   // Deep link into the Argo Rollouts dashboard for a given app, or null if it's
   // not a Rollout / the namespace is unknown (the dashboard only shows Rollouts).
   rolloutDashboardUrl(teamId: string, app: Application): string | null {

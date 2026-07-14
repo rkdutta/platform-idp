@@ -53,6 +53,21 @@
   font-size: 1.3rem;
 }
 
+.team-name-link {
+  color: #2c3e50;
+  text-decoration: none;
+}
+
+.team-name-link:hover {
+  color: #2980b9;
+  text-decoration: underline;
+}
+
+.team-name-link .dash-link {
+  font-size: 0.85rem;
+  vertical-align: middle;
+}
+
 .team-details p {
   margin: 5px 0;
   color: #7f8c8d;

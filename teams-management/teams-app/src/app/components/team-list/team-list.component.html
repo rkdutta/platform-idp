@@ -16,7 +16,18 @@
   <div class="teams-grid" *ngIf="!isLoading && !errorMessage && teams.length > 0">
     <div class="team-card" *ngFor="let team of teams">
       <div class="team-header">
-        <h3 class="team-name">{{ team.name }}</h3>
+        <h3 class="team-name">
+          <a
+            *ngIf="teamDashboardUrl(team.id) as url; else plainName"
+            class="team-name-link"
+            [href]="url"
+            target="_blank"
+            rel="noopener noreferrer"
+            [title]="'View ' + team.name + ' rollouts in the Argo Rollouts dashboard'"
+            >{{ team.name }} <span class="dash-link">↗</span></a
+          >
+          <ng-template #plainName>{{ team.name }}</ng-template>
+        </h3>
         <button
           class="btn btn-danger btn-sm"
           (click)="deleteTeam(team.id, team.name)"
