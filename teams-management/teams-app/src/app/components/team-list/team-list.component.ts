@@ -97,6 +97,40 @@ export class TeamListComponent implements OnInit {
       .map((name) => ({ name, apps: groups[name].sort((a, b) => a.name.localeCompare(b.name)) }));
   }
 
+  // Registry host of an image ref, e.g. "localhost:5001/demo-api-py:1.0.0" ->
+  // "localhost:5001". Defaults to docker.io when no registry host is present.
+  imageRegistry(image: string): string {
+    const ref = (image || "").split("@")[0];
+    const slash = ref.indexOf("/");
+    if (slash > 0) {
+      const first = ref.substring(0, slash);
+      if (first.includes(".") || first.includes(":") || first === "localhost") {
+        return first;
+      }
+    }
+    return "docker.io";
+  }
+
+  // Repository name of an image ref (no registry host, no tag), e.g.
+  // "localhost:5001/demo-api-py:1.0.0" -> "demo-api-py".
+  imageName(image: string): string {
+    let ref = (image || "").split("@")[0];
+    const slash = ref.indexOf("/");
+    if (slash > 0) {
+      const first = ref.substring(0, slash);
+      if (first.includes(".") || first.includes(":") || first === "localhost") {
+        ref = ref.substring(slash + 1);
+      }
+    }
+    const lastSlash = ref.lastIndexOf("/");
+    const lastSeg = ref.substring(lastSlash + 1);
+    const colon = lastSeg.indexOf(":");
+    if (colon >= 0) {
+      ref = ref.substring(0, lastSlash + 1) + lastSeg.substring(0, colon);
+    }
+    return ref;
+  }
+
   // Link to the team namespace's rollout list in the Argo Rollouts dashboard.
   teamDashboardUrl(teamId: string): string | null {
     const ns = this.teamNamespace[teamId];

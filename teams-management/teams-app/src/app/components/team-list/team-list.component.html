@@ -83,8 +83,12 @@
 
                 <dl class="meta">
                   <div class="meta-row">
-                    <dt>Version</dt>
-                    <dd>v{{ app.rollout?.active_version || app.version }}</dd>
+                    <dt>Registry</dt>
+                    <dd class="mono">{{ imageRegistry(app.image) }}</dd>
+                  </div>
+                  <div class="meta-row">
+                    <dt>Image</dt>
+                    <dd class="mono">{{ imageName(app.image) }}</dd>
                   </div>
                   <div class="meta-row" *ngIf="app.rollout?.preview_version">
                     <dt>Preview</dt>
@@ -102,10 +106,6 @@
                   <div class="meta-row">
                     <dt>Replicas</dt>
                     <dd>{{ app.ready_replicas }}/{{ app.replicas }} ready</dd>
-                  </div>
-                  <div class="meta-row">
-                    <dt>Image</dt>
-                    <dd class="mono">{{ app.image }}</dd>
                   </div>
                 </dl>
               </a>
