@@ -146,10 +146,34 @@
 }
 
 .component-card {
+  display: block;
   border: 1px solid #e3e9ec;
   border-radius: 8px;
   padding: 10px 12px;
   background: #fff;
+  color: inherit;
+  text-decoration: none;
+}
+
+.component-card.linkable {
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.component-card.linkable:hover {
+  border-color: #3498db;
+  box-shadow: 0 3px 8px rgba(52, 152, 219, 0.18);
+  transform: translateY(-1px);
+}
+
+.dash-link {
+  color: #3498db;
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.component-card.linkable:hover .dash-link {
+  color: #2471a3;
 }
 
 .component-head {

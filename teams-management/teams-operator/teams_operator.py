@@ -58,8 +58,16 @@ class TeamsOperator:
         
         return namespace
     
-    async def fetch_teams(self) -> list:
-        """Fetch current teams from the Teams API"""
+    async def fetch_teams(self):
+        """Fetch current teams from the Teams API.
+
+        Returns the list of teams on success, or None if the API could not be
+        reached / returned an error. None is deliberately distinct from an empty
+        list: an empty list means "no teams exist" (prune namespaces), whereas
+        None means "unknown" and reconciliation must be skipped — otherwise a
+        transient API outage (e.g. during a teams-api rollout) would be read as
+        "all teams deleted" and wipe every team namespace.
+        """
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"{self.teams_api_url}/teams") as response:
@@ -69,13 +77,13 @@ class TeamsOperator:
                         return teams
                     else:
                         logger.error(f"Failed to fetch teams: HTTP {response.status}")
-                        return []
+                        return None
         except aiohttp.ClientError as e:
             logger.error(f"Error connecting to Teams API: {e}")
-            return []
+            return None
         except Exception as e:
             logger.error(f"Unexpected error fetching teams: {e}")
-            return []
+            return None
     
     def create_namespace(self, team_id: str, team_name: str, namespace_name: str) -> bool:
         """Create a Kubernetes namespace for the team"""
@@ -133,6 +141,14 @@ class TeamsOperator:
     async def reconcile_teams(self):
         """Main reconciliation loop - sync teams with namespaces"""
         teams = await self.fetch_teams()
+
+        # None => the API was unreachable/errored. Skip this cycle entirely so a
+        # transient outage never prunes namespaces. (An empty list, by contrast,
+        # is a real "no teams" state and is reconciled normally.)
+        if teams is None:
+            logger.warning("Skipping reconciliation: teams could not be fetched from the API")
+            return
+
         current_teams = {team['id']: team for team in teams}
         current_team_ids = set(current_teams.keys())
         

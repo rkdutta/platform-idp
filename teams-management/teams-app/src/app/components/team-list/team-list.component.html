@@ -44,9 +44,24 @@
             </div>
 
             <div class="component-list">
-              <div class="component-card" *ngFor="let app of group.apps">
+              <a
+                class="component-card"
+                *ngFor="let app of group.apps"
+                [class.linkable]="rolloutDashboardUrl(team.id, app)"
+                [href]="rolloutDashboardUrl(team.id, app)"
+                [attr.target]="rolloutDashboardUrl(team.id, app) ? '_blank' : null"
+                [attr.rel]="rolloutDashboardUrl(team.id, app) ? 'noopener noreferrer' : null"
+                [attr.title]="
+                  rolloutDashboardUrl(team.id, app)
+                    ? 'Open ' + app.name + ' in the Argo Rollouts dashboard'
+                    : null
+                "
+              >
                 <div class="component-head">
                   <span class="app-name">{{ app.name }}</span>
+                  <span class="dash-link" *ngIf="rolloutDashboardUrl(team.id, app)"
+                    >↗</span
+                  >
                   <span
                     class="app-phase"
                     *ngIf="app.rollout"
@@ -82,7 +97,7 @@
                     <dd class="mono">{{ app.image }}</dd>
                   </div>
                 </dl>
-              </div>
+              </a>
             </div>
           </div>
         </div>

@@ -1,5 +1,6 @@
 import { Component, OnInit } from "@angular/core";
 import { TeamsService } from "../../services/teams.service";
+import { environment } from "../../../environments/environment";
 import {
   Team,
   ComplianceStatus,
@@ -28,6 +29,9 @@ export class TeamListComponent implements OnInit {
   // Applications running in each team's namespace, keyed by team id, already
   // grouped by app.kubernetes.io/part-of into application cards.
   appGroups: { [teamId: string]: ApplicationGroup[] } = {};
+
+  // Each team's namespace, keyed by team id (for Rollouts dashboard deep links).
+  teamNamespace: { [teamId: string]: string | null } = {};
 
   constructor(private teamsService: TeamsService) {}
 
@@ -70,8 +74,10 @@ export class TeamListComponent implements OnInit {
     this.teamsService.getApplications().subscribe({
       next: (teamApps) => {
         this.appGroups = {};
+        this.teamNamespace = {};
         for (const entry of teamApps) {
           this.appGroups[entry.team_id] = this.groupApplications(entry.applications);
+          this.teamNamespace[entry.team_id] = entry.namespace;
         }
       },
       error: (error) => console.error("Failed to load applications:", error),
@@ -89,6 +95,16 @@ export class TeamListComponent implements OnInit {
     return Object.keys(groups)
       .sort()
       .map((name) => ({ name, apps: groups[name].sort((a, b) => a.name.localeCompare(b.name)) }));
+  }
+
+  // Deep link into the Argo Rollouts dashboard for a given app, or null if it's
+  // not a Rollout / the namespace is unknown (the dashboard only shows Rollouts).
+  rolloutDashboardUrl(teamId: string, app: Application): string | null {
+    const ns = this.teamNamespace[teamId];
+    if (app.kind !== "Rollout" || !ns) {
+      return null;
+    }
+    return `${environment.rolloutsDashboardUrl}/rollouts/${ns}/${app.name}`;
   }
 
   toggleDetail(teamId: string) {
