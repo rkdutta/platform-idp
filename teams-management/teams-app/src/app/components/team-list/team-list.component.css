@@ -90,3 +90,144 @@
   color: #7f8c8d;
   font-weight: 600;
 }
+
+/* --- Compliance --- */
+.compliance {
+  margin-top: 15px;
+  border-top: 1px solid #ecf0f1;
+  padding-top: 12px;
+}
+
+.compliance-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #fff;
+  white-space: nowrap;
+}
+
+.badge-compliant {
+  background-color: #27ae60;
+}
+
+.badge-non_compliant {
+  background-color: #e74c3c;
+}
+
+.badge-unknown {
+  background-color: #95a5a6;
+}
+
+.policy-count {
+  flex: 1;
+  color: #7f8c8d;
+  font-size: 13px;
+}
+
+.chevron {
+  color: #b0b8bd;
+  font-size: 11px;
+}
+
+.compliance-detail {
+  margin-top: 12px;
+}
+
+.detail-loading,
+.detail-empty {
+  color: #7f8c8d;
+  font-size: 13px;
+  font-style: italic;
+  margin: 6px 0;
+}
+
+.policy-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.policy {
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: #fff;
+  border: 1px solid #ecf0f1;
+}
+
+.policy-fail {
+  border-color: #f5b7b1;
+  background: #fdf2f1;
+}
+
+.policy-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.policy-mark {
+  font-weight: 700;
+}
+
+.policy-ok .policy-mark {
+  color: #27ae60;
+}
+
+.policy-fail .policy-mark {
+  color: #e74c3c;
+}
+
+.policy-name {
+  font-weight: 600;
+  color: #2c3e50;
+  font-size: 14px;
+}
+
+.policy-kind {
+  color: #95a5a6;
+  font-size: 12px;
+  font-family: "Courier New", monospace;
+}
+
+.policy-vcount {
+  margin-left: auto;
+  background: #e74c3c;
+  color: #fff;
+  border-radius: 10px;
+  padding: 1px 8px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.policy-messages {
+  list-style: disc;
+  margin: 6px 0 0;
+  padding-left: 26px;
+  color: #7f8c8d;
+  font-size: 12px;
+}
+
+.policy-messages li {
+  margin: 2px 0;
+  word-break: break-word;
+}

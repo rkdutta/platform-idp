@@ -29,6 +29,72 @@
         <p class="team-id">ID: {{ team.id }}</p>
         <p class="team-created">Created: {{ formatDate(team.created_at) }}</p>
       </div>
+
+      <!-- Compliance -->
+      <div class="compliance">
+        <button
+          class="compliance-toggle"
+          (click)="toggleDetail(team.id)"
+          [attr.aria-expanded]="expanded[team.id]"
+        >
+          <span class="badge" [ngClass]="'badge-' + statusOf(team.id)">
+            {{ statusLabel(team.id) }}
+          </span>
+          <span
+            class="policy-count"
+            *ngIf="compliance[team.id] as c"
+            [title]="c.reason || ''"
+          >
+            <ng-container *ngIf="c.status === 'non_compliant'">
+              {{ c.failing_policies }} of {{ c.total_policies }} policies failing
+            </ng-container>
+            <ng-container *ngIf="c.status === 'compliant'">
+              {{ c.total_policies }} policies passing
+            </ng-container>
+            <ng-container *ngIf="c.status === 'unknown'">
+              {{ c.reason || "Status unavailable" }}
+            </ng-container>
+          </span>
+          <span class="chevron">{{ expanded[team.id] ? "▲" : "▼" }}</span>
+        </button>
+
+        <div class="compliance-detail" *ngIf="expanded[team.id]">
+          <div class="detail-loading" *ngIf="loadingDetail[team.id]">
+            Checking policies…
+          </div>
+
+          <ng-container *ngIf="complianceDetail[team.id] as detail">
+            <p class="detail-empty" *ngIf="detail.policies.length === 0">
+              {{
+                detail.reason ||
+                  "No platform policies are enforced yet — nothing to evaluate."
+              }}
+            </p>
+
+            <ul class="policy-list" *ngIf="detail.policies.length > 0">
+              <li
+                class="policy"
+                *ngFor="let policy of detail.policies"
+                [ngClass]="policy.compliant ? 'policy-ok' : 'policy-fail'"
+              >
+                <div class="policy-head">
+                  <span class="policy-mark">{{
+                    policy.compliant ? "✓" : "✗"
+                  }}</span>
+                  <span class="policy-name">{{ policy.name }}</span>
+                  <span class="policy-kind">{{ policy.kind }}</span>
+                  <span class="policy-vcount" *ngIf="!policy.compliant">
+                    {{ policy.violation_count }}
+                  </span>
+                </div>
+                <ul class="policy-messages" *ngIf="policy.messages.length > 0">
+                  <li *ngFor="let msg of policy.messages">{{ msg }}</li>
+                </ul>
+              </li>
+            </ul>
+          </ng-container>
+        </div>
+      </div>
     </div>
   </div>
 

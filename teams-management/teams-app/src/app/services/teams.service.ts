@@ -2,7 +2,7 @@ import { Injectable } from '@angular/core';
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { Observable, throwError } from 'rxjs';
 import { catchError } from 'rxjs/operators';
-import { Team, TeamCreate } from '../models/team.model';
+import { Team, TeamCreate, ComplianceSummary, ComplianceDetail } from '../models/team.model';
 import { environment } from '../../environments/environment';
 import { AuthService } from './auth.service';
 
@@ -37,8 +37,20 @@ export class TeamsService {
   deleteTeam(teamId: string): Observable<any> {
     const url = `${this.apiUrl}/teams/${teamId}`;
     console.log('🗑️ Deleting team via API:', url);
-    
+
     return this.http.delete(url)
+      .pipe(catchError(this.handleError));
+  }
+
+  getComplianceSummaries(): Observable<ComplianceSummary[]> {
+    const url = `${this.apiUrl}/compliance`;
+    return this.http.get<ComplianceSummary[]>(url)
+      .pipe(catchError(this.handleError));
+  }
+
+  getTeamCompliance(teamId: string): Observable<ComplianceDetail> {
+    const url = `${this.apiUrl}/teams/${teamId}/compliance`;
+    return this.http.get<ComplianceDetail>(url)
       .pipe(catchError(this.handleError));
   }
 

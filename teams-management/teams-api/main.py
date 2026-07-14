@@ -1,9 +1,11 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Dict
+from typing import List, Dict, Optional
 import uuid
 from datetime import datetime
+
+from compliance import ComplianceChecker
 
 app = FastAPI(
     title="Teams API",
@@ -23,6 +25,9 @@ app.add_middleware(
 # In-memory storage
 teams_store: Dict[str, Dict] = {}
 
+# Compliance checker (reads Gatekeeper state from the Kubernetes API).
+compliance_checker = ComplianceChecker()
+
 # Pydantic models
 class TeamCreate(BaseModel):
     name: str
@@ -31,6 +36,27 @@ class Team(BaseModel):
     id: str
     name: str
     created_at: datetime
+
+class PolicyResult(BaseModel):
+    name: str
+    kind: str
+    enforcement_action: str
+    compliant: bool
+    violation_count: int
+    messages: List[str]
+
+class ComplianceSummary(BaseModel):
+    team_id: str
+    team_name: str
+    namespace: Optional[str] = None
+    status: str                      # compliant | non_compliant | unknown
+    reason: Optional[str] = None
+    failing_policies: int
+    total_policies: int
+    checked_at: str
+
+class ComplianceDetail(ComplianceSummary):
+    policies: List[PolicyResult] = []
 
 @app.get("/")
 async def root():
@@ -76,6 +102,19 @@ async def delete_team(team_id: str):
 
     deleted_team = teams_store.pop(team_id)
     return {"message": f"Team '{deleted_team['name']}' deleted successfully"}
+
+@app.get("/compliance", response_model=List[ComplianceSummary])
+def get_all_compliance():
+    """Compliance summary (badge data) for every team, from one cluster scan."""
+    return compliance_checker.summarize_all(list(teams_store.values()))
+
+@app.get("/teams/{team_id}/compliance", response_model=ComplianceDetail)
+def get_team_compliance(team_id: str):
+    """Detailed per-policy compliance breakdown for a single team."""
+    if team_id not in teams_store:
+        raise HTTPException(status_code=404, detail="Team not found")
+
+    return compliance_checker.evaluate_team(teams_store[team_id])
 
 @app.get("/health")
 async def health_check():
