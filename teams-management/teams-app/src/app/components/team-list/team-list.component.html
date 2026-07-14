@@ -83,6 +83,10 @@
 
                 <dl class="meta">
                   <div class="meta-row">
+                    <dt>Version</dt>
+                    <dd>v{{ app.rollout?.active_version || app.version }}</dd>
+                  </div>
+                  <div class="meta-row">
                     <dt>Registry</dt>
                     <dd class="mono">{{ imageRegistry(app.image) }}</dd>
                   </div>
