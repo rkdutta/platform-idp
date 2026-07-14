@@ -34,14 +34,73 @@
       <div class="applications">
         <p class="applications-label">Applications</p>
         <div
-          class="app-chips"
+          class="app-list"
           *ngIf="applications[team.id] && applications[team.id].length > 0; else noApps"
         >
-          <span class="app-chip" *ngFor="let app of applications[team.id]">
-            <span class="app-name">{{ app.name }}</span>
-            <span class="app-version">v{{ app.version }}</span>
-            <span class="app-kind">{{ app.kind }}</span>
-          </span>
+          <div class="app-item" *ngFor="let app of applications[team.id]">
+            <div class="app-row">
+              <span class="app-name">{{ app.name }}</span>
+              <span class="app-kind">{{ app.rollout?.strategy || app.kind }}</span>
+              <span
+                class="app-phase"
+                *ngIf="app.rollout"
+                [ngClass]="'phase-' + app.rollout.phase"
+              >
+                {{ app.rollout.phase }}
+              </span>
+            </div>
+
+            <div class="app-versions">
+              <span class="ver ver-active"
+                >active v{{ app.rollout?.active_version || app.version }}</span
+              >
+              <span class="ver ver-preview" *ngIf="app.rollout?.preview_version"
+                >preview v{{ app.rollout?.preview_version }}</span
+              >
+              <span class="promote-flag" *ngIf="app.rollout?.awaiting_promotion"
+                >awaiting promotion</span
+              >
+            </div>
+
+            <!-- Blue/green controls -->
+            <div class="app-actions" *ngIf="app.rollout?.strategy === 'BlueGreen'">
+              <div class="deploy-row">
+                <input
+                  class="deploy-input"
+                  type="text"
+                  placeholder="new tag e.g. 2.0.0"
+                  [(ngModel)]="deployTag[actionKey(team.id, app.name)]"
+                  [disabled]="actionBusy[actionKey(team.id, app.name)]"
+                />
+                <button
+                  class="btn btn-secondary btn-sm"
+                  (click)="deploy(team.id, app)"
+                  [disabled]="actionBusy[actionKey(team.id, app.name)]"
+                  title="Deploy this tag as a new preview (green)"
+                >
+                  Deploy
+                </button>
+                <button
+                  class="btn btn-promote btn-sm"
+                  (click)="promote(team.id, app)"
+                  [disabled]="
+                    actionBusy[actionKey(team.id, app.name)] ||
+                    !app.rollout?.preview_version
+                  "
+                  title="Promote the preview to active"
+                >
+                  Promote
+                </button>
+              </div>
+              <p
+                class="action-msg"
+                *ngIf="actionMsg[actionKey(team.id, app.name)]"
+                [ngClass]="{ 'action-err': actionError[actionKey(team.id, app.name)] }"
+              >
+                {{ actionMsg[actionKey(team.id, app.name)] }}
+              </p>
+            </div>
+          </div>
         </div>
         <ng-template #noApps>
           <p class="apps-empty">No applications deployed</p>

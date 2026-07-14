@@ -27,6 +27,12 @@ export class TeamListComponent implements OnInit {
   // Applications running in each team's namespace, keyed by team id.
   applications: { [teamId: string]: Application[] } = {};
 
+  // Rollout action state, keyed by "<teamId>/<appName>".
+  deployTag: { [key: string]: string } = {};
+  actionBusy: { [key: string]: boolean } = {};
+  actionMsg: { [key: string]: string } = {};
+  actionError: { [key: string]: boolean } = {};
+
   constructor(private teamsService: TeamsService) {}
 
   ngOnInit() {
@@ -106,6 +112,59 @@ export class TeamListComponent implements OnInit {
       default:
         return "Unknown";
     }
+  }
+
+  // Blue/green actions --------------------------------------------------
+
+  actionKey(teamId: string, appName: string): string {
+    return `${teamId}/${appName}`;
+  }
+
+  promote(teamId: string, app: Application) {
+    const key = this.actionKey(teamId, app.name);
+    const preview = app.rollout?.preview_version ?? "the preview version";
+    if (!confirm(`Promote ${app.name} to ${preview}? This flips live traffic.`)) {
+      return;
+    }
+    this.runAction(key, this.teamsService.promoteApp(teamId, app.name),
+      `Promoting ${app.name}…`, `Promoted ${app.name}`);
+  }
+
+  deploy(teamId: string, app: Application) {
+    const key = this.actionKey(teamId, app.name);
+    const tag = (this.deployTag[key] || "").trim();
+    if (!tag) {
+      this.setMsg(key, "Enter an image tag first", true);
+      return;
+    }
+    if (!confirm(`Deploy ${app.name}:${tag} as a new preview (green)?`)) {
+      return;
+    }
+    this.runAction(key, this.teamsService.setAppImage(teamId, app.name, tag),
+      `Deploying ${app.name}:${tag}…`, `Started rollout of ${app.name}:${tag}`);
+  }
+
+  private runAction(key: string, obs: any, pending: string, success: string) {
+    this.actionBusy[key] = true;
+    this.setMsg(key, pending, false);
+    obs.subscribe({
+      next: () => {
+        this.actionBusy[key] = false;
+        this.setMsg(key, success, false);
+        this.deployTag[key] = "";
+        // Let the rollout controller react, then refresh status.
+        setTimeout(() => this.loadApplications(), 1500);
+      },
+      error: (error: any) => {
+        this.actionBusy[key] = false;
+        this.setMsg(key, typeof error === "string" ? error : "Action failed", true);
+      },
+    });
+  }
+
+  private setMsg(key: string, msg: string, isError: boolean) {
+    this.actionMsg[key] = msg;
+    this.actionError[key] = isError;
   }
 
   deleteTeam(teamId: string, teamName: string) {

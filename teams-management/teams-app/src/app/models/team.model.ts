@@ -35,6 +35,15 @@ export interface ComplianceDetail extends ComplianceSummary {
   policies: PolicyResult[];
 }
 
+export interface RolloutStatus {
+  strategy: string; // BlueGreen | Canary | Unknown
+  phase: string; // Healthy | Paused | Progressing | Degraded ...
+  message: string;
+  active_version: string | null;
+  preview_version: string | null;
+  awaiting_promotion: boolean;
+}
+
 export interface Application {
   name: string;
   version: string;
@@ -42,6 +51,7 @@ export interface Application {
   image: string;
   replicas: number;
   ready_replicas: number;
+  rollout?: RolloutStatus | null;
 }
 
 export interface TeamApplications {

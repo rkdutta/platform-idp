@@ -11,6 +11,7 @@ from pathlib import Path
 
 from compliance import ComplianceChecker
 from workloads import ApplicationsReader
+from rollouts import RolloutActions, ActionError
 
 logger = logging.getLogger("teams-api")
 
@@ -68,6 +69,9 @@ compliance_checker = ComplianceChecker()
 # Applications reader (lists Rollouts/Deployments in each team's namespace).
 applications_reader = ApplicationsReader()
 
+# Rollout actions (promote / set-image) via the argo-rollouts plugin.
+rollout_actions = RolloutActions()
+
 # Pydantic models
 class TeamCreate(BaseModel):
     name: str
@@ -98,6 +102,14 @@ class ComplianceSummary(BaseModel):
 class ComplianceDetail(ComplianceSummary):
     policies: List[PolicyResult] = []
 
+class RolloutStatus(BaseModel):
+    strategy: str                    # BlueGreen | Canary | Unknown
+    phase: str                       # Healthy | Paused | Progressing | Degraded ...
+    message: str = ""
+    active_version: Optional[str] = None
+    preview_version: Optional[str] = None
+    awaiting_promotion: bool = False
+
 class Application(BaseModel):
     name: str
     version: str
@@ -105,6 +117,10 @@ class Application(BaseModel):
     image: str
     replicas: int
     ready_replicas: int
+    rollout: Optional[RolloutStatus] = None
+
+class SetImageRequest(BaseModel):
+    tag: str
 
 class TeamApplications(BaseModel):
     team_id: str
@@ -185,6 +201,26 @@ def get_team_applications(team_id: str):
         raise HTTPException(status_code=404, detail="Team not found")
 
     return applications_reader.applications_for_team(teams_store[team_id])
+
+@app.post("/teams/{team_id}/apps/{app_name}/promote")
+def promote_app(team_id: str, app_name: str):
+    """Promote a blue/green rollout's preview (green) version to active (blue)."""
+    if team_id not in teams_store:
+        raise HTTPException(status_code=404, detail="Team not found")
+    try:
+        return rollout_actions.promote(teams_store[team_id], app_name)
+    except ActionError as e:
+        raise HTTPException(status_code=e.status, detail=str(e))
+
+@app.post("/teams/{team_id}/apps/{app_name}/image")
+def set_app_image(team_id: str, app_name: str, req: SetImageRequest):
+    """Deploy a new version of a rollout by changing its image tag (starts a green)."""
+    if team_id not in teams_store:
+        raise HTTPException(status_code=404, detail="Team not found")
+    try:
+        return rollout_actions.set_image(teams_store[team_id], app_name, req.tag)
+    except ActionError as e:
+        raise HTTPException(status_code=e.status, detail=str(e))
 
 @app.get("/health")
 async def health_check():
