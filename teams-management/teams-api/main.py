@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime
 
 from compliance import ComplianceChecker
+from workloads import ApplicationsReader
 
 app = FastAPI(
     title="Teams API",
@@ -27,6 +28,9 @@ teams_store: Dict[str, Dict] = {}
 
 # Compliance checker (reads Gatekeeper state from the Kubernetes API).
 compliance_checker = ComplianceChecker()
+
+# Applications reader (lists Rollouts/Deployments in each team's namespace).
+applications_reader = ApplicationsReader()
 
 # Pydantic models
 class TeamCreate(BaseModel):
@@ -57,6 +61,20 @@ class ComplianceSummary(BaseModel):
 
 class ComplianceDetail(ComplianceSummary):
     policies: List[PolicyResult] = []
+
+class Application(BaseModel):
+    name: str
+    version: str
+    kind: str                        # Rollout | Deployment
+    image: str
+    replicas: int
+    ready_replicas: int
+
+class TeamApplications(BaseModel):
+    team_id: str
+    team_name: str
+    namespace: Optional[str] = None
+    applications: List[Application] = []
 
 @app.get("/")
 async def root():
@@ -115,6 +133,19 @@ def get_team_compliance(team_id: str):
         raise HTTPException(status_code=404, detail="Team not found")
 
     return compliance_checker.evaluate_team(teams_store[team_id])
+
+@app.get("/applications", response_model=List[TeamApplications])
+def get_all_applications():
+    """Applications (name + version) running in every team's namespace."""
+    return applications_reader.applications_for_all(list(teams_store.values()))
+
+@app.get("/teams/{team_id}/applications", response_model=TeamApplications)
+def get_team_applications(team_id: str):
+    """Applications running in a single team's namespace."""
+    if team_id not in teams_store:
+        raise HTTPException(status_code=404, detail="Team not found")
+
+    return applications_reader.applications_for_team(teams_store[team_id])
 
 @app.get("/health")
 async def health_check():

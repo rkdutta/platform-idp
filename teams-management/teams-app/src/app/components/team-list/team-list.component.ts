@@ -5,6 +5,7 @@ import {
   ComplianceStatus,
   ComplianceSummary,
   ComplianceDetail,
+  Application,
 } from "../../models/team.model";
 
 @Component({
@@ -23,6 +24,9 @@ export class TeamListComponent implements OnInit {
   expanded: { [teamId: string]: boolean } = {};
   loadingDetail: { [teamId: string]: boolean } = {};
 
+  // Applications running in each team's namespace, keyed by team id.
+  applications: { [teamId: string]: Application[] } = {};
+
   constructor(private teamsService: TeamsService) {}
 
   ngOnInit() {
@@ -38,6 +42,7 @@ export class TeamListComponent implements OnInit {
         this.teams = teams;
         this.isLoading = false;
         this.loadCompliance();
+        this.loadApplications();
       },
       error: (error) => {
         this.errorMessage = error;
@@ -56,6 +61,18 @@ export class TeamListComponent implements OnInit {
       },
       // Compliance is supplementary; a failure here must not blank the team list.
       error: (error) => console.error("Failed to load compliance:", error),
+    });
+  }
+
+  loadApplications() {
+    this.teamsService.getApplications().subscribe({
+      next: (teamApps) => {
+        this.applications = {};
+        for (const entry of teamApps) {
+          this.applications[entry.team_id] = entry.applications;
+        }
+      },
+      error: (error) => console.error("Failed to load applications:", error),
     });
   }
 

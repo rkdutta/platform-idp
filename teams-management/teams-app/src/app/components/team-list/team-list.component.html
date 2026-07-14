@@ -30,6 +30,24 @@
         <p class="team-created">Created: {{ formatDate(team.created_at) }}</p>
       </div>
 
+      <!-- Applications -->
+      <div class="applications">
+        <p class="applications-label">Applications</p>
+        <div
+          class="app-chips"
+          *ngIf="applications[team.id] && applications[team.id].length > 0; else noApps"
+        >
+          <span class="app-chip" *ngFor="let app of applications[team.id]">
+            <span class="app-name">{{ app.name }}</span>
+            <span class="app-version">v{{ app.version }}</span>
+            <span class="app-kind">{{ app.kind }}</span>
+          </span>
+        </div>
+        <ng-template #noApps>
+          <p class="apps-empty">No applications deployed</p>
+        </ng-template>
+      </div>
+
       <!-- Compliance -->
       <div class="compliance">
         <button

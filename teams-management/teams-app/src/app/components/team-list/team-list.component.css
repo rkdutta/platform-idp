@@ -91,6 +91,63 @@
   font-weight: 600;
 }
 
+/* --- Applications --- */
+.applications {
+  margin-top: 12px;
+}
+
+.applications-label {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #95a5a6;
+}
+
+.app-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.app-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 14px;
+  background: #eaf4fc;
+  border: 1px solid #d0e6f7;
+}
+
+.app-name {
+  font-weight: 600;
+  color: #2c3e50;
+  font-size: 13px;
+}
+
+.app-version {
+  font-family: "Courier New", monospace;
+  font-size: 12px;
+  font-weight: 700;
+  color: #2980b9;
+}
+
+.app-kind {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #95a5a6;
+}
+
+.apps-empty {
+  margin: 0;
+  color: #b0b8bd;
+  font-size: 13px;
+  font-style: italic;
+}
+
 /* --- Compliance --- */
 .compliance {
   margin-top: 15px;

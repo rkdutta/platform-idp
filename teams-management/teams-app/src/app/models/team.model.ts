@@ -34,3 +34,19 @@ export interface ComplianceSummary {
 export interface ComplianceDetail extends ComplianceSummary {
   policies: PolicyResult[];
 }
+
+export interface Application {
+  name: string;
+  version: string;
+  kind: string; // Rollout | Deployment
+  image: string;
+  replicas: number;
+  ready_replicas: number;
+}
+
+export interface TeamApplications {
+  team_id: string;
+  team_name: string;
+  namespace: string | null;
+  applications: Application[];
+}
