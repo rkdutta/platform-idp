@@ -104,7 +104,7 @@ export class TeamListComponent implements OnInit {
     if (app.kind !== "Rollout" || !ns) {
       return null;
     }
-    return `${environment.rolloutsDashboardUrl}/rollouts/${ns}/${app.name}`;
+    return `${environment.rolloutsDashboardUrl}/rollouts/rollout/${ns}/${app.name}`;
   }
 
   toggleDetail(teamId: string) {
