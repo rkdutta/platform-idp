@@ -2,11 +2,47 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Optional
+import json
+import logging
+import os
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 from compliance import ComplianceChecker
 from workloads import ApplicationsReader
+
+logger = logging.getLogger("teams-api")
+
+# Where the team store is persisted. Backed by a PersistentVolume in-cluster so
+# team data survives pod restarts (an in-memory store was wiped on every roll,
+# which then made the operator prune the team namespaces).
+DATA_DIR = os.getenv("DATA_DIR", "/data")
+DATA_FILE = Path(DATA_DIR) / "teams.json"
+
+
+def load_teams() -> Dict[str, Dict]:
+    """Load the persisted team store; empty if the file is missing/unreadable."""
+    try:
+        if DATA_FILE.exists():
+            with DATA_FILE.open() as f:
+                teams = json.load(f)
+            return {team["id"]: team for team in teams}
+    except Exception as e:  # noqa: BLE001 - never fail startup on a bad/absent file
+        logger.error(f"Could not load teams from {DATA_FILE}: {e}")
+    return {}
+
+
+def save_teams() -> None:
+    """Persist the team store atomically (write temp file, then rename)."""
+    try:
+        DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = DATA_FILE.with_suffix(".json.tmp")
+        with tmp.open("w") as f:
+            json.dump(list(teams_store.values()), f, default=str)
+        tmp.replace(DATA_FILE)
+    except Exception as e:  # noqa: BLE001 - a persistence failure must not 500 the request
+        logger.error(f"Could not save teams to {DATA_FILE}: {e}")
 
 app = FastAPI(
     title="Teams API",
@@ -23,8 +59,8 @@ app.add_middleware(
     allow_headers=["*"],  # Allows all headers
 )
 
-# In-memory storage
-teams_store: Dict[str, Dict] = {}
+# Team store, loaded from the persistent volume on startup.
+teams_store: Dict[str, Dict] = load_teams()
 
 # Compliance checker (reads Gatekeeper state from the Kubernetes API).
 compliance_checker = ComplianceChecker()
@@ -88,15 +124,17 @@ async def create_team(team: TeamCreate):
         if existing_team["name"].lower() == team.name.lower():
             raise HTTPException(status_code=400, detail="Team name already exists")
 
-    # Generate unique ID and create team
+    # Generate unique ID and create team. created_at is stored as an ISO string
+    # so the record round-trips cleanly through JSON persistence.
     team_id = str(uuid.uuid4())
     new_team = {
         "id": team_id,
         "name": team.name,
-        "created_at": datetime.now()
+        "created_at": datetime.now().isoformat()
     }
 
     teams_store[team_id] = new_team
+    save_teams()
     return Team(**new_team)
 
 @app.get("/teams", response_model=List[Team])
@@ -119,6 +157,7 @@ async def delete_team(team_id: str):
         raise HTTPException(status_code=404, detail="Team not found")
 
     deleted_team = teams_store.pop(team_id)
+    save_teams()
     return {"message": f"Team '{deleted_team['name']}' deleted successfully"}
 
 @app.get("/compliance", response_model=List[ComplianceSummary])
