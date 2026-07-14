@@ -91,6 +91,15 @@
                 >
                   Promote
                 </button>
+                <button
+                  class="btn btn-danger btn-sm"
+                  *ngIf="app.rollout?.preview_version"
+                  (click)="discard(team.id, app)"
+                  [disabled]="actionBusy[actionKey(team.id, app.name)]"
+                  title="Discard the preview and keep the active version"
+                >
+                  Discard
+                </button>
               </div>
               <p
                 class="action-msg"

@@ -222,6 +222,16 @@ def set_app_image(team_id: str, app_name: str, req: SetImageRequest):
     except ActionError as e:
         raise HTTPException(status_code=e.status, detail=str(e))
 
+@app.post("/teams/{team_id}/apps/{app_name}/discard")
+def discard_app_preview(team_id: str, app_name: str):
+    """Discard a pending preview (green) and revert to the active (blue) version."""
+    if team_id not in teams_store:
+        raise HTTPException(status_code=404, detail="Team not found")
+    try:
+        return rollout_actions.discard_preview(teams_store[team_id], app_name)
+    except ActionError as e:
+        raise HTTPException(status_code=e.status, detail=str(e))
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint for Kubernetes"""

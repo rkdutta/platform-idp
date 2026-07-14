@@ -144,6 +144,17 @@ export class TeamListComponent implements OnInit {
       `Deploying ${app.name}:${tag}…`, `Started rollout of ${app.name}:${tag}`);
   }
 
+  discard(teamId: string, app: Application) {
+    const key = this.actionKey(teamId, app.name);
+    const preview = app.rollout?.preview_version ?? "the preview";
+    const active = app.rollout?.active_version ?? "the active version";
+    if (!confirm(`Discard preview ${preview} and keep ${active} live?`)) {
+      return;
+    }
+    this.runAction(key, this.teamsService.discardAppPreview(teamId, app.name),
+      `Discarding preview of ${app.name}…`, `Discarded preview of ${app.name}`);
+  }
+
   private runAction(key: string, obs: any, pending: string, success: string) {
     this.actionBusy[key] = true;
     this.setMsg(key, pending, false);

@@ -72,6 +72,12 @@ export class TeamsService {
       .pipe(catchError(this.handleError));
   }
 
+  discardAppPreview(teamId: string, appName: string): Observable<any> {
+    const url = `${this.apiUrl}/teams/${teamId}/apps/${appName}/discard`;
+    return this.http.post(url, {})
+      .pipe(catchError(this.handleError));
+  }
+
   private handleError = (error: HttpErrorResponse) => {
     let errorMessage = 'An error occurred';
     

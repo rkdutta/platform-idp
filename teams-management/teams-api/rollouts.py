@@ -52,6 +52,7 @@ class RolloutActions:
             except config.ConfigException:
                 config.load_kube_config()
             self._core = client.CoreV1Api()
+            self._apps = client.AppsV1Api()
             self._custom = client.CustomObjectsApi()
             self._k8s_ready = True
         except Exception as e:  # noqa: BLE001
@@ -81,6 +82,24 @@ class RolloutActions:
         ])
         return {"action": "set_image", "app": app_name, "namespace": namespace,
                 "image": new_image, "message": out}
+
+    def discard_preview(self, team: dict, app_name: str) -> dict:
+        """Discard a pending preview (green) by reverting the image to the active
+        (blue) version. Leaves the rollout Healthy with no preview — unlike a raw
+        abort, which leaves it Degraded."""
+        namespace, rollout = self._resolve(team, app_name)
+
+        active_image = self._active_image(namespace, rollout)
+        if not active_image:
+            raise ActionError("No active version to revert to (nothing to discard)", status=409)
+
+        container, _ = self._container_image(rollout)
+        out = self._run([
+            PLUGIN, "set", "image", app_name,
+            f"{container}={active_image}", "-n", namespace,
+        ])
+        return {"action": "discard", "app": app_name, "namespace": namespace,
+                "image": active_image, "message": out}
 
     # ------------------------------------------------------------------ #
     # Validation / lookup
@@ -114,6 +133,25 @@ class RolloutActions:
             logger.error(f"Failed to resolve namespace for team {team_id}: {e}")
             return None
         return ns_list.items[0].metadata.name if ns_list.items else None
+
+    def _active_image(self, namespace: str, rollout: dict) -> Optional[str]:
+        """The full image reference of the rollout's active (blue) ReplicaSet."""
+        status = rollout.get("status", {}) or {}
+        active_hash = (status.get("blueGreen", {}) or {}).get("activeSelector")
+        if not active_hash:
+            return None
+        try:
+            rs_list = self._apps.list_namespaced_replica_set(
+                namespace, label_selector=f"rollouts-pod-template-hash={active_hash}"
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Failed to list replicasets in {namespace}: {e}")
+            return None
+        for rs in rs_list.items:
+            containers = rs.spec.template.spec.containers if rs.spec.template else []
+            if containers:
+                return containers[0].image
+        return None
 
     def _container_image(self, rollout: dict) -> Tuple[str, str]:
         containers = (
