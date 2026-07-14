@@ -6,14 +6,14 @@
 .loading {
   text-align: center;
   padding: 40px;
-  color: #7f8c8d;
+  color: var(--text-muted);
   font-size: 18px;
 }
 
 .empty-state {
   text-align: center;
   padding: 40px;
-  color: #7f8c8d;
+  color: var(--text-muted);
 }
 
 .empty-state p {
@@ -27,17 +27,17 @@
 }
 
 .team-card {
-  border: 2px solid #ecf0f1;
+  border: 2px solid var(--border);
   border-radius: 8px;
   padding: 20px;
   transition: all 0.3s ease;
-  background: #fafafa;
+  background: var(--surface-2);
 }
 
 .team-card:hover {
-  border-color: #3498db;
+  border-color: var(--primary);
   transform: translateY(-2px);
-  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+  box-shadow: var(--shadow-sm);
 }
 
 .team-header {
@@ -48,18 +48,18 @@
 }
 
 .team-name {
-  color: #2c3e50;
+  color: var(--text);
   margin: 0;
   font-size: 1.3rem;
 }
 
 .team-name-link {
-  color: #2c3e50;
+  color: var(--text);
   text-decoration: none;
 }
 
 .team-name-link:hover {
-  color: #2980b9;
+  color: var(--primary-hover);
   text-decoration: underline;
 }
 
@@ -70,7 +70,7 @@
 
 .team-details p {
   margin: 5px 0;
-  color: #7f8c8d;
+  color: var(--text-muted);
   font-size: 14px;
 }
 
@@ -84,12 +84,12 @@
 }
 
 .btn-danger {
-  background-color: #e74c3c;
-  color: white;
+  background-color: var(--danger);
+  color: var(--on-solid);
 }
 
 .btn-danger:hover {
-  background-color: #c0392b;
+  background-color: var(--danger-hover);
 }
 
 .btn-sm {
@@ -100,9 +100,9 @@
 .teams-count {
   text-align: center;
   padding: 15px;
-  background: #ecf0f1;
+  background: var(--neutral-soft);
   border-radius: 6px;
-  color: #7f8c8d;
+  color: var(--text-muted);
   font-weight: 600;
 }
 
@@ -117,7 +117,7 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: #95a5a6;
+  color: var(--text-muted);
 }
 
 .app-groups {
@@ -128,9 +128,9 @@
 
 /* Application card (grouped by part-of) */
 .app-group {
-  border: 1px solid #dfe6ea;
+  border: 1px solid var(--border-strong);
   border-radius: 10px;
-  background: #f7fafc;
+  background: var(--surface-2);
   padding: 10px 12px;
 }
 
@@ -143,14 +143,14 @@
 
 .app-group-name {
   font-weight: 800;
-  color: #2c3e50;
+  color: var(--text);
   font-size: 15px;
   text-transform: capitalize;
 }
 
 .app-group-count {
   font-size: 11px;
-  color: #95a5a6;
+  color: var(--text-faint);
 }
 
 /* Component cards nested inside an application card */
@@ -162,10 +162,10 @@
 
 .component-card {
   display: block;
-  border: 1px solid #e3e9ec;
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 10px 12px;
-  background: #fff;
+  background: var(--surface-3);
   color: inherit;
   text-decoration: none;
 }
@@ -176,19 +176,19 @@
 }
 
 .component-card.linkable:hover {
-  border-color: #3498db;
-  box-shadow: 0 3px 8px rgba(52, 152, 219, 0.18);
+  border-color: var(--primary);
+  box-shadow: 0 3px 8px var(--primary-soft);
   transform: translateY(-1px);
 }
 
 .dash-link {
-  color: #3498db;
+  color: var(--primary);
   font-weight: 700;
   font-size: 13px;
 }
 
 .component-card.linkable:hover .dash-link {
-  color: #2471a3;
+  color: var(--primary-hover);
 }
 
 .component-head {
@@ -200,7 +200,7 @@
 
 .app-name {
   font-weight: 700;
-  color: #2c3e50;
+  color: var(--text);
   font-size: 14px;
 }
 
@@ -210,25 +210,25 @@
   font-weight: 700;
   padding: 2px 8px;
   border-radius: 10px;
-  background: #ecf0f1;
-  color: #7f8c8d;
+  background: var(--neutral-soft);
+  color: var(--text-muted);
 }
 
 .phase-Healthy {
-  background: #eafaf1;
-  color: #27ae60;
+  background: var(--success-soft);
+  color: var(--success);
 }
 .phase-Paused {
-  background: #fef5e7;
-  color: #e67e22;
+  background: var(--warning-soft);
+  color: var(--warning);
 }
 .phase-Progressing {
-  background: #eaf2fb;
-  color: #2980b9;
+  background: var(--info-soft);
+  color: var(--info);
 }
 .phase-Degraded {
-  background: #fdecea;
-  color: #e74c3c;
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 .meta {
@@ -247,27 +247,27 @@
 
 .meta-row dt {
   flex: 0 0 62px;
-  color: #95a5a6;
+  color: var(--text-muted);
   font-weight: 600;
 }
 
 .meta-row dd {
   margin: 0;
-  color: #2c3e50;
+  color: var(--text);
   word-break: break-all;
 }
 
 .meta-row dd.mono {
   font-family: "Courier New", monospace;
   font-size: 11px;
-  color: #566573;
+  color: var(--text-muted);
 }
 
 .promote-flag {
   font-size: 11px;
   font-weight: 700;
-  color: #e67e22;
-  background: #fef5e7;
+  color: var(--warning);
+  background: var(--warning-soft);
   padding: 1px 7px;
   border-radius: 10px;
   margin-left: 4px;
@@ -275,7 +275,7 @@
 
 .apps-empty {
   margin: 0;
-  color: #b0b8bd;
+  color: var(--text-faint);
   font-size: 13px;
   font-style: italic;
 }
@@ -283,7 +283,7 @@
 /* --- Compliance --- */
 .compliance {
   margin-top: 15px;
-  border-top: 1px solid #ecf0f1;
+  border-top: 1px solid var(--border);
   padding-top: 12px;
 }
 
@@ -308,30 +308,30 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.03em;
-  color: #fff;
+  color: var(--on-solid);
   white-space: nowrap;
 }
 
 .badge-compliant {
-  background-color: #27ae60;
+  background-color: var(--solid-success);
 }
 
 .badge-non_compliant {
-  background-color: #e74c3c;
+  background-color: var(--solid-danger);
 }
 
 .badge-unknown {
-  background-color: #95a5a6;
+  background-color: var(--solid-neutral);
 }
 
 .policy-count {
   flex: 1;
-  color: #7f8c8d;
+  color: var(--text-muted);
   font-size: 13px;
 }
 
 .chevron {
-  color: #b0b8bd;
+  color: var(--text-faint);
   font-size: 11px;
 }
 
@@ -341,7 +341,7 @@
 
 .detail-loading,
 .detail-empty {
-  color: #7f8c8d;
+  color: var(--text-muted);
   font-size: 13px;
   font-style: italic;
   margin: 6px 0;
@@ -359,13 +359,13 @@
 .policy {
   border-radius: 6px;
   padding: 8px 10px;
-  background: #fff;
-  border: 1px solid #ecf0f1;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
 }
 
 .policy-fail {
-  border-color: #f5b7b1;
-  background: #fdf2f1;
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
 }
 
 .policy-head {
@@ -379,29 +379,29 @@
 }
 
 .policy-ok .policy-mark {
-  color: #27ae60;
+  color: var(--success);
 }
 
 .policy-fail .policy-mark {
-  color: #e74c3c;
+  color: var(--danger);
 }
 
 .policy-name {
   font-weight: 600;
-  color: #2c3e50;
+  color: var(--text);
   font-size: 14px;
 }
 
 .policy-kind {
-  color: #95a5a6;
+  color: var(--text-muted);
   font-size: 12px;
   font-family: "Courier New", monospace;
 }
 
 .policy-vcount {
   margin-left: auto;
-  background: #e74c3c;
-  color: #fff;
+  background: var(--solid-danger);
+  color: var(--on-solid);
   border-radius: 10px;
   padding: 1px 8px;
   font-size: 12px;
@@ -412,7 +412,7 @@
   list-style: disc;
   margin: 6px 0 0;
   padding-left: 26px;
-  color: #7f8c8d;
+  color: var(--text-muted);
   font-size: 12px;
 }
 

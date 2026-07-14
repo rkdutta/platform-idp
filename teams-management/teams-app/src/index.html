@@ -7,6 +7,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" type="image/x-icon" href="favicon.ico">
   <meta name="description" content="Engineering Platform for creating and managing teams">
+  <!-- Set the theme before first paint to avoid a light flash on load.
+       Must stay in sync with ThemeService (same storage key, default dark). -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem('teams-portal-theme');
+        document.documentElement.setAttribute('data-theme', t === 'light' ? 'light' : 'dark');
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'dark');
+      }
+    })();
+  </script>
 </head>
 <body>
   <app-root></app-root>

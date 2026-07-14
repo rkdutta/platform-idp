@@ -65,6 +65,7 @@
 // src/app/components/header/header.component.ts
 import { Component, OnInit } from "@angular/core";
 import { AuthService } from "../../services/auth.service";
+import { ThemeService } from "../../services/theme.service";
 import { KeycloakProfile } from "keycloak-js";
 
 @Component({
@@ -78,7 +79,14 @@ export class HeaderComponent implements OnInit {
   userRoles: string[] = [];
   isLoading = true;
 
-  constructor(public authService: AuthService) {}
+  constructor(
+    public authService: AuthService,
+    public themeService: ThemeService,
+  ) {}
+
+  toggleTheme() {
+    this.themeService.toggle();
+  }
 
   async ngOnInit() {
     const tokenInfo = this.authService.getUserInfoFromToken();

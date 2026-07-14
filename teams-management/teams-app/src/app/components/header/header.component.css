@@ -1,6 +1,6 @@
 .header {
-  background: white;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
   padding: 20px 0;
   margin-bottom: 40px;
 }
@@ -15,13 +15,13 @@
 }
 
 .header-left h1 {
-  color: #2c3e50;
+  color: var(--text);
   font-size: 2rem;
   margin: 0;
 }
 
 .subtitle {
-  color: #7f8c8d;
+  color: var(--text-muted);
   font-size: 1rem;
   margin: 0;
 }
@@ -37,7 +37,7 @@
 }
 
 .welcome-text {
-  color: #2c3e50;
+  color: var(--text);
   font-weight: 500;
   display: block;
   margin-bottom: 5px;
@@ -50,12 +50,36 @@
 }
 
 .role-badge {
-  background: #3498db;
-  color: white;
+  background: var(--primary);
+  color: var(--primary-contrast);
   padding: 2px 8px;
   border-radius: 12px;
   font-size: 12px;
   text-transform: uppercase;
+}
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  transition: all 0.2s ease;
+}
+
+.theme-toggle:hover {
+  border-color: var(--primary);
+  transform: translateY(-1px);
+}
+
+.theme-toggle-icon {
+  display: block;
 }
 
 .btn {
@@ -69,21 +93,21 @@
 }
 
 .btn-primary {
-  background-color: #3498db;
-  color: white;
+  background-color: var(--primary);
+  color: var(--primary-contrast);
 }
 
 .btn-primary:hover {
-  background-color: #2980b9;
+  background-color: var(--primary-hover);
 }
 
 .btn-secondary {
-  background-color: #95a5a6;
-  color: white;
+  background-color: var(--solid-neutral);
+  color: var(--on-solid);
 }
 
 .btn-secondary:hover {
-  background-color: #7f8c8d;
+  background-color: var(--solid-neutral-hover);
 }
 
 @media (max-width: 768px) {
@@ -92,11 +116,11 @@
     gap: 15px;
     text-align: center;
   }
-  
+
   .user-info {
     text-align: center;
   }
-  
+
   .user-roles {
     justify-content: center;
   }

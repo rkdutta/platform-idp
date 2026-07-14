@@ -5,9 +5,112 @@
   box-sizing: border-box;
 }
 
+/*
+ * Theme tokens. Dark is the default (:root and [data-theme="dark"]); light
+ * overrides them. Components reference only these variables so a single
+ * data-theme flip on <html> re-themes the whole portal.
+ */
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #0f172a;
+  --surface: #1e293b;
+  --surface-2: #172033;
+  --surface-3: #24324a;
+
+  --border: #334155;
+  --border-strong: #475569;
+
+  --text: #e2e8f0;
+  --text-muted: #94a3b8;
+  --text-faint: #64748b;
+
+  --input-bg: #0f172a;
+
+  --primary: #3b82c9;
+  --primary-hover: #5093d6;
+  --primary-contrast: #ffffff;
+  --primary-soft: rgba(59, 130, 201, 0.18);
+
+  --danger: #ef5350;
+  --danger-hover: #e53935;
+  --danger-soft: rgba(239, 83, 80, 0.14);
+  --danger-border: rgba(239, 83, 80, 0.45);
+
+  --success: #4ade80;
+  --success-soft: rgba(46, 204, 113, 0.16);
+
+  --warning: #f5b041;
+  --warning-soft: rgba(230, 126, 34, 0.16);
+
+  --info: #5dade2;
+  --info-soft: rgba(41, 128, 185, 0.22);
+
+  --neutral-soft: rgba(148, 163, 184, 0.16);
+
+  --solid-success: #22a35a;
+  --solid-danger: #d84343;
+  --solid-neutral: #475569;
+  --solid-neutral-hover: #556377;
+  --on-solid: #ffffff;
+
+  --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f5f5f5;
+  --surface: #ffffff;
+  --surface-2: #fafafa;
+  --surface-3: #ffffff;
+
+  --border: #ecf0f1;
+  --border-strong: #dfe6ea;
+
+  --text: #2c3e50;
+  --text-muted: #7f8c8d;
+  --text-faint: #b0b8bd;
+
+  --input-bg: #ffffff;
+
+  --primary: #3498db;
+  --primary-hover: #2980b9;
+  --primary-contrast: #ffffff;
+  --primary-soft: rgba(52, 152, 219, 0.1);
+
+  --danger: #e74c3c;
+  --danger-hover: #c0392b;
+  --danger-soft: #fdf2f1;
+  --danger-border: #f5b7b1;
+
+  --success: #27ae60;
+  --success-soft: #eafaf1;
+
+  --warning: #e67e22;
+  --warning-soft: #fef5e7;
+
+  --info: #2980b9;
+  --info-soft: #eaf2fb;
+
+  --neutral-soft: #ecf0f1;
+
+  --solid-success: #27ae60;
+  --solid-danger: #e74c3c;
+  --solid-neutral: #95a5a6;
+  --solid-neutral-hover: #7f8c8d;
+  --on-solid: #ffffff;
+
+  --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.1);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   line-height: 1.6;
-  color: #333;
-  background-color: #f5f5f5;
+  color: var(--text);
+  background-color: var(--bg);
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
