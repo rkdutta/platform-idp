@@ -94,6 +94,11 @@ class ComplianceChecker:
         namespace = self._team_namespaces().get(team["id"])
         return self._evaluate(team, namespace, scan, detailed=True)
 
+    def scan(self) -> dict:
+        """Expose the cached cluster scan (constraints + violations + match
+        scope) so per-app compliance can attribute Gatekeeper results."""
+        return self._get_scan()
+
     # ------------------------------------------------------------------ #
     # Evaluation
     # ------------------------------------------------------------------ #
@@ -213,11 +218,17 @@ class ComplianceChecker:
             for obj in objs.get("items", []):
                 spec = obj.get("spec", {}) or {}
                 status = obj.get("status", {}) or {}
+                match = spec.get("match", {}) or {}
                 constraints.append({
                     "name": obj.get("metadata", {}).get("name", ""),
                     "kind": kind,
                     "enforcement_action": spec.get("enforcementAction", "deny"),
                     "violations": status.get("violations", []) or [],
+                    # Match scope, so per-app compliance can tell which apps a
+                    # constraint actually governs.
+                    "match_namespaces": match.get("namespaces") or [],
+                    "match_excluded_namespaces": match.get("excludedNamespaces") or [],
+                    "match_kinds": match.get("kinds") or [],
                 })
 
         return {"available": True, "reason": None,
