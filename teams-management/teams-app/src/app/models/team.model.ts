@@ -44,6 +44,25 @@ export interface RolloutStatus {
   awaiting_promotion: boolean;
 }
 
+export interface AppPolicyResult {
+  id: string;
+  name: string;
+  category: string; // supply-chain | gatekeeper
+  compliant: boolean;
+  detail?: string;
+  kind?: string | null;
+  enforcement_action?: string | null;
+  messages?: string[];
+}
+
+export interface AppCompliance {
+  status: ComplianceStatus; // compliant | non_compliant | unknown
+  reason?: string | null;
+  total_policies: number;
+  failing_policies: number;
+  policies: AppPolicyResult[];
+}
+
 export interface Application {
   name: string;
   version: string;
@@ -54,6 +73,7 @@ export interface Application {
   part_of?: string | null; // app.kubernetes.io/part-of (grouping key)
   component?: string | null; // app.kubernetes.io/component (web | api)
   url?: string | null; // browser URL: web -> page, api -> Swagger docs
+  compliance?: AppCompliance | null;
   rollout?: RolloutStatus | null;
 }
 

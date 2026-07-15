@@ -137,6 +137,29 @@ export class TeamListComponent implements OnInit {
     return app.component === "api" ? "API docs" : "Open app";
   }
 
+  // Per-app compliance expand state, keyed by "<teamId>:<appName>".
+  appComplianceExpanded: { [key: string]: boolean } = {};
+
+  toggleAppCompliance(teamId: string, app: Application) {
+    const key = `${teamId}:${app.name}`;
+    this.appComplianceExpanded[key] = !this.appComplianceExpanded[key];
+  }
+
+  isAppComplianceExpanded(teamId: string, app: Application): boolean {
+    return !!this.appComplianceExpanded[`${teamId}:${app.name}`];
+  }
+
+  appStatusLabel(app: Application): string {
+    switch (app.compliance?.status) {
+      case "compliant":
+        return "Compliant";
+      case "non_compliant":
+        return "Non-compliant";
+      default:
+        return "Unknown";
+    }
+  }
+
   // Link to the team namespace's rollout list in the Argo Rollouts dashboard.
   teamDashboardUrl(teamId: string): string | null {
     const ns = this.teamNamespace[teamId];

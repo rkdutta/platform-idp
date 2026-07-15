@@ -480,3 +480,76 @@
   margin: 2px 0;
   word-break: break-word;
 }
+
+/* --- Per-app compliance (on each component card) --- */
+.app-compliance {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.app-compliance-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.app-compliance-toggle[disabled] {
+  cursor: default;
+}
+
+.app-compliance-count {
+  flex: 1;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.badge-sm {
+  padding: 2px 8px;
+  font-size: 10px;
+}
+
+.app-compliance .policy-list {
+  margin-top: 8px;
+}
+
+.app-compliance .policy {
+  background: var(--surface-2);
+}
+
+.app-compliance .policy-fail {
+  background: var(--danger-soft);
+}
+
+.policy-cat {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 6px;
+  border-radius: 8px;
+}
+
+.cat-supply-chain {
+  background: var(--info-soft);
+  color: var(--info);
+}
+
+.cat-gatekeeper {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.policy-detail {
+  margin: 4px 0 0 22px;
+  font-size: 11px;
+  color: var(--text-muted);
+}

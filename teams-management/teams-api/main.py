@@ -11,6 +11,7 @@ from pathlib import Path
 
 from compliance import ComplianceChecker
 from workloads import ApplicationsReader
+from app_compliance import AppComplianceReader
 
 logger = logging.getLogger("teams-api")
 
@@ -70,6 +71,9 @@ compliance_checker = ComplianceChecker()
 # portal is read-only here.
 applications_reader = ApplicationsReader()
 
+# Per-app compliance (supply-chain evidence + Gatekeeper), attached to each app.
+app_compliance_reader = AppComplianceReader(compliance_checker)
+
 # Pydantic models
 class TeamCreate(BaseModel):
     name: str
@@ -108,6 +112,23 @@ class RolloutStatus(BaseModel):
     preview_version: Optional[str] = None
     awaiting_promotion: bool = False
 
+class AppPolicyResult(BaseModel):
+    id: str
+    name: str
+    category: str                    # supply-chain | gatekeeper
+    compliant: bool
+    detail: str = ""
+    kind: Optional[str] = None       # gatekeeper constraint kind
+    enforcement_action: Optional[str] = None
+    messages: List[str] = []
+
+class AppCompliance(BaseModel):
+    status: str                      # compliant | non_compliant | unknown
+    reason: Optional[str] = None
+    total_policies: int
+    failing_policies: int
+    policies: List[AppPolicyResult] = []
+
 class Application(BaseModel):
     name: str
     version: str
@@ -118,6 +139,7 @@ class Application(BaseModel):
     part_of: Optional[str] = None    # app.kubernetes.io/part-of (grouping key)
     component: Optional[str] = None  # app.kubernetes.io/component (web | api)
     url: Optional[str] = None        # browser URL: web -> page, api -> docs
+    compliance: Optional[AppCompliance] = None
     rollout: Optional[RolloutStatus] = None
 
 class TeamApplications(BaseModel):
@@ -187,10 +209,20 @@ def get_team_compliance(team_id: str):
 
     return compliance_checker.evaluate_team(teams_store[team_id])
 
+def _attach_compliance(team_apps: dict) -> dict:
+    """Attach per-app compliance (supply-chain + Gatekeeper) to each app."""
+    namespace = team_apps.get("namespace")
+    for app in team_apps.get("applications", []):
+        app["compliance"] = app_compliance_reader.compliance_for(app, namespace)
+    return team_apps
+
 @app.get("/applications", response_model=List[TeamApplications])
 def get_all_applications():
-    """Applications (name + version) running in every team's namespace."""
-    return applications_reader.applications_for_all(list(teams_store.values()))
+    """Applications (name + version + compliance) in every team's namespace."""
+    return [
+        _attach_compliance(ta)
+        for ta in applications_reader.applications_for_all(list(teams_store.values()))
+    ]
 
 @app.get("/teams/{team_id}/applications", response_model=TeamApplications)
 def get_team_applications(team_id: str):
@@ -198,7 +230,9 @@ def get_team_applications(team_id: str):
     if team_id not in teams_store:
         raise HTTPException(status_code=404, detail="Team not found")
 
-    return applications_reader.applications_for_team(teams_store[team_id])
+    return _attach_compliance(
+        applications_reader.applications_for_team(teams_store[team_id])
+    )
 
 @app.get("/health")
 async def health_check():

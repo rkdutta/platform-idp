@@ -101,6 +101,65 @@
                   </div>
                 </dl>
 
+                <!-- Per-app compliance: supply-chain evidence + Gatekeeper -->
+                <div class="app-compliance" *ngIf="app.compliance">
+                  <button
+                    class="app-compliance-toggle"
+                    (click)="toggleAppCompliance(team.id, app)"
+                    [attr.aria-expanded]="isAppComplianceExpanded(team.id, app)"
+                    [disabled]="!app.compliance.policies.length"
+                  >
+                    <span
+                      class="badge badge-sm"
+                      [ngClass]="'badge-' + app.compliance.status"
+                      >{{ appStatusLabel(app) }}</span
+                    >
+                    <span class="app-compliance-count">
+                      <ng-container *ngIf="app.compliance.status === 'non_compliant'">
+                        {{ app.compliance.failing_policies }}/{{
+                          app.compliance.total_policies
+                        }}
+                        policies failing
+                      </ng-container>
+                      <ng-container *ngIf="app.compliance.status === 'compliant'">
+                        {{ app.compliance.total_policies }} policies verified
+                      </ng-container>
+                      <ng-container *ngIf="app.compliance.status === 'unknown'">
+                        {{ app.compliance.reason || "No evidence" }}
+                      </ng-container>
+                    </span>
+                    <span class="chevron" *ngIf="app.compliance.policies.length">{{
+                      isAppComplianceExpanded(team.id, app) ? "▲" : "▼"
+                    }}</span>
+                  </button>
+
+                  <ul
+                    class="policy-list"
+                    *ngIf="
+                      isAppComplianceExpanded(team.id, app) &&
+                      app.compliance.policies.length
+                    "
+                  >
+                    <li
+                      class="policy"
+                      *ngFor="let p of app.compliance.policies"
+                      [ngClass]="p.compliant ? 'policy-ok' : 'policy-fail'"
+                    >
+                      <div class="policy-head">
+                        <span class="policy-mark">{{ p.compliant ? "✓" : "✗" }}</span>
+                        <span class="policy-name">{{ p.name }}</span>
+                        <span class="policy-cat" [ngClass]="'cat-' + p.category">{{
+                          p.category
+                        }}</span>
+                      </div>
+                      <p class="policy-detail" *ngIf="p.detail">{{ p.detail }}</p>
+                      <ul class="policy-messages" *ngIf="p.messages?.length">
+                        <li *ngFor="let m of p.messages">{{ m }}</li>
+                      </ul>
+                    </li>
+                  </ul>
+                </div>
+
                 <div
                   class="component-links"
                   *ngIf="app.url || rolloutDashboardUrl(team.id, app)"
