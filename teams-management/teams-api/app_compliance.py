@@ -156,6 +156,13 @@ class AppComplianceReader:
                 if v.get("namespace") == namespace and self._refs_app(v, app)
             ]
             compliant = len(viols) == 0
+            # Gatekeeper records one violation per Pod/replica (and one for the
+            # Rollout), so a single logical finding — e.g. "coverage 0%" — repeats
+            # across identical messages. De-duplicate by message for the card,
+            # preserving first-seen order.
+            messages = list(dict.fromkeys(
+                v.get("message", "") for v in viols if v.get("message")
+            ))
             out.append({
                 "id": f"gk:{c['kind']}:{c['name']}",
                 "name": c["name"],
@@ -164,8 +171,8 @@ class AppComplianceReader:
                 "enforcement_action": c.get("enforcement_action", "deny"),
                 "compliant": compliant,
                 "detail": ("no violations" if compliant
-                           else f"{len(viols)} violation(s)"),
-                "messages": [v.get("message", "") for v in viols],
+                           else f"{len(messages)} violation(s)"),
+                "messages": messages,
             })
         return out
 

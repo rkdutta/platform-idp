@@ -134,13 +134,18 @@ class ComplianceChecker:
             if not is_compliant:
                 failing += 1
             if detailed:
+                # Gatekeeper records one violation per Pod/replica; collapse
+                # identical messages so the same finding isn't shown repeatedly.
+                messages = list(dict.fromkeys(
+                    v.get("message", "") for v in ns_violations if v.get("message")
+                ))
                 policies.append({
                     "name": constraint["name"],
                     "kind": constraint["kind"],
                     "enforcement_action": constraint["enforcement_action"],
                     "compliant": is_compliant,
-                    "violation_count": len(ns_violations),
-                    "messages": [v.get("message", "") for v in ns_violations],
+                    "violation_count": len(messages),
+                    "messages": messages,
                 })
 
         status = STATUS_NON_COMPLIANT if failing else STATUS_COMPLIANT
