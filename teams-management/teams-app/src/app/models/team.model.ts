@@ -52,6 +52,8 @@ export interface Application {
   replicas: number;
   ready_replicas: number;
   part_of?: string | null; // app.kubernetes.io/part-of (grouping key)
+  component?: string | null; // app.kubernetes.io/component (web | api)
+  url?: string | null; // browser URL: web -> page, api -> Swagger docs
   rollout?: RolloutStatus | null;
 }
 

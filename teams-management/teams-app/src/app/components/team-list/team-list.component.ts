@@ -131,6 +131,12 @@ export class TeamListComponent implements OnInit {
     return ref;
   }
 
+  // Label for an app's external link: API apps point at their docs, everything
+  // else at the app's page.
+  appLinkLabel(app: Application): string {
+    return app.component === "api" ? "API docs" : "Open app";
+  }
+
   // Link to the team namespace's rollout list in the Argo Rollouts dashboard.
   teamDashboardUrl(teamId: string): string | null {
     const ns = this.teamNamespace[teamId];

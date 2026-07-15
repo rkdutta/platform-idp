@@ -55,24 +55,12 @@
             </div>
 
             <div class="component-list">
-              <a
-                class="component-card"
-                *ngFor="let app of group.apps"
-                [class.linkable]="rolloutDashboardUrl(team.id, app)"
-                [href]="rolloutDashboardUrl(team.id, app)"
-                [attr.target]="rolloutDashboardUrl(team.id, app) ? '_blank' : null"
-                [attr.rel]="rolloutDashboardUrl(team.id, app) ? 'noopener noreferrer' : null"
-                [attr.title]="
-                  rolloutDashboardUrl(team.id, app)
-                    ? 'Open ' + app.name + ' in the Argo Rollouts dashboard'
-                    : null
-                "
-              >
+              <div class="component-card" *ngFor="let app of group.apps">
                 <div class="component-head">
                   <span class="app-name">{{ app.name }}</span>
-                  <span class="dash-link" *ngIf="rolloutDashboardUrl(team.id, app)"
-                    >↗</span
-                  >
+                  <span class="app-component" *ngIf="app.component">{{
+                    app.component
+                  }}</span>
                   <span
                     class="app-phase"
                     *ngIf="app.rollout"
@@ -112,7 +100,36 @@
                     <dd>{{ app.ready_replicas }}/{{ app.replicas }} ready</dd>
                   </div>
                 </dl>
-              </a>
+
+                <div
+                  class="component-links"
+                  *ngIf="app.url || rolloutDashboardUrl(team.id, app)"
+                >
+                  <a
+                    class="clink clink-app"
+                    *ngIf="app.url"
+                    [href]="app.url"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    [title]="
+                      (app.component === 'api' ? 'Open the API docs for ' : 'Open ') +
+                      app.name
+                    "
+                  >
+                    {{ appLinkLabel(app) }} ↗
+                  </a>
+                  <a
+                    class="clink"
+                    *ngIf="rolloutDashboardUrl(team.id, app) as rurl"
+                    [href]="rurl"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    [title]="'Open ' + app.name + ' in the Argo Rollouts dashboard'"
+                  >
+                    Rollout ↗
+                  </a>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -121,8 +138,9 @@
         </ng-template>
       </div>
 
-      <!-- Compliance -->
+      <!-- Compliance (namespace-scoped, NOT application-level) -->
       <div class="compliance">
+        <p class="compliance-label">Namespace policy compliance</p>
         <button
           class="compliance-toggle"
           (click)="toggleDetail(team.id)"
@@ -148,6 +166,12 @@
           </span>
           <span class="chevron">{{ expanded[team.id] ? "▲" : "▼" }}</span>
         </button>
+
+        <p class="compliance-note">
+          Reflects platform (Gatekeeper) policies enforced on the team's
+          <code>{{ teamNamespace[team.id] || "namespace" }}</code> namespace — not
+          application-level checks such as CVEs or image signing.
+        </p>
 
         <div class="compliance-detail" *ngIf="expanded[team.id]">
           <div class="detail-loading" *ngIf="loadingDetail[team.id]">

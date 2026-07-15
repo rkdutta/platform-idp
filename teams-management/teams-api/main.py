@@ -47,7 +47,7 @@ def save_teams() -> None:
 app = FastAPI(
     title="Teams API",
     description="A simple API for team leads to create and manage teams",
-    version="1.0.0"
+    version="1.1.0"
 )
 
 # Configure CORS
@@ -116,6 +116,8 @@ class Application(BaseModel):
     replicas: int
     ready_replicas: int
     part_of: Optional[str] = None    # app.kubernetes.io/part-of (grouping key)
+    component: Optional[str] = None  # app.kubernetes.io/component (web | api)
+    url: Optional[str] = None        # browser URL: web -> page, api -> docs
     rollout: Optional[RolloutStatus] = None
 
 class TeamApplications(BaseModel):

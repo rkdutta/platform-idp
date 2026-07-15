@@ -15,6 +15,7 @@ Team -> namespace is resolved via the label the teams-operator stamps
 """
 
 import logging
+import os
 import threading
 import time
 from typing import Dict, List, Optional
@@ -28,6 +29,13 @@ TEAM_ID_LABEL = "teams.example.com/team-id"
 NAME_LABEL = "app.kubernetes.io/name"
 VERSION_LABEL = "app.kubernetes.io/version"
 PART_OF_LABEL = "app.kubernetes.io/part-of"
+# Classifies an app so the portal can offer the right link: a "web" card links
+# to the page, an "api" card links to its Swagger/OpenAPI docs.
+COMPONENT_LABEL = "app.kubernetes.io/component"
+# Where an API serves its docs (overrides the /docs default), and where a web
+# app's landing page lives (overrides the / default).
+DOCS_PATH_ANNOTATION = "platform.example.com/docs-path"
+URL_PATH_ANNOTATION = "platform.example.com/url-path"
 
 ROLLOUT_GROUP = "argoproj.io"
 ROLLOUT_VERSION = "v1alpha1"
@@ -49,6 +57,11 @@ class ApplicationsReader:
         self._cache: Dict[str, dict] = {}  # namespace -> {"apps": [...], "at": ts}
         self._k8s_ready = False
 
+        # Browser-facing ingress scheme/port, used to turn an Ingress host into a
+        # clickable URL. Defaults match the kind platform (nginx on :8080).
+        self._ingress_scheme = os.getenv("PUBLIC_INGRESS_SCHEME", "http")
+        self._ingress_port = os.getenv("PUBLIC_INGRESS_PORT", "8080")
+
         try:
             try:
                 config.load_incluster_config()
@@ -59,6 +72,7 @@ class ApplicationsReader:
             self._core = client.CoreV1Api()
             self._apps = client.AppsV1Api()
             self._custom = client.CustomObjectsApi()
+            self._net = client.NetworkingV1Api()
             self._k8s_ready = True
         except Exception as e:  # noqa: BLE001 - degrade gracefully, never crash the API
             logger.error(f"Kubernetes client unavailable, applications will be empty: {e}")
@@ -100,15 +114,21 @@ class ApplicationsReader:
 
         apps: List[dict] = []
         rs_versions = self._replicaset_versions(namespace)
-        apps.extend(self._rollouts(namespace, rs_versions))
-        apps.extend(self._deployments(namespace))
+        ingress = self._ingress_hosts(namespace)
+        apps.extend(self._rollouts(namespace, rs_versions, ingress))
+        apps.extend(self._deployments(namespace, ingress))
         apps.sort(key=lambda a: a["name"])
 
         with self._lock:
             self._cache[namespace] = {"apps": apps, "at": time.time()}
         return apps
 
-    def _rollouts(self, namespace: str, rs_versions: Dict[str, Dict[str, str]]) -> List[dict]:
+    def _rollouts(
+        self,
+        namespace: str,
+        rs_versions: Dict[str, Dict[str, str]],
+        ingress: Dict[str, str],
+    ) -> List[dict]:
         try:
             objs = self._custom.list_namespaced_custom_object(
                 ROLLOUT_GROUP, ROLLOUT_VERSION, namespace, ROLLOUT_PLURAL
@@ -129,6 +149,11 @@ class ApplicationsReader:
             containers = (spec.get("template", {}).get("spec", {}) or {}).get("containers", [])
             image = containers[0].get("image", "") if containers else ""
             name = meta.get("name", "")
+            # The live host is served by the blue/green active Service.
+            strategy = spec.get("strategy", {}) or {}
+            active_service = (strategy.get("blueGreen", {}) or {}).get("activeService")
+            if not active_service:
+                active_service = (strategy.get("canary", {}) or {}).get("stableService")
 
             app = self._to_app(
                 name=name,
@@ -137,6 +162,9 @@ class ApplicationsReader:
                 kind="Rollout",
                 replicas=spec.get("replicas"),
                 ready=status.get("readyReplicas"),
+                annotations=meta.get("annotations", {}),
+                serving_service=active_service,
+                ingress=ingress,
             )
             app["rollout"] = self._rollout_status(spec, status, rs_versions.get(name, {}))
             # For a blue/green rollout the live version is the active one, which
@@ -203,7 +231,7 @@ class ApplicationsReader:
             result.setdefault(rollout, {})[pod_hash] = version
         return result
 
-    def _deployments(self, namespace: str) -> List[dict]:
+    def _deployments(self, namespace: str, ingress: Dict[str, str]) -> List[dict]:
         try:
             deps = self._apps.list_namespaced_deployment(namespace)
         except Exception as e:  # noqa: BLE001
@@ -222,11 +250,31 @@ class ApplicationsReader:
                 kind="Deployment",
                 replicas=dep.spec.replicas,
                 ready=dep.status.ready_replicas,
+                annotations=dep.metadata.annotations or {},
+                # A Deployment has no active/preview split; its Service usually
+                # shares its name, so fall back to that when matching an ingress.
+                serving_service=dep.metadata.name,
+                ingress=ingress,
             ))
         return apps
 
-    def _to_app(self, name, labels, image, kind, replicas, ready) -> dict:
+    def _to_app(
+        self,
+        name,
+        labels,
+        image,
+        kind,
+        replicas,
+        ready,
+        annotations=None,
+        serving_service=None,
+        ingress=None,
+    ) -> dict:
         labels = labels or {}
+        annotations = annotations or {}
+        ingress = ingress or {}
+        component = labels.get(COMPONENT_LABEL)
+        host = ingress.get(serving_service) if serving_service else ingress.get(name)
         return {
             "name": labels.get(NAME_LABEL) or name,
             "version": _resolve_version(image, labels.get(VERSION_LABEL)),
@@ -235,6 +283,8 @@ class ApplicationsReader:
             "replicas": replicas or 0,
             "ready_replicas": ready or 0,
             "part_of": labels.get(PART_OF_LABEL),
+            "component": component,
+            "url": self._app_url(host, component, annotations) if host else None,
             "rollout": None,  # populated for Rollout kind by _rollouts()
         }
 
@@ -255,6 +305,50 @@ class ApplicationsReader:
             if team_id:
                 mapping[team_id] = ns.metadata.name
         return mapping
+
+    def _ingress_hosts(self, namespace: str) -> Dict[str, str]:
+        """Map backend-Service name -> external host for the ingresses in a
+        namespace. Only the root ("/") path defines an app's canonical host, so
+        a web ingress's extra "/api" path (routing to the API Service) doesn't
+        steal the API app's own host."""
+        result: Dict[str, str] = {}
+        try:
+            ings = self._net.list_namespaced_ingress(namespace)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Could not list ingresses in {namespace}: {e}")
+            return result
+
+        for ing in ings.items:
+            for rule in ing.spec.rules or []:
+                host = rule.host
+                http = rule.http
+                if not host or not http:
+                    continue
+                for path in http.paths or []:
+                    if (path.path or "/") not in ("/", ""):
+                        continue
+                    svc = path.backend.service if path.backend else None
+                    if svc and svc.name:
+                        result[svc.name] = host
+        return result
+
+    def _app_url(self, host: str, component: Optional[str], annotations: dict) -> str:
+        """Build the browser URL for an app from its ingress host: an "api" app
+        links to its docs path (default /docs), anything else to its landing
+        path (default /)."""
+        base = f"{self._ingress_scheme}://{host}"
+        default_https = self._ingress_scheme == "https" and self._ingress_port == "443"
+        default_http = self._ingress_scheme == "http" and self._ingress_port == "80"
+        if self._ingress_port and not (default_https or default_http):
+            base = f"{base}:{self._ingress_port}"
+
+        if component == "api":
+            path = annotations.get(DOCS_PATH_ANNOTATION) or "/docs"
+        else:
+            path = annotations.get(URL_PATH_ANNOTATION) or "/"
+        if not path.startswith("/"):
+            path = "/" + path
+        return base + path
 
 
 def _image_tag(image: str) -> str:
