@@ -10,11 +10,11 @@
   <div class="container" *ngIf="isLoggedIn">
     <main
       class="main-content"
-      [class.read-only]="!authService.canManage()"
+      [class.read-only]="!authService.isAdmin()"
       *ngIf="authService.canView()"
     >
-      <!-- Create form is manage-only (team-leader/admin). Viewers don't see it. -->
-      <div class="form-section" *ngIf="authService.canManage()">
+      <!-- Creating a team is admin-only. Team-leaders and viewers don't see it. -->
+      <div class="form-section" *ngIf="authService.isAdmin()">
         <h2>Create New Team</h2>
         <app-team-form (teamCreated)="teamList.loadTeams()"></app-team-form>
       </div>
@@ -23,7 +23,11 @@
         <h2>Existing Teams</h2>
         <p class="view-only-note" *ngIf="!authService.canManage()">
           👁️ Read-only access — you can view teams and their applications, but not
-          create or delete them.
+          create teams or manage access.
+        </p>
+        <p class="view-only-note" *ngIf="authService.canManage() && !authService.isAdmin()">
+          🛠️ Team-lead access — you can order namespaces and manage who can see them
+          for your teams. Only admins can create or delete teams.
         </p>
         <app-team-list #teamList></app-team-list>
       </div>

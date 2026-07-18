@@ -153,6 +153,32 @@ def require_team_leader(request: Request) -> None:
         )
 
 
+def require_admin(request: Request) -> None:
+    """Route dependency for team lifecycle (create/delete): require the `admin` role."""
+    if not AUTH_ENABLED:
+        return
+    claims = getattr(request.state, "claims", None) or {}
+    if "admin" not in _roles(claims):
+        raise HTTPException(
+            status_code=403,
+            detail="Requires the 'admin' realm role",
+        )
+
+
+def require_manage(request: Request) -> None:
+    """Route dependency for access management (order namespaces, grant/revoke, list
+    users): require `admin` OR `team-leader`. Admins act cluster-wide; team-leaders
+    are further constrained to their own namespaces by namespace_scope at the route."""
+    if not AUTH_ENABLED:
+        return
+    claims = getattr(request.state, "claims", None) or {}
+    if not ({"admin", "team-leader"} & set(_roles(claims))):
+        raise HTTPException(
+            status_code=403,
+            detail="Requires the 'admin' or 'team-leader' realm role",
+        )
+
+
 def namespace_scope(request: Request):
     """Namespaces the caller is allowed to see.
 

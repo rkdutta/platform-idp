@@ -9,6 +9,11 @@
     <button class="btn btn-secondary" (click)="loadTeams()">Retry</button>
   </div>
 
+  <div class="error-message access-error" *ngIf="accessError">
+    {{ accessError }}
+    <button class="btn btn-secondary btn-sm" (click)="accessError = ''">Dismiss</button>
+  </div>
+
   <div class="empty-state" *ngIf="!isLoading && !errorMessage && teams.length === 0">
     <p>No teams created yet. Create your first team above!</p>
   </div>
@@ -38,7 +43,7 @@
         </h3>
         <span class="team-header-spacer"></span>
         <button
-          *ngIf="authService.canManage()"
+          *ngIf="authService.isAdmin()"
           class="btn btn-danger btn-sm"
           (click)="deleteTeam(team.id, team.name)"
           title="Delete team"
@@ -52,6 +57,77 @@
       <div class="team-details">
         <p class="team-id">ID: {{ team.id }}</p>
         <p class="team-created">Created: {{ formatDate(team.created_at) }}</p>
+      </div>
+
+      <!-- Namespaces + per-namespace access management -->
+      <div class="namespaces">
+        <p class="namespaces-label">Namespaces</p>
+        <div class="ns-list">
+          <div class="ns-item" *ngFor="let ns of team.namespaces">
+            <div class="ns-head">
+              <code class="ns-name">{{ ns }}</code>
+              <span class="ns-count" *ngIf="authService.canManage()"
+                >{{ usersFor(ns).length }} user(s)</span
+              >
+            </div>
+
+            <!-- Access management is team-leader / admin only -->
+            <div class="ns-access" *ngIf="authService.canManage()">
+              <ul class="member-list">
+                <li class="member" *ngFor="let u of usersFor(ns)">
+                  <span class="member-name">{{ u }}</span>
+                  <button
+                    class="btn-revoke"
+                    (click)="revoke(ns, u)"
+                    [title]="'Revoke ' + u + ' from ' + ns"
+                  >
+                    ✕
+                  </button>
+                </li>
+                <li class="member-empty" *ngIf="usersFor(ns).length === 0">
+                  No users assigned
+                </li>
+              </ul>
+
+              <div class="add-user">
+                <select [(ngModel)]="addUserSel[ns]" class="user-select">
+                  <option value="">Add user…</option>
+                  <option
+                    *ngFor="let u of assignableUsers(ns)"
+                    [value]="u.username"
+                  >
+                    {{ u.username }}{{ u.email ? " (" + u.email + ")" : "" }}
+                  </option>
+                </select>
+                <button
+                  class="btn btn-sm"
+                  (click)="grant(ns)"
+                  [disabled]="!addUserSel[ns]"
+                >
+                  Grant
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Order a new namespace (team-leader / admin) -->
+        <div class="order-ns" *ngIf="authService.canManage()">
+          <input
+            type="text"
+            class="order-input"
+            [(ngModel)]="orderLabel[team.id]"
+            placeholder="new namespace label (e.g. staging)"
+            (keyup.enter)="orderNamespace(team)"
+          />
+          <button
+            class="btn btn-sm"
+            (click)="orderNamespace(team)"
+            [disabled]="!orderLabel[team.id]"
+          >
+            + Order namespace
+          </button>
+        </div>
       </div>
 
       <!-- Applications, grouped into application cards (by part-of) -->
@@ -74,6 +150,12 @@
                   <span class="app-component" *ngIf="app.component">{{
                     app.component
                   }}</span>
+                  <span
+                    class="app-ns"
+                    *ngIf="app.namespace && team.namespaces.length > 1"
+                    [title]="'Namespace: ' + app.namespace"
+                    >{{ app.namespace }}</span
+                  >
                   <span
                     class="app-phase"
                     *ngIf="app.rollout"

@@ -80,19 +80,21 @@ class ComplianceChecker:
     # ------------------------------------------------------------------ #
 
     def summarize_all(self, teams: List[dict]) -> List[dict]:
-        """Return a compact compliance summary for every team (badge data)."""
+        """Return a compact compliance summary for every team (badge data).
+
+        Each `team` carries `namespaces` (already narrowed to what the caller may
+        see); compliance is aggregated across them."""
         scan = self._get_scan()
-        namespaces = self._team_namespaces()
         return [
-            self._evaluate(team, namespaces.get(team["id"]), scan, detailed=False)
+            self._evaluate(team, team.get("namespaces") or [], scan, detailed=False)
             for team in teams
         ]
 
     def evaluate_team(self, team: dict) -> dict:
-        """Return the detailed compliance breakdown for a single team."""
+        """Return the detailed compliance breakdown for a single team, aggregated
+        across the team's (in-scope) namespaces."""
         scan = self._get_scan()
-        namespace = self._team_namespaces().get(team["id"])
-        return self._evaluate(team, namespace, scan, detailed=True)
+        return self._evaluate(team, team.get("namespaces") or [], scan, detailed=True)
 
     def scan(self) -> dict:
         """Expose the cached cluster scan (constraints + violations + match
@@ -103,11 +105,13 @@ class ComplianceChecker:
     # Evaluation
     # ------------------------------------------------------------------ #
 
-    def _evaluate(self, team: dict, namespace: Optional[str], scan: dict, detailed: bool) -> dict:
+    def _evaluate(self, team: dict, namespaces: List[str], scan: dict, detailed: bool) -> dict:
         base = {
             "team_id": team["id"],
             "team_name": team["name"],
-            "namespace": namespace,
+            # Back-compat single-namespace field: set only when unambiguous.
+            "namespace": namespaces[0] if len(namespaces) == 1 else None,
+            "namespaces": list(namespaces),
             "checked_at": scan["checked_at"],
         }
 
@@ -117,27 +121,34 @@ class ComplianceChecker:
                     "failing_policies": 0, "total_policies": 0,
                     **({"policies": []} if detailed else {})}
 
-        if namespace is None:
+        if not namespaces:
             return {**base, "status": STATUS_UNKNOWN,
                     "reason": "Namespace not yet provisioned for this team",
                     "failing_policies": 0, "total_policies": len(scan["constraints"]),
                     **({"policies": []} if detailed else {})}
 
+        ns_set = set(namespaces)
+        multi = len(namespaces) > 1
         policies = []
         failing = 0
         for constraint in scan["constraints"]:
+            # A constraint fails for the team if it is violated in ANY of the
+            # team's (in-scope) namespaces.
             ns_violations = [
                 v for v in constraint["violations"]
-                if v.get("namespace") == namespace
+                if v.get("namespace") in ns_set
             ]
             is_compliant = len(ns_violations) == 0
             if not is_compliant:
                 failing += 1
             if detailed:
                 # Gatekeeper records one violation per Pod/replica; collapse
-                # identical messages so the same finding isn't shown repeatedly.
+                # identical messages. When a team spans multiple namespaces,
+                # prefix each message with the namespace it came from.
                 messages = list(dict.fromkeys(
-                    v.get("message", "") for v in ns_violations if v.get("message")
+                    (f"[{v.get('namespace')}] {v.get('message', '')}" if multi
+                     else v.get("message", ""))
+                    for v in ns_violations if v.get("message")
                 ))
                 policies.append({
                     "name": constraint["name"],

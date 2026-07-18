@@ -141,6 +141,145 @@
   font-weight: 600;
 }
 
+/* --- Namespaces + access management --- */
+.namespaces {
+  margin-top: 15px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.namespaces-label {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.ns-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ns-item {
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-3);
+  padding: 8px 10px;
+}
+
+.ns-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ns-name {
+  font-family: "Courier New", monospace;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  background: var(--neutral-soft);
+  padding: 1px 8px;
+  border-radius: 6px;
+}
+
+.ns-count {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.ns-access {
+  margin-top: 8px;
+}
+
+.member-list {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.member {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 2px 4px 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.member-name {
+  font-weight: 600;
+}
+
+.btn-revoke {
+  border: none;
+  background: transparent;
+  color: var(--danger);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 50%;
+}
+
+.btn-revoke:hover {
+  background: var(--danger-soft);
+}
+
+.member-empty {
+  font-size: 12px;
+  font-style: italic;
+  color: var(--text-faint);
+}
+
+.add-user,
+.order-ns {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.order-ns {
+  margin-top: 10px;
+}
+
+.user-select,
+.order-input {
+  flex: 1;
+  min-width: 160px;
+  padding: 6px 8px;
+  font-size: 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.app-ns {
+  font-size: 10px;
+  font-weight: 600;
+  font-family: "Courier New", monospace;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--neutral-soft);
+  color: var(--text-muted);
+}
+
+.access-error {
+  margin-bottom: 16px;
+}
+
 /* --- Applications --- */
 .applications {
   margin-top: 12px;

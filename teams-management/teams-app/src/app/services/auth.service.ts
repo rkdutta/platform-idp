@@ -229,7 +229,12 @@ export class AuthService {
     }
   }
 
-  /** Can create/delete teams (write). Mirrors the teams-api require_team_leader. */
+  /** Full admin: create/delete teams. Mirrors the teams-api require_admin. */
+  public isAdmin(): boolean {
+    return this.hasRole("admin");
+  }
+
+  /** Can manage access (order namespaces, grant/revoke). Mirrors require_manage. */
   public canManage(): boolean {
     return this.hasRole("team-leader") || this.hasRole("admin");
   }

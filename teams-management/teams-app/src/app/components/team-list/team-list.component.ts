@@ -9,6 +9,8 @@ import {
   ComplianceDetail,
   Application,
   ApplicationGroup,
+  UserRef,
+  NamespaceAccess,
 } from "../../models/team.model";
 
 @Component({
@@ -37,6 +39,17 @@ export class TeamListComponent implements OnInit {
   // Collapsed team cards, keyed by team id. Cards start expanded.
   collapsed: { [teamId: string]: boolean } = {};
 
+  // --- Access management (team-leader / admin only) ---
+  // namespace -> usernames who can see it (scoped to the caller's owned teams).
+  accessByNs: { [namespace: string]: string[] } = {};
+  // The full Keycloak user pool for the assignment picker.
+  allUsers: UserRef[] = [];
+  // Per-team "order namespace" label input.
+  orderLabel: { [teamId: string]: string } = {};
+  // Per-namespace selected user in the add-user picker.
+  addUserSel: { [namespace: string]: string } = {};
+  accessError = "";
+
   // public so the template can gate the Delete button on manage rights.
   constructor(
     private teamsService: TeamsService,
@@ -57,6 +70,10 @@ export class TeamListComponent implements OnInit {
         this.isLoading = false;
         this.loadCompliance();
         this.loadApplications();
+        if (this.authService.canManage()) {
+          this.loadAccess();
+          this.loadUsers();
+        }
       },
       error: (error) => {
         this.errorMessage = error;
@@ -71,6 +88,74 @@ export class TeamListComponent implements OnInit {
 
   isCollapsed(teamId: string): boolean {
     return !!this.collapsed[teamId];
+  }
+
+  // --- Access management --------------------------------------------------
+  loadAccess() {
+    this.teamsService.getAccess().subscribe({
+      next: (rows) => {
+        this.accessByNs = {};
+        for (const row of rows) {
+          this.accessByNs[row.namespace] = row.users;
+        }
+      },
+      error: (error) => console.error("Failed to load access:", error),
+    });
+  }
+
+  loadUsers() {
+    this.teamsService.getUsers().subscribe({
+      next: (users) => (this.allUsers = users),
+      error: (error) => console.error("Failed to load users:", error),
+    });
+  }
+
+  usersFor(namespace: string): string[] {
+    return this.accessByNs[namespace] || [];
+  }
+
+  // Users not already granted the namespace — the pool the picker offers.
+  assignableUsers(namespace: string): UserRef[] {
+    const granted = new Set(this.usersFor(namespace));
+    return this.allUsers.filter((u) => !granted.has(u.username));
+  }
+
+  orderNamespace(team: Team) {
+    const label = (this.orderLabel[team.id] || "").trim();
+    if (!label) {
+      return;
+    }
+    this.accessError = "";
+    this.teamsService.orderNamespace(team.id, label).subscribe({
+      next: () => {
+        this.orderLabel[team.id] = "";
+        this.loadTeams(); // refresh namespaces + access
+      },
+      error: (error) => (this.accessError = error),
+    });
+  }
+
+  grant(namespace: string) {
+    const username = this.addUserSel[namespace];
+    if (!username) {
+      return;
+    }
+    this.accessError = "";
+    this.teamsService.grantAccess(namespace, username).subscribe({
+      next: () => {
+        this.addUserSel[namespace] = "";
+        this.loadAccess();
+      },
+      error: (error) => (this.accessError = error),
+    });
+  }
+
+  revoke(namespace: string, username: string) {
+    this.accessError = "";
+    this.teamsService.revokeAccess(namespace, username).subscribe({
+      next: () => this.loadAccess(),
+      error: (error) => (this.accessError = error),
+    });
   }
 
   loadCompliance() {

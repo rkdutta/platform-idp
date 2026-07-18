@@ -2,7 +2,7 @@ import { Injectable } from '@angular/core';
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { Observable, throwError } from 'rxjs';
 import { catchError } from 'rxjs/operators';
-import { Team, TeamCreate, ComplianceSummary, ComplianceDetail, TeamApplications } from '../models/team.model';
+import { Team, TeamCreate, ComplianceSummary, ComplianceDetail, TeamApplications, UserRef, NamespaceAccess } from '../models/team.model';
 import { environment } from '../../environments/environment';
 import { AuthService } from './auth.service';
 
@@ -57,6 +57,40 @@ export class TeamsService {
   getApplications(): Observable<TeamApplications[]> {
     const url = `${this.apiUrl}/applications`;
     return this.http.get<TeamApplications[]>(url)
+      .pipe(catchError(this.handleError));
+  }
+
+  /** Order an extra namespace (team-<name>-<label>) for a team. */
+  orderNamespace(teamId: string, label: string): Observable<Team> {
+    const url = `${this.apiUrl}/teams/${teamId}/namespaces`;
+    return this.http.post<Team>(url, { label })
+      .pipe(catchError(this.handleError));
+  }
+
+  /** All Keycloak realm users, for the assignment picker. */
+  getUsers(): Observable<UserRef[]> {
+    const url = `${this.apiUrl}/users`;
+    return this.http.get<UserRef[]>(url)
+      .pipe(catchError(this.handleError));
+  }
+
+  /** Namespace -> users assignments, scoped to the caller's owned teams. */
+  getAccess(): Observable<NamespaceAccess[]> {
+    const url = `${this.apiUrl}/access`;
+    return this.http.get<NamespaceAccess[]>(url)
+      .pipe(catchError(this.handleError));
+  }
+
+  grantAccess(namespace: string, username: string): Observable<any> {
+    const url = `${this.apiUrl}/access`;
+    return this.http.post(url, { namespace, username })
+      .pipe(catchError(this.handleError));
+  }
+
+  revokeAccess(namespace: string, username: string): Observable<any> {
+    const url = `${this.apiUrl}/access`;
+    // teams-api reads the grant from the request body on DELETE.
+    return this.http.request('delete', url, { body: { namespace, username } })
       .pipe(catchError(this.handleError));
   }
 

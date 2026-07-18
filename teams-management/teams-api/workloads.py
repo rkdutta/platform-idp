@@ -82,25 +82,33 @@ class ApplicationsReader:
     # ------------------------------------------------------------------ #
 
     def applications_for_all(self, teams: List[dict]) -> List[dict]:
-        """Return the application list for every team."""
-        namespaces = self._team_namespaces()
-        return [self._for_team(team, namespaces.get(team["id"])) for team in teams]
+        """Return the application list for every team, across its namespaces.
+
+        Each `team` dict carries `namespaces` (already narrowed by the caller to
+        the namespaces the requester is allowed to see)."""
+        return [self._for_team(team, team.get("namespaces") or []) for team in teams]
 
     def applications_for_team(self, team: dict) -> dict:
-        """Return the application list for a single team."""
-        namespace = self._team_namespaces().get(team["id"])
-        return self._for_team(team, namespace)
+        """Return the application list for a single team, across its namespaces."""
+        return self._for_team(team, team.get("namespaces") or [])
 
     # ------------------------------------------------------------------ #
     # Internals
     # ------------------------------------------------------------------ #
 
-    def _for_team(self, team: dict, namespace: Optional[str]) -> dict:
+    def _for_team(self, team: dict, namespaces: List[str]) -> dict:
+        apps: List[dict] = []
+        for ns in namespaces:
+            for app in self._apps_in_namespace(ns):
+                app["namespace"] = ns
+                apps.append(app)
         return {
             "team_id": team["id"],
             "team_name": team["name"],
-            "namespace": namespace,
-            "applications": self._apps_in_namespace(namespace) if namespace else [],
+            # Back-compat single-namespace field: set only when unambiguous.
+            "namespace": namespaces[0] if len(namespaces) == 1 else None,
+            "namespaces": list(namespaces),
+            "applications": apps,
         }
 
     def _apps_in_namespace(self, namespace: str) -> List[dict]:

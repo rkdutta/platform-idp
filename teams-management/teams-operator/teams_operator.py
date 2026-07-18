@@ -24,8 +24,10 @@ class TeamsOperator:
     def __init__(self):
         self.teams_api_url = os.getenv('TEAMS_API_URL', 'http://teams-api-service:80')
         self.poll_interval = int(os.getenv('POLL_INTERVAL', '30'))  # seconds
-        self.known_teams: Set[str] = set()
-        self.team_namespaces: Dict[str, str] = {}
+        # team_id -> the set of namespaces we've provisioned for that team. A team
+        # can own several namespaces (a default plus any it self-service ordered),
+        # so this is a set, reconciled against the team's desired `namespaces` list.
+        self.team_namespaces: Dict[str, Set[str]] = {}
         
         # Initialize Kubernetes client
         try:
@@ -151,33 +153,40 @@ class TeamsOperator:
 
         current_teams = {team['id']: team for team in teams}
         current_team_ids = set(current_teams.keys())
-        
-        # Handle new teams (create namespaces)
-        new_teams = current_team_ids - self.known_teams
-        for team_id in new_teams:
-            team = current_teams[team_id]
+        changed = False
+
+        # Reconcile each existing team's desired namespace set. `namespaces` is
+        # authoritative (the API backfills a default `team-<name>` for legacy
+        # records); fall back to the derived default if it's somehow absent.
+        for team_id, team in current_teams.items():
             team_name = team['name']
-            namespace_name = self.sanitize_namespace_name(team_name)
-            
-            if self.create_namespace(team_id, team_name, namespace_name):
-                self.team_namespaces[team_id] = namespace_name
-        
-        # Handle deleted teams (remove namespaces)
-        deleted_teams = self.known_teams - current_team_ids
-        for team_id in deleted_teams:
-            if team_id in self.team_namespaces:
-                namespace_name = self.team_namespaces[team_id]
-                # Get team name from namespace annotations if possible
-                team_name = f"team-{team_id}"  # fallback
-                
+            desired = set(team.get('namespaces') or [self.sanitize_namespace_name(team_name)])
+            provisioned = self.team_namespaces.setdefault(team_id, set())
+
+            for namespace_name in desired - provisioned:      # newly wanted
+                if self.create_namespace(team_id, team_name, namespace_name):
+                    provisioned.add(namespace_name)
+                    changed = True
+
+            for namespace_name in provisioned - desired:      # no longer wanted
                 if self.delete_namespace(namespace_name, team_name):
-                    del self.team_namespaces[team_id]
-        
-        # Update known teams
-        self.known_teams = current_team_ids
-        
-        if new_teams or deleted_teams:
-            logger.info(f"📊 Reconciliation complete: {len(current_teams)} teams, {len(self.team_namespaces)} namespaces")
+                    provisioned.discard(namespace_name)
+                    changed = True
+
+        # Handle deleted teams (remove all of their namespaces).
+        deleted_teams = set(self.team_namespaces) - current_team_ids
+        for team_id in deleted_teams:
+            team_name = f"team-{team_id}"  # fallback; the team record is gone
+            for namespace_name in list(self.team_namespaces[team_id]):
+                if self.delete_namespace(namespace_name, team_name):
+                    self.team_namespaces[team_id].discard(namespace_name)
+            if not self.team_namespaces[team_id]:
+                del self.team_namespaces[team_id]
+                changed = True
+
+        if changed:
+            total_ns = sum(len(v) for v in self.team_namespaces.values())
+            logger.info(f"📊 Reconciliation complete: {len(current_teams)} teams, {total_ns} namespaces")
     
     async def run(self):
         """Main operator loop"""

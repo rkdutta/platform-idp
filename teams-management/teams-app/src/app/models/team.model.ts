@@ -3,10 +3,27 @@ export interface Team {
   id: string;
   name: string;
   created_at: string;
+  namespaces: string[];
 }
 
 export interface TeamCreate {
   name: string;
+}
+
+/** A Keycloak realm user (the pool leads/admins pick from to grant access). */
+export interface UserRef {
+  username: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+}
+
+/** Which users can see a namespace (scoped to teams the caller owns). */
+export interface NamespaceAccess {
+  namespace: string;
+  team_id: string;
+  team_name: string;
+  users: string[];
 }
 
 export type ComplianceStatus = 'compliant' | 'non_compliant' | 'unknown';
@@ -65,6 +82,7 @@ export interface AppCompliance {
 
 export interface Application {
   name: string;
+  namespace?: string | null; // which team namespace this app runs in
   version: string;
   kind: string; // Rollout | Deployment
   image: string;
@@ -86,5 +104,6 @@ export interface TeamApplications {
   team_id: string;
   team_name: string;
   namespace: string | null;
+  namespaces?: string[];
   applications: Application[];
 }
