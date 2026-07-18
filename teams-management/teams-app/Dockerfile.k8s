@@ -47,6 +47,10 @@ RUN npm run build:prod
 
 # Serve the built app with nginx; nginx.k8s.conf proxies /api -> teams-api.
 FROM nginx:1.27-alpine
+# Patch OS packages so the base image's openssl (libcrypto3/libssl3) picks up
+# fixes shipped in the alpine repo but not yet in the nginx base tag — otherwise
+# the Trivy CRITICAL gate blocks the release (e.g. CVE-2026-31789).
+RUN apk upgrade --no-cache
 COPY --from=build /app/dist/teams-ui /usr/share/nginx/html
 COPY nginx.k8s.conf /etc/nginx/conf.d/default.conf
 EXPOSE 80
