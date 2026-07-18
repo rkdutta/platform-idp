@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Optional
@@ -12,6 +12,7 @@ from pathlib import Path
 from compliance import ComplianceChecker
 from workloads import ApplicationsReader
 from app_compliance import AppComplianceReader
+from auth import authenticate, require_team_leader, AUTH_ENABLED
 
 logger = logging.getLogger("teams-api")
 
@@ -45,11 +46,16 @@ def save_teams() -> None:
     except Exception as e:  # noqa: BLE001 - a persistence failure must not 500 the request
         logger.error(f"Could not save teams to {DATA_FILE}: {e}")
 
+# Every route is guarded by `authenticate` (validates the Keycloak JWT); the
+# dependency itself exempts public paths (/, /health, docs). Writes additionally
+# require the `team-leader` role (see per-route dependencies below).
 app = FastAPI(
     title="Teams API",
     description="A simple API for team leads to create and manage teams",
-    version="1.1.0"
+    version="1.2.0",
+    dependencies=[Depends(authenticate)],
 )
+logger.info("JWT authentication %s", "ENABLED" if AUTH_ENABLED else "DISABLED")
 
 # Configure CORS
 app.add_middleware(
@@ -152,9 +158,9 @@ class TeamApplications(BaseModel):
 async def root():
     return {"message": "Teams API is running"}
 
-@app.post("/teams", response_model=Team)
+@app.post("/teams", response_model=Team, dependencies=[Depends(require_team_leader)])
 async def create_team(team: TeamCreate):
-    """Create a new team"""
+    """Create a new team (requires the team-leader role)"""
     # Check if team name already exists
     for existing_team in teams_store.values():
         if existing_team["name"].lower() == team.name.lower():
@@ -186,9 +192,9 @@ async def get_team(team_id: str):
 
     return Team(**teams_store[team_id])
 
-@app.delete("/teams/{team_id}")
+@app.delete("/teams/{team_id}", dependencies=[Depends(require_team_leader)])
 async def delete_team(team_id: str):
-    """Delete a team"""
+    """Delete a team (requires the team-leader role)"""
     if team_id not in teams_store:
         raise HTTPException(status_code=404, detail="Team not found")
 

@@ -13,7 +13,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY main.py compliance.py workloads.py app_compliance.py ./
+COPY main.py auth.py compliance.py workloads.py app_compliance.py ./
 
 # Change ownership to non-root user
 RUN chown -R appuser:appuser /app
