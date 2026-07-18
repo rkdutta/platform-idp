@@ -129,3 +129,20 @@ def require_team_leader(request: Request) -> None:
             status_code=403,
             detail="Requires the 'team-leader' realm role",
         )
+
+
+def namespace_scope(request: Request):
+    """Namespaces the caller is allowed to see.
+
+    Returns None for UNRESTRICTED access (the `admin` realm role, or auth
+    disabled) — the caller sees everything. Otherwise returns the set of
+    namespace names taken from the token's `groups` claim (each Keycloak group
+    is named after the namespace it grants). An empty set means the caller can
+    see nothing. Team leads are members of exactly their team's group.
+    """
+    if not AUTH_ENABLED:
+        return None
+    claims = getattr(request.state, "claims", None) or {}
+    if "admin" in _roles(claims):
+        return None
+    return {g.lstrip("/") for g in (claims.get("groups") or [])}
