@@ -178,7 +178,7 @@ jobs:
           python-version: '3.12'
 
       - name: Build standalone binary (PyInstaller)
-        working-directory: teams-management/cli
+        working-directory: teams-management/teams-cli
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
@@ -190,7 +190,7 @@ jobs:
       - uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4.5.0
         with:
           name: teams-cli-${{ matrix.os }}-${{ matrix.arch }}
-          path: teams-management/cli/teams-cli-${{ matrix.os }}-${{ matrix.arch }}
+          path: teams-management/teams-cli/teams-cli-${{ matrix.os }}-${{ matrix.arch }}
           if-no-files-found: error
 
   release:
