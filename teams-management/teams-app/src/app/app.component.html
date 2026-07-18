@@ -25,6 +25,27 @@
       <p>You don't have permission to manage teams. Please contact your administrator.</p>
       <p>Your current roles: {{ authService.getUserRoles().join(', ') || 'No roles assigned' }}</p>
     </div>
+
+    <!-- Download the signed teams-cli binary (built by the platform-idp release
+         workflow; links resolve to the latest GitHub Release assets). -->
+    <section class="cli-download">
+      <h2>Developer CLI</h2>
+      <p>Manage teams from your terminal. Download the signed <code>teams-cli</code> binary:</p>
+      <div class="cli-links">
+        <a class="btn btn-primary" download
+           href="https://github.com/rkdutta/platform-idp/releases/latest/download/teams-cli-darwin-arm64">macOS · Apple Silicon</a>
+        <a class="btn btn-primary" download
+           href="https://github.com/rkdutta/platform-idp/releases/latest/download/teams-cli-linux-amd64">Linux · x86_64</a>
+        <a class="btn btn-primary" download
+           href="https://github.com/rkdutta/platform-idp/releases/latest/download/teams-cli-linux-arm64">Linux · arm64</a>
+      </div>
+      <p class="cli-meta">
+        <a href="https://github.com/rkdutta/platform-idp/releases/latest/download/SHA256SUMS">SHA256SUMS</a>
+        &middot;
+        <a href="https://github.com/rkdutta/platform-idp/releases" target="_blank" rel="noopener">All releases</a>
+      </p>
+      <p class="cli-hint">Then: <code>chmod +x teams-cli-* &amp;&amp; ./teams-cli-… -k login</code></p>
+    </section>
   </div>
 
   <div class="login-prompt" *ngIf="!isLoggedIn">

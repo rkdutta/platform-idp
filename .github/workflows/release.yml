@@ -1,0 +1,266 @@
+# Release management for the team-management components (monorepo).
+#
+# Single unified version: a `vX.Y.Z` tag builds & releases ALL components at that
+# version. On a push to main, the images are (re)built and signed as a rolling
+# build; the GitHub Release + CLI binaries are produced only on a `v*` tag.
+#
+# Components:
+#   images  — teams-app, teams-api, teams-operator: multi-arch (amd64+arm64)
+#             images pushed to GHCR, cosign KEYLESS signed + SBOM/vuln attested,
+#             then re-verified (fail closed). Harbor pull-replicates them.
+#   cli     — teams-cli: standalone PyInstaller binaries for macos/arm64,
+#             linux/amd64, linux/arm64, attached to the GitHub Release with a
+#             cosign-signed checksums file.
+#
+# Supply-chain notes:
+#   * Third-party Actions are pinned to a full commit SHA (the trailing "# vX.Y.Z"
+#     is a human hint); Renovate keeps them current.
+#   * Signing is keyless (Sigstore/OIDC): the GitHub Actions OIDC token yields a
+#     short-lived Fulcio cert, logged to Rekor. The workflow is `release.yml` and
+#     tags are `v*`, so the signing identity matches the cluster's Ratify trust
+#     policy (rkdutta/<repo>/.github/workflows/release.yml @ refs/tags/v*) —
+#     these images are admission-verifiable without any policy change.
+name: release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  images:
+    name: image (${{ matrix.component }})
+    # Rolling build on main; versioned build on a v* tag.
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # push to GHCR
+      id-token: write    # OIDC keyless signing
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: teams-app
+            context: teams-management/teams-app
+            dockerfile: teams-management/teams-app/Dockerfile.k8s
+          - component: teams-api
+            context: teams-management/teams-api
+            dockerfile: teams-management/teams-api/Dockerfile
+          - component: teams-operator
+            context: teams-management/teams-operator
+            dockerfile: teams-management/teams-operator/operator.Dockerfile
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Derive image ref + version
+        id: meta
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/v}"
+          else
+            version="0.0.0-$(git rev-parse --short HEAD)"
+          fi
+          image="$REGISTRY/${{ github.repository_owner }}/${{ matrix.component }}"
+          echo "version=$version"            >> "$GITHUB_OUTPUT"
+          echo "ref=$image:$version"         >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf # v3.2.0
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@6524bf65af31da8d45b59e8c27de4bd072b392f5 # v3.8.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build once (native amd64) into the local daemon so Trivy can gate on it
+      # BEFORE anything is published.
+      - name: Build image (for scan)
+        uses: docker/build-push-action@67a2d409c0a876cbe6b11854e3e25193efe4e62d # v6.12.0
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          load: true
+          tags: ${{ steps.meta.outputs.ref }}
+
+      - name: Trivy image scan (block on CRITICAL)
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: ${{ steps.meta.outputs.ref }}
+          severity: CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - name: Push image (multi-arch + provenance + SBOM)
+        id: push
+        uses: docker/build-push-action@67a2d409c0a876cbe6b11854e3e25193efe4e62d # v6.12.0
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.ref }}
+          provenance: mode=max
+          sbom: true
+
+      - name: SBOM (CycloneDX predicate)
+        uses: anchore/sbom-action@df80a981bc6edbc4e220a492d3cbe9f5547a6e75 # v0.17.9
+        with:
+          image: ${{ steps.meta.outputs.ref }}@${{ steps.push.outputs.digest }}
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+
+      - name: Trivy vuln report (cosign predicate)
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.meta.outputs.ref }}@${{ steps.push.outputs.digest }}
+          format: cosign-vuln
+          output: vuln.json
+
+      - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+
+      - name: Sign + attest (SBOM · vuln) — keyless
+        run: |
+          digest='${{ steps.meta.outputs.ref }}@${{ steps.push.outputs.digest }}'
+          cosign sign   --yes "$digest"
+          cosign attest --yes --type cyclonedx --predicate sbom.cdx.json "$digest"
+          cosign attest --yes --type vuln      --predicate vuln.json     "$digest"
+
+      - name: Verify signature + attestations (fail closed)
+        env:
+          COSIGN_IDENTITY: https://github.com/${{ github.workflow_ref }}
+          COSIGN_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          digest='${{ steps.meta.outputs.ref }}@${{ steps.push.outputs.digest }}'
+          id=( --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" )
+          cosign verify "${id[@]}" "$digest"
+          for t in cyclonedx vuln; do
+            cosign verify-attestation "${id[@]}" --type "$t" "$digest"
+          done
+
+  cli:
+    name: cli (${{ matrix.os }}-${{ matrix.arch }})
+    # Binaries are release artifacts — build them on v* tags.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-14,        os: darwin, arch: arm64 }
+          - { runner: ubuntu-24.04,    os: linux,  arch: amd64 }
+          # Native arm64 Linux runner (free for public repos). If platform-idp is
+          # private and arm runners aren't available, drop this entry.
+          - { runner: ubuntu-24.04-arm, os: linux, arch: arm64 }
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Build standalone binary (PyInstaller)
+        working-directory: teams-management/cli
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+          pyinstaller --onefile --name teams-cli teams_cli.py
+          out="teams-cli-${{ matrix.os }}-${{ matrix.arch }}"
+          mv dist/teams-cli "$out"
+          ./"$out" --help >/dev/null && echo "smoke test OK"
+
+      - uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4.5.0
+        with:
+          name: teams-cli-${{ matrix.os }}-${{ matrix.arch }}
+          path: teams-management/cli/teams-cli-${{ matrix.os }}-${{ matrix.arch }}
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    needs: [images, cli]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the Release
+      id-token: write    # keyless sign-blob of the checksums
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Download CLI binaries
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          chmod +x teams-cli-* || true
+          sha256sum teams-cli-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+
+      - name: Sign checksums (keyless)
+        working-directory: dist
+        run: |
+          cosign sign-blob --yes \
+            --output-signature SHA256SUMS.sig \
+            --output-certificate SHA256SUMS.pem \
+            SHA256SUMS
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          v="${VERSION#v}"
+          gh release create "$VERSION" --title "$VERSION" --notes-file - dist/* <<EOF
+          ## team-management ${VERSION}
+
+          ### Container images (signed keyless, SLSA provenance + SBOM/vuln attested)
+          Pulled into Harbor at \`platform/<component>:$v\`.
+
+          - \`ghcr.io/${OWNER}/teams-app:$v\`
+          - \`ghcr.io/${OWNER}/teams-api:$v\`
+          - \`ghcr.io/${OWNER}/teams-operator:$v\`
+
+          Verify an image:
+          \`\`\`
+          cosign verify \\
+            --certificate-identity https://github.com/${{ github.workflow_ref }} \\
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
+            ghcr.io/${OWNER}/teams-api:$v
+          \`\`\`
+
+          ### CLI binaries
+          \`teams-cli-darwin-arm64\`, \`teams-cli-linux-amd64\`, \`teams-cli-linux-arm64\`
+          (checksums in \`SHA256SUMS\`, cosign-signed: \`SHA256SUMS.sig\` + \`SHA256SUMS.pem\`).
+
+          Verify the checksums signature:
+          \`\`\`
+          cosign verify-blob \\
+            --certificate-identity https://github.com/${{ github.workflow_ref }} \\
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
+            --signature SHA256SUMS.sig --certificate SHA256SUMS.pem SHA256SUMS
+          \`\`\`
+          EOF

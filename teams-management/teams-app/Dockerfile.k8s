@@ -2,7 +2,11 @@
 # The SPA talks to the API SAME-ORIGIN via /api, which nginx (nginx.k8s.conf)
 # reverse-proxies to the in-cluster teams-api Service. Keycloak, however, is hit
 # directly from the browser, so its URL is a real browser-reachable ingress URL.
-FROM node:18-alpine AS build
+# Build stage runs on the native BUILDPLATFORM (amd64 on GitHub runners) so the
+# heavy `npm ci && ng build` is NOT emulated under QEMU for arm64 — the compiled
+# SPA is just static files. Only the tiny nginx runtime stage below is built
+# per-arch (TARGETPLATFORM), which keeps multi-arch builds fast.
+FROM --platform=$BUILDPLATFORM node:18-alpine AS build
 
 WORKDIR /app
 
