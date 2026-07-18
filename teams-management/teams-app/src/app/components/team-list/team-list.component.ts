@@ -1,5 +1,6 @@
 import { Component, OnInit } from "@angular/core";
 import { TeamsService } from "../../services/teams.service";
+import { AuthService } from "../../services/auth.service";
 import { environment } from "../../../environments/environment";
 import {
   Team,
@@ -33,7 +34,11 @@ export class TeamListComponent implements OnInit {
   // Each team's namespace, keyed by team id (for Rollouts dashboard deep links).
   teamNamespace: { [teamId: string]: string | null } = {};
 
-  constructor(private teamsService: TeamsService) {}
+  // public so the template can gate the Delete button on manage rights.
+  constructor(
+    private teamsService: TeamsService,
+    public authService: AuthService,
+  ) {}
 
   ngOnInit() {
     this.loadTeams();

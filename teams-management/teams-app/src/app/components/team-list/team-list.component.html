@@ -29,6 +29,7 @@
           <ng-template #plainName>{{ team.name }}</ng-template>
         </h3>
         <button
+          *ngIf="authService.canManage()"
           class="btn btn-danger btn-sm"
           (click)="deleteTeam(team.id, team.name)"
           title="Delete team"

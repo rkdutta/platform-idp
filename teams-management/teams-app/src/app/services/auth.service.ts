@@ -229,6 +229,16 @@ export class AuthService {
     }
   }
 
+  /** Can create/delete teams (write). Mirrors the teams-api require_team_leader. */
+  public canManage(): boolean {
+    return this.hasRole("team-leader") || this.hasRole("admin");
+  }
+
+  /** Can view teams (read). Mirrors the teams-api require_read (viewer role). */
+  public canView(): boolean {
+    return this.canManage() || this.hasRole("viewer");
+  }
+
   public async refreshAuthState(): Promise<void> {
     await this.initializeAuth();
   }
