@@ -98,11 +98,18 @@ READ_ROLES = {"viewer", "team-leader", "admin"}
 
 
 def _is_public(request: Request) -> bool:
-    """Paths served without auth: probes, root, docs, and CORS preflight."""
+    """Paths served without auth: probes, root, docs, CORS preflight, and the
+    /internal/* control-plane endpoints (consumed in-cluster by the teams-operator,
+    which has no user token — restrict via NetworkPolicy)."""
     if request.method == "OPTIONS":  # preflight carries no Authorization
         return True
     path = request.url.path
-    return path in PUBLIC_PATHS or path.startswith("/docs") or path.startswith("/openapi")
+    return (
+        path in PUBLIC_PATHS
+        or path.startswith("/docs")
+        or path.startswith("/openapi")
+        or path.startswith("/internal/")
+    )
 
 
 async def authenticate(request: Request) -> None:

@@ -63,6 +63,11 @@ class TeamsOperator:
     async def fetch_teams(self):
         """Fetch current teams from the Teams API.
 
+        Uses the unauthenticated /internal/teams endpoint: teams-api enforces
+        Keycloak JWT auth on the user-facing /teams (401 without a token), but the
+        operator is an unscoped in-cluster controller with no user token. The
+        internal endpoint returns just id/name/namespaces for reconciliation.
+
         Returns the list of teams on success, or None if the API could not be
         reached / returned an error. None is deliberately distinct from an empty
         list: an empty list means "no teams exist" (prune namespaces), whereas
@@ -72,7 +77,7 @@ class TeamsOperator:
         """
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(f"{self.teams_api_url}/teams") as response:
+                async with session.get(f"{self.teams_api_url}/internal/teams") as response:
                     if response.status == 200:
                         teams = await response.json()
                         logger.debug(f"Fetched {len(teams)} teams from API")

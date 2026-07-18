@@ -521,6 +521,17 @@ def revoke_access(request: Request, grant: AccessGrant):
     access_store.get(grant.namespace, set()).discard(grant.username)
     return {"message": f"Revoked {grant.username} access to {grant.namespace}"}
 
+@app.get("/internal/teams")
+def internal_teams():
+    """UNAUTHENTICATED internal endpoint for the teams-operator to reconcile
+    namespaces. Returns only id/name/namespaces (never compliance/apps/access),
+    unscoped (the operator provisions every team's namespaces). Intended for
+    in-cluster control-plane use only — restrict via NetworkPolicy in production."""
+    return [
+        {"id": t["id"], "name": t["name"], "namespaces": t.get("namespaces") or []}
+        for t in teams_store.values()
+    ]
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint for Kubernetes"""
