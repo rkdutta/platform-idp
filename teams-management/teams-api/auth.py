@@ -92,15 +92,23 @@ def _roles(claims: dict) -> list[str]:
     return list(claims.get("realm_access", {}).get("roles", []))
 
 
+# Realm roles that grant READ access to the API. Writes additionally require the
+# `team-leader` role (see require_team_leader). `viewer` = read-only.
+READ_ROLES = {"viewer", "team-leader", "admin"}
+
+
+def _is_public(request: Request) -> bool:
+    """Paths served without auth: probes, root, docs, and CORS preflight."""
+    if request.method == "OPTIONS":  # preflight carries no Authorization
+        return True
+    path = request.url.path
+    return path in PUBLIC_PATHS or path.startswith("/docs") or path.startswith("/openapi")
+
+
 async def authenticate(request: Request) -> None:
     """App-level dependency: require a valid bearer token on non-public paths and
     stash the verified claims on request.state for downstream role checks."""
-    if not AUTH_ENABLED:
-        return
-    if request.method == "OPTIONS":  # CORS preflight carries no Authorization
-        return
-    path = request.url.path
-    if path in PUBLIC_PATHS or path.startswith("/docs") or path.startswith("/openapi"):
+    if not AUTH_ENABLED or _is_public(request):
         return
 
     header = request.headers.get("Authorization", "")
@@ -117,6 +125,20 @@ async def authenticate(request: Request) -> None:
 
     request.state.claims = claims
     request.state.username = claims.get("preferred_username")
+
+
+def require_read(request: Request) -> None:
+    """App-level dependency (runs after authenticate): on non-public paths the
+    caller must hold at least a read role (viewer/team-leader/admin). This is what
+    makes `viewer` meaningful — without it any authenticated token could read."""
+    if not AUTH_ENABLED or _is_public(request):
+        return
+    claims = getattr(request.state, "claims", None) or {}
+    if not (READ_ROLES & set(_roles(claims))):
+        raise HTTPException(
+            status_code=403,
+            detail="Requires a 'viewer' or 'team-leader' role",
+        )
 
 
 def require_team_leader(request: Request) -> None:

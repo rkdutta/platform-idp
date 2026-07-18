@@ -12,7 +12,7 @@ from pathlib import Path
 from compliance import ComplianceChecker
 from workloads import ApplicationsReader
 from app_compliance import AppComplianceReader
-from auth import authenticate, require_team_leader, namespace_scope, AUTH_ENABLED
+from auth import authenticate, require_read, require_team_leader, namespace_scope, AUTH_ENABLED
 
 logger = logging.getLogger("teams-api")
 
@@ -46,14 +46,15 @@ def save_teams() -> None:
     except Exception as e:  # noqa: BLE001 - a persistence failure must not 500 the request
         logger.error(f"Could not save teams to {DATA_FILE}: {e}")
 
-# Every route is guarded by `authenticate` (validates the Keycloak JWT); the
-# dependency itself exempts public paths (/, /health, docs). Writes additionally
-# require the `team-leader` role (see per-route dependencies below).
+# Every route is guarded by `authenticate` (validates the Keycloak JWT) then
+# `require_read` (caller must hold viewer/team-leader/admin); both exempt public
+# paths (/, /health, docs). Writes additionally require the `team-leader` role
+# (see per-route dependencies below).
 app = FastAPI(
     title="Teams API",
     description="A simple API for team leads to create and manage teams",
-    version="1.3.0",
-    dependencies=[Depends(authenticate)],
+    version="1.4.0",
+    dependencies=[Depends(authenticate), Depends(require_read)],
 )
 logger.info("JWT authentication %s", "ENABLED" if AUTH_ENABLED else "DISABLED")
 
