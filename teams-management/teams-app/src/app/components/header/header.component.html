@@ -17,6 +17,64 @@
       </button>
 
       <ng-container *ngIf="isLoggedIn">
+        <!-- Developer CLI download (built + signed by the platform-idp release
+             workflow; links resolve to the latest GitHub Release assets). -->
+        <div class="cli-menu">
+          <button
+            type="button"
+            class="cli-trigger"
+            (click)="toggleCliMenu($event)"
+            [attr.aria-expanded]="cliMenuOpen"
+            title="Download the teams-cli"
+          >
+            <span class="cli-trigger-icon">⤓</span>
+            <span class="cli-trigger-label">CLI</span>
+            <span class="cli-trigger-caret">{{ cliMenuOpen ? "▴" : "▾" }}</span>
+          </button>
+
+          <div class="cli-dropdown" *ngIf="cliMenuOpen">
+            <p class="cli-dropdown-title">Developer CLI</p>
+            <p class="cli-dropdown-desc">
+              Manage teams from your terminal. Download the signed
+              <code>teams-cli</code> binary:
+            </p>
+            <a
+              class="cli-item"
+              download
+              href="https://github.com/rkdutta/platform-idp/releases/latest/download/teams-cli-darwin-arm64"
+              >macOS · Apple Silicon</a
+            >
+            <a
+              class="cli-item"
+              download
+              href="https://github.com/rkdutta/platform-idp/releases/latest/download/teams-cli-linux-amd64"
+              >Linux · x86_64</a
+            >
+            <a
+              class="cli-item"
+              download
+              href="https://github.com/rkdutta/platform-idp/releases/latest/download/teams-cli-linux-arm64"
+              >Linux · arm64</a
+            >
+            <div class="cli-dropdown-foot">
+              <a
+                href="https://github.com/rkdutta/platform-idp/releases/latest/download/SHA256SUMS"
+                >SHA256SUMS</a
+              >
+              &middot;
+              <a
+                href="https://github.com/rkdutta/platform-idp/releases"
+                target="_blank"
+                rel="noopener"
+                >All releases</a
+              >
+            </div>
+            <p class="cli-dropdown-hint">
+              <code>chmod +x teams-cli-* &amp;&amp; ./teams-cli-… -k login</code>
+            </p>
+          </div>
+        </div>
+
         <div class="user-info">
           <span class="welcome-text">
             Welcome, {{ userProfile?.firstName || userProfile?.username }}!

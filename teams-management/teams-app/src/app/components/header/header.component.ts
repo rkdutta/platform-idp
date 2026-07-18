@@ -63,7 +63,12 @@
 //
 
 // src/app/components/header/header.component.ts
-import { Component, OnInit } from "@angular/core";
+import {
+  Component,
+  OnInit,
+  HostListener,
+  ElementRef,
+} from "@angular/core";
 import { AuthService } from "../../services/auth.service";
 import { ThemeService } from "../../services/theme.service";
 import { KeycloakProfile } from "keycloak-js";
@@ -79,13 +84,35 @@ export class HeaderComponent implements OnInit {
   userRoles: string[] = [];
   isLoading = true;
 
+  // Developer-CLI download dropdown in the header.
+  cliMenuOpen = false;
+
   constructor(
     public authService: AuthService,
     public themeService: ThemeService,
+    private host: ElementRef,
   ) {}
 
   toggleTheme() {
     this.themeService.toggle();
+  }
+
+  toggleCliMenu(event: Event) {
+    event.stopPropagation();
+    this.cliMenuOpen = !this.cliMenuOpen;
+  }
+
+  // Close the dropdown on an outside click or Escape.
+  @HostListener("document:click", ["$event"])
+  onDocumentClick(event: MouseEvent) {
+    if (this.cliMenuOpen && !this.host.nativeElement.contains(event.target)) {
+      this.cliMenuOpen = false;
+    }
+  }
+
+  @HostListener("document:keydown.escape")
+  onEscape() {
+    this.cliMenuOpen = false;
   }
 
   async ngOnInit() {

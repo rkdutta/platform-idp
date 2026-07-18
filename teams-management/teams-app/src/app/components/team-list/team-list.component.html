@@ -14,8 +14,16 @@
   </div>
 
   <div class="teams-grid" *ngIf="!isLoading && !errorMessage && teams.length > 0">
-    <div class="team-card" *ngFor="let team of teams">
+    <div class="team-card" [class.collapsed]="isCollapsed(team.id)" *ngFor="let team of teams">
       <div class="team-header">
+        <button
+          class="collapse-toggle"
+          (click)="toggleCollapse(team.id)"
+          [attr.aria-expanded]="!isCollapsed(team.id)"
+          [title]="isCollapsed(team.id) ? 'Expand ' + team.name : 'Collapse ' + team.name"
+        >
+          <span class="collapse-chevron">{{ isCollapsed(team.id) ? "▸" : "▾" }}</span>
+        </button>
         <h3 class="team-name">
           <a
             *ngIf="teamDashboardUrl(team.id) as url; else plainName"
@@ -28,6 +36,7 @@
           >
           <ng-template #plainName>{{ team.name }}</ng-template>
         </h3>
+        <span class="team-header-spacer"></span>
         <button
           *ngIf="authService.canManage()"
           class="btn btn-danger btn-sm"
@@ -37,6 +46,9 @@
           Delete
         </button>
       </div>
+
+      <!-- Collapsible body: hidden when the card is collapsed. -->
+      <div class="team-body" *ngIf="!isCollapsed(team.id)">
       <div class="team-details">
         <p class="team-id">ID: {{ team.id }}</p>
         <p class="team-created">Created: {{ formatDate(team.created_at) }}</p>
@@ -76,10 +88,6 @@
                     <dd>v{{ app.rollout?.active_version || app.version }}</dd>
                   </div>
                   <div class="meta-row">
-                    <dt>Registry</dt>
-                    <dd class="mono">{{ imageRegistry(app.image) }}</dd>
-                  </div>
-                  <div class="meta-row">
                     <dt>Image</dt>
                     <dd class="mono">{{ imageName(app.image) }}</dd>
                   </div>
@@ -95,10 +103,6 @@
                   <div class="meta-row">
                     <dt>Type</dt>
                     <dd>{{ app.rollout?.strategy || app.kind }}</dd>
-                  </div>
-                  <div class="meta-row">
-                    <dt>Replicas</dt>
-                    <dd>{{ app.ready_replicas }}/{{ app.replicas }} ready</dd>
                   </div>
                 </dl>
 
@@ -270,6 +274,8 @@
           </ng-container>
         </div>
       </div>
+      </div>
+      <!-- /team-body -->
     </div>
   </div>
 

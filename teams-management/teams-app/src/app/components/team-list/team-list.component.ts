@@ -34,6 +34,9 @@ export class TeamListComponent implements OnInit {
   // Each team's namespace, keyed by team id (for Rollouts dashboard deep links).
   teamNamespace: { [teamId: string]: string | null } = {};
 
+  // Collapsed team cards, keyed by team id. Cards start expanded.
+  collapsed: { [teamId: string]: boolean } = {};
+
   // public so the template can gate the Delete button on manage rights.
   constructor(
     private teamsService: TeamsService,
@@ -60,6 +63,14 @@ export class TeamListComponent implements OnInit {
         this.isLoading = false;
       },
     });
+  }
+
+  toggleCollapse(teamId: string) {
+    this.collapsed[teamId] = !this.collapsed[teamId];
+  }
+
+  isCollapsed(teamId: string): boolean {
+    return !!this.collapsed[teamId];
   }
 
   loadCompliance() {
@@ -100,20 +111,6 @@ export class TeamListComponent implements OnInit {
     return Object.keys(groups)
       .sort()
       .map((name) => ({ name, apps: groups[name].sort((a, b) => a.name.localeCompare(b.name)) }));
-  }
-
-  // Registry host of an image ref, e.g. "localhost:5001/demo-api-py:1.0.0" ->
-  // "localhost:5001". Defaults to docker.io when no registry host is present.
-  imageRegistry(image: string): string {
-    const ref = (image || "").split("@")[0];
-    const slash = ref.indexOf("/");
-    if (slash > 0) {
-      const first = ref.substring(0, slash);
-      if (first.includes(".") || first.includes(":") || first === "localhost") {
-        return first;
-      }
-    }
-    return "docker.io";
   }
 
   // Repository name of an image ref (no registry host, no tag), e.g.

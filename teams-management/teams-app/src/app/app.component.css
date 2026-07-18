@@ -142,45 +142,6 @@ a.btn {
   text-align: center;
 }
 
-/* Developer CLI download card */
-.cli-download {
-  grid-column: 1 / -1;
-  margin-top: 24px;
-  padding: 24px;
-  background: var(--surface, #fff);
-  border: 1px solid var(--border, #e2e8f0);
-  border-radius: 8px;
-}
-
-.cli-download h2 {
-  color: var(--text);
-  margin-bottom: 8px;
-  font-size: 1.5rem;
-}
-
-.cli-links {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin: 16px 0 8px;
-}
-
-.cli-meta {
-  font-size: 0.9rem;
-}
-
-.cli-hint {
-  font-size: 0.85rem;
-  opacity: 0.75;
-  margin-top: 8px;
-}
-
-.cli-download code {
-  background: rgba(127, 127, 127, 0.15);
-  padding: 1px 6px;
-  border-radius: 4px;
-}
-
 @media (max-width: 768px) {
   .main-content {
     grid-template-columns: 1fr;

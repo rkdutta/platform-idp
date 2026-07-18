@@ -42,9 +42,44 @@
 
 .team-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  gap: 10px;
   margin-bottom: 15px;
+}
+
+/* A collapsed card is just its header — trim the bottom margin. */
+.team-card.collapsed .team-header {
+  margin-bottom: 0;
+}
+
+.team-header-spacer {
+  flex: 1;
+}
+
+.collapse-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-3);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.collapse-toggle:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.collapse-chevron {
+  font-size: 12px;
+  line-height: 1;
 }
 
 .team-name {
