@@ -19,6 +19,7 @@ from auth import (
     require_admin,
     require_manage,
     namespace_scope,
+    is_team_leader,
     AUTH_ENABLED,
 )
 from keycloak_admin import KeycloakAdmin, KeycloakAdminError
@@ -268,40 +269,46 @@ class TeamApplications(BaseModel):
 # may see. A team is visible if the caller can see ANY of its namespaces. The
 # `admin` role (namespace_scope() -> None) sees everything.
 
-def _in_scope(namespaces: List[str], scope: Optional[Set[str]]) -> List[str]:
-    """The subset of `namespaces` the caller may see (all of them for admin)."""
-    if scope is None:
-        return list(namespaces)
-    return [ns for ns in namespaces if ns in scope]
+def _visible_namespaces(request: Request, team: dict, scope: Optional[Set[str]]) -> List[str]:
+    """The namespaces of `team` the caller is allowed to see:
 
-def _view_team(team: dict, scope: Optional[Set[str]]) -> dict:
-    """A shallow copy of `team` whose `namespaces` is narrowed to the caller's
-    scope — passed to the apps/compliance readers so they only read namespaces
-    the caller is allowed to see."""
-    return {**team, "namespaces": _in_scope(team.get("namespaces") or [], scope)}
+    - admin / auth disabled (scope is None): ALL namespaces.
+    - a **team-leader** with a foothold in the team (their groups intersect the
+      team's namespaces): ALL of the team's namespaces — a lead manages the whole
+      team, including namespaces they haven't been personally added to.
+    - otherwise (a **viewer**): only the namespaces explicitly granted to them
+      (the intersection of their groups with the team's namespaces).
+    """
+    nss = team.get("namespaces") or []
+    if scope is None:
+        return list(nss)
+    granted = [ns for ns in nss if ns in scope]
+    if granted and is_team_leader(request):
+        return list(nss)
+    return granted
 
 def _scoped_teams(request: Request) -> List[dict]:
-    """The teams the caller may see, each narrowed to their in-scope namespaces."""
+    """The teams the caller may see, each narrowed to their visible namespaces."""
     scope = namespace_scope(request)
     out = []
     for team in teams_store.values():
-        visible = _in_scope(team.get("namespaces") or [], scope)
+        visible = _visible_namespaces(request, team, scope)
         if scope is None or visible:
-            out.append(_view_team(team, scope))
+            out.append({**team, "namespaces": visible})
     return out
 
 def _require_visible(request: Request, team_id: str) -> dict:
-    """Return the team (narrowed to in-scope namespaces) iff it exists AND the
+    """Return the team (narrowed to visible namespaces) iff it exists AND the
     caller can see at least one of its namespaces, else 404 (not 403) so
     out-of-scope teams don't leak their existence."""
     if team_id not in teams_store:
         raise HTTPException(status_code=404, detail="Team not found")
     team = teams_store[team_id]
     scope = namespace_scope(request)
-    visible = _in_scope(team.get("namespaces") or [], scope)
+    visible = _visible_namespaces(request, team, scope)
     if scope is not None and not visible:
         raise HTTPException(status_code=404, detail="Team not found")
-    return _view_team(team, scope)
+    return {**team, "namespaces": visible}
 
 # --- Access management (order namespaces + grant/revoke user visibility) -----
 # A caller "owns" a team if they can see any of its namespaces (admins own all).

@@ -186,6 +186,16 @@ def require_manage(request: Request) -> None:
         )
 
 
+def is_team_leader(request: Request) -> bool:
+    """True if the caller holds the `team-leader` realm role. Used to decide
+    whether they see ALL namespaces of a team they belong to (leaders manage the
+    whole team) vs. only the specific namespaces granted to them (viewers)."""
+    if not AUTH_ENABLED:
+        return True
+    claims = getattr(request.state, "claims", None) or {}
+    return "team-leader" in _roles(claims)
+
+
 def namespace_scope(request: Request):
     """Namespaces the caller is allowed to see.
 
