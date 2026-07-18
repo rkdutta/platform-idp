@@ -16,6 +16,7 @@ export interface UserRef {
   firstName: string;
   lastName: string;
   email: string;
+  roles: string[]; // app realm roles (admin/team-leader/viewer)
 }
 
 /** Which users can see a namespace (scoped to teams the caller owns). */

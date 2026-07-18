@@ -59,13 +59,23 @@
         <p class="team-created">Created: {{ formatDate(team.created_at) }}</p>
       </div>
 
-      <!-- Namespaces + per-namespace access management -->
+      <!-- Namespaces: each card shows access management + the apps running in it -->
       <div class="namespaces">
         <p class="namespaces-label">Namespaces</p>
         <div class="ns-list">
           <div class="ns-item" *ngFor="let ns of team.namespaces">
             <div class="ns-head">
-              <code class="ns-name">{{ ns }}</code>
+              <a
+                *ngIf="nsDashboardUrl(ns) as url"
+                class="ns-name-link"
+                [href]="url"
+                target="_blank"
+                rel="noopener noreferrer"
+                [title]="'Open ' + ns + ' in the Argo Rollouts dashboard'"
+              >
+                <code class="ns-name">{{ ns }}</code>
+                <span class="dash-link">↗</span>
+              </a>
               <span class="ns-count" *ngIf="authService.canManage()"
                 >{{ usersFor(ns).length }} user(s)</span
               >
@@ -76,6 +86,9 @@
               <ul class="member-list">
                 <li class="member" *ngFor="let u of usersFor(ns)">
                   <span class="member-name">{{ u }}</span>
+                  <span class="member-role" *ngIf="roleLabel(u)">{{
+                    roleLabel(u)
+                  }}</span>
                   <button
                     class="btn-revoke"
                     (click)="revoke(ns, u)"
@@ -96,7 +109,8 @@
                     *ngFor="let u of assignableUsers(ns)"
                     [value]="u.username"
                   >
-                    {{ u.username }}{{ u.email ? " (" + u.email + ")" : "" }}
+                    {{ u.username
+                    }}{{ u.roles.length ? " — " + u.roles.join(", ") : "" }}
                   </option>
                 </select>
                 <button
@@ -107,6 +121,176 @@
                   Grant
                 </button>
               </div>
+            </div>
+
+            <!-- Applications running in THIS namespace, grouped by part-of -->
+            <div class="ns-apps">
+              <div
+                class="app-groups"
+                *ngIf="appGroupsFor(team.id, ns).length > 0; else nsNoApps"
+              >
+                <div class="app-group" *ngFor="let group of appGroupsFor(team.id, ns)">
+                  <div class="app-group-header">
+                    <span class="app-group-name">{{ group.name }}</span>
+                    <span class="app-group-count"
+                      >{{ group.apps.length }} components</span
+                    >
+                  </div>
+
+                  <div class="component-list">
+                    <div class="component-card" *ngFor="let app of group.apps">
+                      <div class="component-head">
+                        <span class="app-name">{{ app.name }}</span>
+                        <span class="app-component" *ngIf="app.component">{{
+                          app.component
+                        }}</span>
+                        <span
+                          class="app-phase"
+                          *ngIf="app.rollout"
+                          [ngClass]="'phase-' + app.rollout.phase"
+                          >{{ app.rollout.phase }}</span
+                        >
+                      </div>
+
+                      <dl class="meta">
+                        <div class="meta-row">
+                          <dt>Version</dt>
+                          <dd>v{{ app.rollout?.active_version || app.version }}</dd>
+                        </div>
+                        <div class="meta-row">
+                          <dt>Image</dt>
+                          <dd class="mono">{{ imageName(app.image) }}</dd>
+                        </div>
+                        <div class="meta-row" *ngIf="app.rollout?.preview_version">
+                          <dt>Preview</dt>
+                          <dd>
+                            v{{ app.rollout?.preview_version }}
+                            <span
+                              class="promote-flag"
+                              *ngIf="app.rollout?.awaiting_promotion"
+                              >awaiting promotion</span
+                            >
+                          </dd>
+                        </div>
+                        <div class="meta-row">
+                          <dt>Type</dt>
+                          <dd>{{ app.rollout?.strategy || app.kind }}</dd>
+                        </div>
+                      </dl>
+
+                      <!-- Per-app compliance: supply-chain evidence + Gatekeeper -->
+                      <div class="app-compliance" *ngIf="app.compliance">
+                        <button
+                          class="app-compliance-toggle"
+                          (click)="toggleAppCompliance(team.id, app)"
+                          [attr.aria-expanded]="isAppComplianceExpanded(team.id, app)"
+                          [disabled]="!app.compliance.policies.length"
+                        >
+                          <span
+                            class="badge badge-sm"
+                            [ngClass]="'badge-' + app.compliance.status"
+                            >{{ appStatusLabel(app) }}</span
+                          >
+                          <span class="app-compliance-count">
+                            <ng-container
+                              *ngIf="app.compliance.status === 'non_compliant'"
+                            >
+                              {{ app.compliance.failing_policies }}/{{
+                                app.compliance.total_policies
+                              }}
+                              policies failing
+                            </ng-container>
+                            <ng-container
+                              *ngIf="app.compliance.status === 'compliant'"
+                            >
+                              {{ app.compliance.total_policies }} policies verified
+                            </ng-container>
+                            <ng-container
+                              *ngIf="app.compliance.status === 'unknown'"
+                            >
+                              {{ app.compliance.reason || "No evidence" }}
+                            </ng-container>
+                          </span>
+                          <span
+                            class="chevron"
+                            *ngIf="app.compliance.policies.length"
+                            >{{
+                              isAppComplianceExpanded(team.id, app) ? "▲" : "▼"
+                            }}</span
+                          >
+                        </button>
+
+                        <ul
+                          class="policy-list"
+                          *ngIf="
+                            isAppComplianceExpanded(team.id, app) &&
+                            app.compliance.policies.length
+                          "
+                        >
+                          <li
+                            class="policy"
+                            *ngFor="let p of app.compliance.policies"
+                            [ngClass]="p.compliant ? 'policy-ok' : 'policy-fail'"
+                          >
+                            <div class="policy-head">
+                              <span class="policy-mark">{{
+                                p.compliant ? "✓" : "✗"
+                              }}</span>
+                              <span class="policy-name">{{ p.name }}</span>
+                              <span
+                                class="policy-cat"
+                                [ngClass]="'cat-' + p.category"
+                                >{{ p.category }}</span
+                              >
+                            </div>
+                            <p class="policy-detail" *ngIf="p.detail">
+                              {{ p.detail }}
+                            </p>
+                            <ul class="policy-messages" *ngIf="p.messages?.length">
+                              <li *ngFor="let m of p.messages">{{ m }}</li>
+                            </ul>
+                          </li>
+                        </ul>
+                      </div>
+
+                      <div
+                        class="component-links"
+                        *ngIf="app.url || rolloutDashboardUrl(app)"
+                      >
+                        <a
+                          class="clink clink-app"
+                          *ngIf="app.url"
+                          [href]="app.url"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          [title]="
+                            (app.component === 'api'
+                              ? 'Open the API docs for '
+                              : 'Open ') + app.name
+                          "
+                        >
+                          {{ appLinkLabel(app) }} ↗
+                        </a>
+                        <a
+                          class="clink"
+                          *ngIf="rolloutDashboardUrl(app) as rurl"
+                          [href]="rurl"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          [title]="
+                            'Open ' + app.name + ' in the Argo Rollouts dashboard'
+                          "
+                        >
+                          Rollout ↗
+                        </a>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <ng-template #nsNoApps>
+                <p class="apps-empty">No applications deployed</p>
+              </ng-template>
             </div>
           </div>
         </div>
@@ -128,160 +312,6 @@
             + Order namespace
           </button>
         </div>
-      </div>
-
-      <!-- Applications, grouped into application cards (by part-of) -->
-      <div class="applications">
-        <p class="applications-label">Applications</p>
-        <div
-          class="app-groups"
-          *ngIf="appGroups[team.id] && appGroups[team.id].length > 0; else noApps"
-        >
-          <div class="app-group" *ngFor="let group of appGroups[team.id]">
-            <div class="app-group-header">
-              <span class="app-group-name">{{ group.name }}</span>
-              <span class="app-group-count">{{ group.apps.length }} components</span>
-            </div>
-
-            <div class="component-list">
-              <div class="component-card" *ngFor="let app of group.apps">
-                <div class="component-head">
-                  <span class="app-name">{{ app.name }}</span>
-                  <span class="app-component" *ngIf="app.component">{{
-                    app.component
-                  }}</span>
-                  <span
-                    class="app-ns"
-                    *ngIf="app.namespace && team.namespaces.length > 1"
-                    [title]="'Namespace: ' + app.namespace"
-                    >{{ app.namespace }}</span
-                  >
-                  <span
-                    class="app-phase"
-                    *ngIf="app.rollout"
-                    [ngClass]="'phase-' + app.rollout.phase"
-                    >{{ app.rollout.phase }}</span
-                  >
-                </div>
-
-                <dl class="meta">
-                  <div class="meta-row">
-                    <dt>Version</dt>
-                    <dd>v{{ app.rollout?.active_version || app.version }}</dd>
-                  </div>
-                  <div class="meta-row">
-                    <dt>Image</dt>
-                    <dd class="mono">{{ imageName(app.image) }}</dd>
-                  </div>
-                  <div class="meta-row" *ngIf="app.rollout?.preview_version">
-                    <dt>Preview</dt>
-                    <dd>
-                      v{{ app.rollout?.preview_version }}
-                      <span class="promote-flag" *ngIf="app.rollout?.awaiting_promotion"
-                        >awaiting promotion</span
-                      >
-                    </dd>
-                  </div>
-                  <div class="meta-row">
-                    <dt>Type</dt>
-                    <dd>{{ app.rollout?.strategy || app.kind }}</dd>
-                  </div>
-                </dl>
-
-                <!-- Per-app compliance: supply-chain evidence + Gatekeeper -->
-                <div class="app-compliance" *ngIf="app.compliance">
-                  <button
-                    class="app-compliance-toggle"
-                    (click)="toggleAppCompliance(team.id, app)"
-                    [attr.aria-expanded]="isAppComplianceExpanded(team.id, app)"
-                    [disabled]="!app.compliance.policies.length"
-                  >
-                    <span
-                      class="badge badge-sm"
-                      [ngClass]="'badge-' + app.compliance.status"
-                      >{{ appStatusLabel(app) }}</span
-                    >
-                    <span class="app-compliance-count">
-                      <ng-container *ngIf="app.compliance.status === 'non_compliant'">
-                        {{ app.compliance.failing_policies }}/{{
-                          app.compliance.total_policies
-                        }}
-                        policies failing
-                      </ng-container>
-                      <ng-container *ngIf="app.compliance.status === 'compliant'">
-                        {{ app.compliance.total_policies }} policies verified
-                      </ng-container>
-                      <ng-container *ngIf="app.compliance.status === 'unknown'">
-                        {{ app.compliance.reason || "No evidence" }}
-                      </ng-container>
-                    </span>
-                    <span class="chevron" *ngIf="app.compliance.policies.length">{{
-                      isAppComplianceExpanded(team.id, app) ? "▲" : "▼"
-                    }}</span>
-                  </button>
-
-                  <ul
-                    class="policy-list"
-                    *ngIf="
-                      isAppComplianceExpanded(team.id, app) &&
-                      app.compliance.policies.length
-                    "
-                  >
-                    <li
-                      class="policy"
-                      *ngFor="let p of app.compliance.policies"
-                      [ngClass]="p.compliant ? 'policy-ok' : 'policy-fail'"
-                    >
-                      <div class="policy-head">
-                        <span class="policy-mark">{{ p.compliant ? "✓" : "✗" }}</span>
-                        <span class="policy-name">{{ p.name }}</span>
-                        <span class="policy-cat" [ngClass]="'cat-' + p.category">{{
-                          p.category
-                        }}</span>
-                      </div>
-                      <p class="policy-detail" *ngIf="p.detail">{{ p.detail }}</p>
-                      <ul class="policy-messages" *ngIf="p.messages?.length">
-                        <li *ngFor="let m of p.messages">{{ m }}</li>
-                      </ul>
-                    </li>
-                  </ul>
-                </div>
-
-                <div
-                  class="component-links"
-                  *ngIf="app.url || rolloutDashboardUrl(team.id, app)"
-                >
-                  <a
-                    class="clink clink-app"
-                    *ngIf="app.url"
-                    [href]="app.url"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    [title]="
-                      (app.component === 'api' ? 'Open the API docs for ' : 'Open ') +
-                      app.name
-                    "
-                  >
-                    {{ appLinkLabel(app) }} ↗
-                  </a>
-                  <a
-                    class="clink"
-                    *ngIf="rolloutDashboardUrl(team.id, app) as rurl"
-                    [href]="rurl"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    [title]="'Open ' + app.name + ' in the Argo Rollouts dashboard'"
-                  >
-                    Rollout ↗
-                  </a>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-        <ng-template #noApps>
-          <p class="apps-empty">No applications deployed</p>
-        </ng-template>
       </div>
 
       <!-- Compliance (namespace-scoped, NOT application-level) -->

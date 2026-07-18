@@ -33,6 +33,10 @@ export class TeamListComponent implements OnInit {
   // grouped by app.kubernetes.io/part-of into application cards.
   appGroups: { [teamId: string]: ApplicationGroup[] } = {};
 
+  // Application groups keyed by team id THEN namespace, so each namespace card
+  // renders only the apps running in it.
+  appGroupsByNs: { [teamId: string]: { [namespace: string]: ApplicationGroup[] } } = {};
+
   // Each team's namespace, keyed by team id (for Rollouts dashboard deep links).
   teamNamespace: { [teamId: string]: string | null } = {};
 
@@ -106,7 +110,9 @@ export class TeamListComponent implements OnInit {
   loadUsers() {
     this.teamsService.getUsers().subscribe({
       next: (users) => (this.allUsers = users),
-      error: (error) => console.error("Failed to load users:", error),
+      // Surface this: an empty picker usually means the Keycloak admin client
+      // (teams-api-sa) isn't reachable/authorized, not "no users".
+      error: (error) => (this.accessError = "Could not load users: " + error),
     });
   }
 
@@ -120,6 +126,17 @@ export class TeamListComponent implements OnInit {
     return this.allUsers.filter((u) => !granted.has(u.username));
   }
 
+  // The app realm roles for a username (from the loaded user pool), e.g. for
+  // showing "teamlead1 (team-leader)" next to an assigned member.
+  rolesOf(username: string): string[] {
+    return this.allUsers.find((u) => u.username === username)?.roles || [];
+  }
+
+  roleLabel(username: string): string {
+    const roles = this.rolesOf(username);
+    return roles.length ? roles.join(", ") : "";
+  }
+
   orderNamespace(team: Team) {
     const label = (this.orderLabel[team.id] || "").trim();
     if (!label) {
@@ -129,7 +146,10 @@ export class TeamListComponent implements OnInit {
     this.teamsService.orderNamespace(team.id, label).subscribe({
       next: () => {
         this.orderLabel[team.id] = "";
-        this.loadTeams(); // refresh namespaces + access
+        // The API auto-grants the ordering user the new namespace's Keycloak
+        // group; force a token refresh so the new `groups` claim lands and the
+        // namespace becomes visible to them immediately (no re-login).
+        this.authService.forceRefresh().then(() => this.loadTeams());
       },
       error: (error) => (this.accessError = error),
     });
@@ -175,14 +195,33 @@ export class TeamListComponent implements OnInit {
     this.teamsService.getApplications().subscribe({
       next: (teamApps) => {
         this.appGroups = {};
+        this.appGroupsByNs = {};
         this.teamNamespace = {};
         for (const entry of teamApps) {
           this.appGroups[entry.team_id] = this.groupApplications(entry.applications);
           this.teamNamespace[entry.team_id] = entry.namespace;
+
+          // Partition the team's apps by namespace, then group each namespace's
+          // apps by part-of, so each namespace card shows only its own apps.
+          const byNs: { [ns: string]: Application[] } = {};
+          for (const app of entry.applications) {
+            const ns = app.namespace || entry.namespace || "";
+            (byNs[ns] = byNs[ns] || []).push(app);
+          }
+          const grouped: { [ns: string]: ApplicationGroup[] } = {};
+          for (const ns of Object.keys(byNs)) {
+            grouped[ns] = this.groupApplications(byNs[ns]);
+          }
+          this.appGroupsByNs[entry.team_id] = grouped;
         }
       },
       error: (error) => console.error("Failed to load applications:", error),
     });
+  }
+
+  // Application groups running in a specific namespace of a team.
+  appGroupsFor(teamId: string, namespace: string): ApplicationGroup[] {
+    return this.appGroupsByNs[teamId]?.[namespace] || [];
   }
 
   // Group a namespace's workloads into application cards by their
@@ -253,10 +292,17 @@ export class TeamListComponent implements OnInit {
     return ns ? `${environment.rolloutsDashboardUrl}/rollouts/${ns}/` : null;
   }
 
+  // Rollout-list link for a specific namespace (each namespace card header).
+  nsDashboardUrl(namespace: string): string | null {
+    return namespace
+      ? `${environment.rolloutsDashboardUrl}/rollouts/${namespace}/`
+      : null;
+  }
+
   // Deep link into the Argo Rollouts dashboard for a given app, or null if it's
   // not a Rollout / the namespace is unknown (the dashboard only shows Rollouts).
-  rolloutDashboardUrl(teamId: string, app: Application): string | null {
-    const ns = this.teamNamespace[teamId];
+  rolloutDashboardUrl(app: Application): string | null {
+    const ns = app.namespace;
     if (app.kind !== "Rollout" || !ns) {
       return null;
     }

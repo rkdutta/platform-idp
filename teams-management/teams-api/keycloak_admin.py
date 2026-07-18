@@ -32,6 +32,9 @@ import requests
 
 log = logging.getLogger("teams-api.keycloak")
 
+# App realm roles surfaced next to each user in the assignment picker.
+APP_ROLES = ["admin", "team-leader", "viewer"]
+
 
 class KeycloakAdminError(RuntimeError):
     """Raised when a Keycloak Admin API call fails (surface as 5xx to the caller)."""
@@ -167,11 +170,30 @@ class KeycloakAdmin:
                 return u["id"]
         return None
 
+    def role_members(self, role: str) -> List[str]:
+        """Usernames that hold a given realm role."""
+        resp = self._request("GET", f"/roles/{role}/users", params={"max": 1000})
+        if resp.status_code != 200:
+            raise KeycloakAdminError(f"role users {resp.status_code}: {resp.text}")
+        return [u["username"] for u in resp.json() if u.get("username")]
+
     def list_users(self) -> List[dict]:
-        """All realm users as {username, firstName, lastName, email}."""
+        """All realm users as {username, firstName, lastName, email, roles}, where
+        `roles` is the subset of the app realm roles (admin/team-leader/viewer)."""
         resp = self._request("GET", "/users", params={"max": 1000})
         if resp.status_code != 200:
             raise KeycloakAdminError(f"list users {resp.status_code}: {resp.text}")
+
+        # Build username -> [app roles] with one query per role (3 total), rather
+        # than N per-user role-mapping lookups.
+        role_map: Dict[str, List[str]] = {}
+        for role in APP_ROLES:
+            try:
+                for uname in self.role_members(role):
+                    role_map.setdefault(uname, []).append(role)
+            except KeycloakAdminError as e:
+                log.warning("could not list members of role %s: %s", role, e)
+
         out = []
         for u in resp.json():
             if not u.get("username"):
@@ -185,6 +207,7 @@ class KeycloakAdmin:
                     "firstName": u.get("firstName", ""),
                     "lastName": u.get("lastName", ""),
                     "email": u.get("email", ""),
+                    "roles": role_map.get(u["username"], []),
                 }
             )
         return sorted(out, key=lambda u: u["username"])

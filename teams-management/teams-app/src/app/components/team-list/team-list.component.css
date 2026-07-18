@@ -186,6 +186,13 @@
   border-radius: 6px;
 }
 
+.ns-name-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  text-decoration: none;
+}
+
 .ns-count {
   margin-left: auto;
   font-size: 11px;
@@ -194,6 +201,24 @@
 
 .ns-access {
   margin-top: 8px;
+}
+
+/* Apps live inside their namespace card. */
+.ns-apps {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+
+.member-role {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--primary-soft);
+  color: var(--primary);
 }
 
 .member-list {

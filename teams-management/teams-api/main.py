@@ -182,6 +182,7 @@ class UserRef(BaseModel):
     firstName: str = ""
     lastName: str = ""
     email: str = ""
+    roles: List[str] = []            # app realm roles (admin/team-leader/viewer)
 
 class AccessGrant(BaseModel):
     namespace: str

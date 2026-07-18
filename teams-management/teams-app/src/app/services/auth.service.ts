@@ -248,6 +248,20 @@ export class AuthService {
     await this.initializeAuth();
   }
 
+  /**
+   * Force a token refresh so newly-changed Keycloak group memberships (e.g. a
+   * namespace just ordered/granted) land in the token's `groups` claim without a
+   * re-login. A large minValidity forces the refresh regardless of current expiry.
+   */
+  public async forceRefresh(): Promise<void> {
+    try {
+      await this.keycloak.updateToken(999999);
+      this._token = await this.keycloak.getToken();
+    } catch (error) {
+      console.error("Force token refresh failed:", error);
+    }
+  }
+
   // Debug method to check token validity
   public async debugTokenInfo(): Promise<any> {
     try {
