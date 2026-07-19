@@ -46,6 +46,21 @@ export class UsersPageComponent implements OnInit {
 
   readonly roles: NamespaceRole[] = ["viewer", "maintainer"];
 
+  /**
+   * Access indexed by user, rebuilt only when /access changes.
+   *
+   * These MUST NOT be computed in the template. A method returning a fresh array
+   * of fresh objects hands *ngFor new identities on every change-detection pass,
+   * so it destroys and recreates every row — and the `ngModel` selects inside
+   * those rows then trigger another pass, looping until the tab freezes.
+   * Indexing once gives the arrays stable identity (and is far cheaper).
+   */
+  private grantsByUser: { [userId: string]: UserGrant[] } = {};
+  private availableByUser: { [userId: string]: NamespaceAccess[] } = {};
+
+  // Shared empty array: a fresh [] per call would defeat the stable identity above.
+  private static readonly NONE: any[] = [];
+
   constructor(
     private teamsService: TeamsService,
     public authService: AuthService,
@@ -64,6 +79,7 @@ export class UsersPageComponent implements OnInit {
         this.teamsService.getAccess().subscribe({
           next: (access) => {
             this.access = access;
+            this.indexAccess();
             this.loading = false;
           },
           error: (err) => {
@@ -102,26 +118,43 @@ export class UsersPageComponent implements OnInit {
     return full || user.username;
   }
 
-  /** Every namespace this user holds a role in, across all visible teams. */
-  grantsOf(user: UserRef): UserGrant[] {
-    const out: UserGrant[] = [];
+  /** Rebuild the per-user indexes. Call this (only) when `access` changes. */
+  private indexAccess(): void {
+    this.grantsByUser = {};
+    this.availableByUser = {};
+
     for (const ns of this.access) {
-      const hit = ns.users.find((u) => u.user_id === user.id);
-      if (hit) {
-        out.push({
-          namespace: ns.namespace,
-          team_name: ns.team_name,
-          role: hit.role,
-        });
+      for (const u of ns.users) {
+        const list = this.grantsByUser[u.user_id] || (this.grantsByUser[u.user_id] = []);
+        list.push({ namespace: ns.namespace, team_name: ns.team_name, role: u.role });
       }
     }
-    return out;
+
+    for (const user of this.users) {
+      const held = new Set((this.grantsByUser[user.id] || []).map((g) => g.namespace));
+      this.availableByUser[user.id] = this.access.filter(
+        (ns) => !held.has(ns.namespace),
+      );
+    }
+  }
+
+  /** Every namespace this user holds a role in, across all visible teams. */
+  grantsOf(user: UserRef): UserGrant[] {
+    return this.grantsByUser[user.id] || UsersPageComponent.NONE;
   }
 
   /** Namespaces this user has no grant on yet — the "add" picker's options. */
   availableFor(user: UserRef): NamespaceAccess[] {
-    const held = new Set(this.grantsOf(user).map((g) => g.namespace));
-    return this.access.filter((ns) => !held.has(ns.namespace));
+    return this.availableByUser[user.id] || UsersPageComponent.NONE;
+  }
+
+  // Stable identities for *ngFor, so a re-render can't recreate rows needlessly.
+  trackByUser(_: number, user: UserRef): string {
+    return user.id;
+  }
+
+  trackByNamespace(_: number, item: { namespace: string }): string {
+    return item.namespace;
   }
 
   isPlatformAdmin(user: UserRef): boolean {
@@ -180,7 +213,10 @@ export class UsersPageComponent implements OnInit {
   /** Re-read assignments only — the Keycloak user directory hasn't changed. */
   private refreshAccess(): void {
     this.teamsService.getAccess().subscribe({
-      next: (access) => (this.access = access),
+      next: (access) => {
+        this.access = access;
+        this.indexAccess();
+      },
       error: (err) => (this.error = `Could not reload access: ${err}`),
     });
   }

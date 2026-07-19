@@ -32,7 +32,7 @@
         <span class="count">{{ filteredUsers.length }} of {{ users.length }} users</span>
       </div>
 
-      <div class="user-row" *ngFor="let user of filteredUsers">
+      <div class="user-row" *ngFor="let user of filteredUsers; trackBy: trackByUser">
         <button
           class="user-head"
           (click)="toggle(user)"
@@ -58,7 +58,7 @@
           </p>
 
           <table class="grants" *ngIf="grantsOf(user).length">
-            <tr *ngFor="let g of grantsOf(user)">
+            <tr *ngFor="let g of grantsOf(user); trackBy: trackByNamespace">
               <td class="g-ns">
                 {{ g.namespace }}
                 <span class="g-team">{{ g.team_name }}</span>
@@ -93,7 +93,10 @@
           <div class="add-row" *ngIf="availableFor(user).length">
             <select class="ns-select" [(ngModel)]="addNamespace[user.id]">
               <option value="">Add namespace…</option>
-              <option *ngFor="let ns of availableFor(user)" [value]="ns.namespace">
+              <option
+                *ngFor="let ns of availableFor(user); trackBy: trackByNamespace"
+                [value]="ns.namespace"
+              >
                 {{ ns.namespace }} ({{ ns.team_name }})
               </option>
             </select>
