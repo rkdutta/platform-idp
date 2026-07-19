@@ -76,14 +76,7 @@
         </div>
 
         <div class="user-info">
-          <span class="welcome-text">
-            Welcome, {{ userProfile?.firstName || userProfile?.username }}!
-          </span>
-          <div class="user-roles" *ngIf="userRoles.length > 0">
-            <span class="role-badge" *ngFor="let role of userRoles">
-              {{ role }}
-            </span>
-          </div>
+          <span class="welcome-text"> Welcome, {{ displayName }}! </span>
         </div>
         <button class="btn btn-secondary" (click)="logout()">
           Logout

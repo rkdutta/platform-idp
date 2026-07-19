@@ -71,7 +71,16 @@ import {
 } from "@angular/core";
 import { AuthService } from "../../services/auth.service";
 import { ThemeService } from "../../services/theme.service";
-import { KeycloakProfile } from "keycloak-js";
+
+/** The claims AuthService.getUserInfoFromToken() projects out of the JWT. */
+interface TokenUserInfo {
+  username?: string;
+  email?: string;
+  firstName?: string;
+  lastName?: string;
+  name?: string;
+  roles: string[];
+}
 
 @Component({
   selector: "app-header",
@@ -79,7 +88,7 @@ import { KeycloakProfile } from "keycloak-js";
   styleUrls: ["./header.component.css"],
 })
 export class HeaderComponent implements OnInit {
-  userProfile: KeycloakProfile | null = null;
+  userProfile: TokenUserInfo | null = null;
   isLoggedIn = false;
   userRoles: string[] = [];
   isLoading = true;
@@ -116,9 +125,6 @@ export class HeaderComponent implements OnInit {
   }
 
   async ngOnInit() {
-    const tokenInfo = this.authService.getUserInfoFromToken();
-    console.log(tokenInfo);
-
     try {
       // Ensure auth state is refreshed
       await this.authService.refreshAuthState();
@@ -126,20 +132,26 @@ export class HeaderComponent implements OnInit {
       this.isLoggedIn = this.authService.isLoggedInSync();
 
       if (this.isLoggedIn) {
-        try {
-          // this.userProfile = await this.authService.loadUserProfile();
-          // this.userRoles = this.authService.getUserRoles();
-          this.userProfile = tokenInfo;
-          this.userRoles = tokenInfo.roles;
-        } catch (error) {
-          console.error("Failed to load user profile", error);
-        }
+        // Read the token only once auth is initialized — getTokenSync() is empty
+        // until refreshAuthState() has resolved.
+        this.userProfile = this.authService.getUserInfoFromToken();
+        this.userRoles = this.userProfile?.roles || [];
       }
     } catch (error) {
       console.error("Failed to initialize auth state", error);
     } finally {
       this.isLoading = false;
     }
+  }
+
+  /**
+   * Name to greet the user with, from the JWT: full `name`, else `given_name`,
+   * else the username. The seeded leads share the given name "Team", so the full
+   * name is what actually tells teamlead1 and teamlead2 apart.
+   */
+  get displayName(): string {
+    const p = this.userProfile;
+    return p?.name || p?.firstName || p?.username || "";
   }
 
   async login() {
