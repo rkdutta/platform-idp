@@ -9,9 +9,9 @@
     <button class="btn btn-secondary" (click)="loadTeams()">Retry</button>
   </div>
 
-  <div class="error-message access-error" *ngIf="accessError">
-    {{ accessError }}
-    <button class="btn btn-secondary btn-sm" (click)="accessError = ''">Dismiss</button>
+  <div class="error-message access-error" *ngIf="actionError">
+    {{ actionError }}
+    <button class="btn btn-secondary btn-sm" (click)="actionError = ''">Dismiss</button>
   </div>
 
   <div class="empty-state" *ngIf="!isLoading && !errorMessage && teams.length === 0">
@@ -68,6 +68,44 @@
         <p class="team-created">Created: {{ formatDate(team.created_at) }}</p>
       </div>
 
+      <!-- Owners run the team: they order/delete its namespaces and decide who
+           may access them. Only admins can change who the owners are. -->
+      <div class="owners">
+        <p class="owners-label">Owners</p>
+        <div class="owner-list">
+          <span class="owner-chip" *ngFor="let o of team.owners">
+            {{ o.username || o.user_id }}
+            <button
+              *ngIf="authService.isAdmin()"
+              class="owner-remove"
+              (click)="removeOwner(team, o.user_id, o.username)"
+              [title]="'Remove ' + o.username + ' as owner'"
+            >
+              ✕
+            </button>
+          </span>
+          <span class="owner-empty" *ngIf="!team.owners?.length">
+            No owners yet{{ authService.isAdmin() ? " — assign one below" : "" }}
+          </span>
+        </div>
+
+        <div class="add-owner" *ngIf="authService.isAdmin()">
+          <select [(ngModel)]="addOwnerSel[team.id]" class="user-select">
+            <option value="">Add owner…</option>
+            <option *ngFor="let u of assignableOwners(team)" [value]="u.id">
+              {{ u.username }}{{ u.email ? " — " + u.email : "" }}
+            </option>
+          </select>
+          <button
+            class="btn btn-sm"
+            (click)="addOwner(team)"
+            [disabled]="!addOwnerSel[team.id]"
+          >
+            Add
+          </button>
+        </div>
+      </div>
+
       <!-- Namespaces: each card shows access management + the apps running in it -->
       <div class="namespaces">
         <p class="namespaces-label">Namespaces</p>
@@ -85,11 +123,10 @@
                 <code class="ns-name">{{ ns }}</code>
                 <span class="dash-link">↗</span>
               </a>
-              <span class="ns-count" *ngIf="authService.canManage()"
-                >{{ usersFor(ns).length }} user(s)</span
-              >
+              <!-- The caller's own role here, so it's obvious what they may do. -->
+              <span class="ns-role" *ngIf="authService.roleIn(ns) as role">{{ role }}</span>
               <button
-                *ngIf="authService.canManage() && !isDefaultNamespace(team, ns)"
+                *ngIf="canManageTeam(team) && !isDefaultNamespace(team, ns)"
                 class="btn btn-danger btn-sm ns-delete"
                 (click)="deleteNamespace(team, ns)"
                 [title]="'Delete namespace ' + ns"
@@ -97,53 +134,11 @@
                 Delete
               </button>
               <span
-                *ngIf="authService.canManage() && isDefaultNamespace(team, ns)"
+                *ngIf="canManageTeam(team) && isDefaultNamespace(team, ns)"
                 class="ns-default-tag"
                 title="A team's default namespace can't be deleted; delete the team instead"
                 >default</span
               >
-            </div>
-
-            <!-- Access management is team-leader / admin only -->
-            <div class="ns-access" *ngIf="authService.canManage()">
-              <ul class="member-list">
-                <li class="member" *ngFor="let u of usersFor(ns)">
-                  <span class="member-name">{{ u }}</span>
-                  <span class="member-role" *ngIf="roleLabel(u)">{{
-                    roleLabel(u)
-                  }}</span>
-                  <button
-                    class="btn-revoke"
-                    (click)="revoke(ns, u)"
-                    [title]="'Revoke ' + u + ' from ' + ns"
-                  >
-                    ✕
-                  </button>
-                </li>
-                <li class="member-empty" *ngIf="usersFor(ns).length === 0">
-                  No users assigned
-                </li>
-              </ul>
-
-              <div class="add-user">
-                <select [(ngModel)]="addUserSel[ns]" class="user-select">
-                  <option value="">Add user…</option>
-                  <option
-                    *ngFor="let u of assignableUsers(ns)"
-                    [value]="u.username"
-                  >
-                    {{ u.username
-                    }}{{ u.roles.length ? " — " + u.roles.join(", ") : "" }}
-                  </option>
-                </select>
-                <button
-                  class="btn btn-sm"
-                  (click)="grant(ns)"
-                  [disabled]="!addUserSel[ns]"
-                >
-                  Grant
-                </button>
-              </div>
             </div>
 
             <!-- Applications running in THIS namespace, grouped by part-of -->
@@ -351,8 +346,8 @@
           </div>
         </div>
 
-        <!-- Order a new namespace (team-leader / admin) -->
-        <div class="order-ns" *ngIf="authService.canManage()">
+        <!-- Order a new namespace (team owner / admin) -->
+        <div class="order-ns" *ngIf="canManageTeam(team)">
           <input
             type="text"
             class="order-input"

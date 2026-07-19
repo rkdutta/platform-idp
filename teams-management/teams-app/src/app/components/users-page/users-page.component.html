@@ -1,0 +1,115 @@
+<div class="users-page">
+  <div class="page-head">
+    <div>
+      <h2>User Access</h2>
+      <p class="page-sub">
+        Grant each user a role per namespace. Changes take effect immediately — no
+        re-login needed.
+      </p>
+    </div>
+    <button class="btn btn-secondary btn-sm" (click)="load()" [disabled]="loading">
+      ⟳ Refresh
+    </button>
+  </div>
+
+  <p class="error" *ngIf="error">{{ error }}</p>
+
+  <p class="empty" *ngIf="loading">Loading users…</p>
+
+  <ng-container *ngIf="!loading">
+    <p class="empty" *ngIf="!access.length">
+      You don't manage any namespaces yet. Ask an admin to make you an owner of a team.
+    </p>
+
+    <ng-container *ngIf="access.length">
+      <div class="toolbar">
+        <input
+          class="filter-input"
+          type="text"
+          placeholder="Filter by name, username or email…"
+          [(ngModel)]="filter"
+        />
+        <span class="count">{{ filteredUsers.length }} of {{ users.length }} users</span>
+      </div>
+
+      <div class="user-row" *ngFor="let user of filteredUsers">
+        <button
+          class="user-head"
+          (click)="toggle(user)"
+          [attr.aria-expanded]="isExpanded(user)"
+        >
+          <span class="chevron">{{ isExpanded(user) ? "▾" : "▸" }}</span>
+          <span class="user-name">{{ displayName(user) }}</span>
+          <span class="user-login">{{ user.username }}</span>
+          <span class="user-email">{{ user.email }}</span>
+          <span class="spacer"></span>
+          <span class="tag tag-admin" *ngIf="isPlatformAdmin(user)" title="Platform admin — unrestricted access">
+            admin
+          </span>
+          <span class="tag" [class.tag-none]="!grantsOf(user).length">
+            {{ grantsOf(user).length }} namespace(s)
+          </span>
+        </button>
+
+        <div class="user-body" *ngIf="isExpanded(user)">
+          <p class="none" *ngIf="isPlatformAdmin(user)">
+            Platform admins already have full access to every namespace. Grants below
+            are redundant for this user.
+          </p>
+
+          <table class="grants" *ngIf="grantsOf(user).length">
+            <tr *ngFor="let g of grantsOf(user)">
+              <td class="g-ns">
+                {{ g.namespace }}
+                <span class="g-team">{{ g.team_name }}</span>
+              </td>
+              <td class="g-role">
+                <select
+                  class="role-select"
+                  [ngModel]="g.role"
+                  (ngModelChange)="setRole(user, g.namespace, $event)"
+                  [disabled]="saving === user.id"
+                >
+                  <option *ngFor="let r of roles" [value]="r">{{ r }}</option>
+                </select>
+              </td>
+              <td class="g-act">
+                <button
+                  class="btn-revoke"
+                  (click)="revoke(user, g.namespace)"
+                  [disabled]="saving === user.id"
+                  [title]="'Revoke access to ' + g.namespace"
+                >
+                  ✕
+                </button>
+              </td>
+            </tr>
+          </table>
+
+          <p class="none" *ngIf="!grantsOf(user).length">
+            No access to any namespace you manage.
+          </p>
+
+          <div class="add-row" *ngIf="availableFor(user).length">
+            <select class="ns-select" [(ngModel)]="addNamespace[user.id]">
+              <option value="">Add namespace…</option>
+              <option *ngFor="let ns of availableFor(user)" [value]="ns.namespace">
+                {{ ns.namespace }} ({{ ns.team_name }})
+              </option>
+            </select>
+            <select class="role-select" [(ngModel)]="addRole[user.id]">
+              <option *ngFor="let r of roles" [value]="r">{{ r }}</option>
+            </select>
+            <button
+              class="btn btn-primary btn-sm"
+              (click)="addGrant(user)"
+              [disabled]="!addNamespace[user.id] || saving === user.id"
+            >
+              Grant
+            </button>
+          </div>
+        </div>
+      </div>
+    </ng-container>
+  </ng-container>
+</div>

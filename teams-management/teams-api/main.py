@@ -10,6 +10,8 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+import store
+import authz
 from compliance import ComplianceChecker
 from workloads import ApplicationsReader
 from app_compliance import AppComplianceReader
@@ -17,18 +19,18 @@ from auth import (
     authenticate,
     require_read,
     require_admin,
-    require_manage,
-    namespace_scope,
-    is_team_leader,
+    is_admin,
+    caller_id,
+    caller_name,
     AUTH_ENABLED,
 )
 from keycloak_admin import KeycloakAdmin, KeycloakAdminError
 
 logger = logging.getLogger("teams-api")
 
-# Where the team store is persisted. Backed by a PersistentVolume in-cluster so
-# team data survives pod restarts (an in-memory store was wiped on every roll,
-# which then made the operator prune the team namespaces).
+# Teams, ownership and access grants live in SQLite on the PersistentVolume (see
+# store.py). DATA_FILE is the pre-2.0 JSON store, kept only as the migration
+# source and a backup — nothing writes to it any more.
 DATA_DIR = os.getenv("DATA_DIR", "/data")
 DATA_FILE = Path(DATA_DIR) / "teams.json"
 
@@ -54,46 +56,14 @@ def ordered_namespace(team_name: str, label: str) -> str:
     return f"team-{_sanitize(team_name)}-{_sanitize(label)}"
 
 
-def load_teams() -> Dict[str, Dict]:
-    """Load the persisted team store; empty if the file is missing/unreadable.
-
-    Legacy records predate multi-namespace support and have no `namespaces`
-    field — backfill it with the team's default namespace so every team always
-    carries an explicit namespace list.
-    """
-    try:
-        if DATA_FILE.exists():
-            with DATA_FILE.open() as f:
-                teams = json.load(f)
-            store = {team["id"]: team for team in teams}
-            for team in store.values():
-                if not team.get("namespaces"):
-                    team["namespaces"] = [default_namespace(team["name"])]
-            return store
-    except Exception as e:  # noqa: BLE001 - never fail startup on a bad/absent file
-        logger.error(f"Could not load teams from {DATA_FILE}: {e}")
-    return {}
-
-
-def save_teams() -> None:
-    """Persist the team store atomically (write temp file, then rename)."""
-    try:
-        DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = DATA_FILE.with_suffix(".json.tmp")
-        with tmp.open("w") as f:
-            json.dump(list(teams_store.values()), f, default=str)
-        tmp.replace(DATA_FILE)
-    except Exception as e:  # noqa: BLE001 - a persistence failure must not 500 the request
-        logger.error(f"Could not save teams to {DATA_FILE}: {e}")
-
 # Every route is guarded by `authenticate` (validates the Keycloak JWT) then
-# `require_read` (caller must hold viewer/team-leader/admin); both exempt public
-# paths (/, /health, docs). Writes additionally require the `team-leader` role
-# (see per-route dependencies below).
+# `require_read` (must be a valid realm user); both exempt public paths (/,
+# /health, docs). What a caller may actually see or change is resolved per-request
+# from the database by authz.py — team ownership and per-namespace roles.
 app = FastAPI(
     title="Teams API",
-    description="A simple API for team leads to create and manage teams",
-    version="1.5.0",
+    description="Team, namespace and access management for the engineering platform",
+    version="2.0.0",
     dependencies=[Depends(authenticate), Depends(require_read)],
 )
 logger.info("JWT authentication %s", "ENABLED" if AUTH_ENABLED else "DISABLED")
@@ -107,9 +77,6 @@ app.add_middleware(
     allow_headers=["*"],  # Allows all headers
 )
 
-# Team store, loaded from the persistent volume on startup.
-teams_store: Dict[str, Dict] = load_teams()
-
 # Compliance checker (reads Gatekeeper state from the Kubernetes API).
 compliance_checker = ComplianceChecker()
 
@@ -121,79 +88,123 @@ applications_reader = ApplicationsReader()
 # Per-app compliance (supply-chain evidence + Gatekeeper), attached to each app.
 app_compliance_reader = AppComplianceReader(compliance_checker)
 
-# Keycloak Admin API client. Assigning a user to a namespace = adding them to the
-# namespace's Keycloak group (group name == namespace), which is what puts the
-# namespace in their token's `groups` claim and thus grants visibility.
+# Keycloak Admin API client — the user DIRECTORY only. Access grants are no longer
+# written to Keycloak groups: the database is the sole authority (see store.py), so
+# there is no second copy to drift. Groups are read exactly once, by the migration.
 keycloak = KeycloakAdmin()
 
-# In-memory "who has access where" table: namespace -> {usernames}. This is a VIEW
-# mirror of Keycloak group membership (the enforcement source of truth). It is
-# hydrated from Keycloak on startup and updated on every grant/revoke. A database
-# can replace it later — reads/writes go through the small helpers below.
-access_store: Dict[str, Set[str]] = {}
 
-
-def _all_namespaces() -> Set[str]:
-    """Every namespace declared by any team (desired state, from the store)."""
-    out: Set[str] = set()
-    for team in teams_store.values():
-        out.update(team.get("namespaces") or [])
-    return out
-
-
-def _team_for_namespace(namespace: str) -> Optional[dict]:
-    """The team that owns a namespace, or None."""
-    for team in teams_store.values():
-        if namespace in (team.get("namespaces") or []):
-            return team
+def _lookup_user(identifier: str) -> Optional[dict]:
+    """Find a realm user by id or username. Grants are keyed on the Keycloak `sub`,
+    so callers may pass either and we resolve to the canonical record."""
+    if not keycloak.enabled or not identifier:
+        return None
+    try:
+        for u in keycloak.list_users():
+            if u.get("id") == identifier or u.get("username") == identifier:
+                return u
+    except KeycloakAdminError as e:
+        logger.error("user lookup failed: %s", e)
     return None
-
-
-def hydrate_access() -> None:
-    """Populate access_store from Keycloak group membership for every namespace."""
-    if not keycloak.enabled:
-        logger.info("Keycloak admin disabled (no client secret); access table empty")
-        return
-    for ns in _all_namespaces():
-        try:
-            access_store[ns] = set(keycloak.group_members(ns))
-        except KeycloakAdminError as e:
-            logger.error("Could not hydrate access for %s: %s", ns, e)
 
 
 @app.on_event("startup")
 def _startup() -> None:
-    hydrate_access()
+    """Open the database and, on a first run, seed it from the pre-2.0 state.
+
+    The migration derives ownership and grants from the Keycloak groups this
+    release replaces, so nobody loses access across the cutover. It only runs when
+    the database has no teams, making restarts safe.
+    """
+    store.connect()
+
+    users_by_name: Dict[str, dict] = {}
+    leaders: Set[str] = set()
+    if keycloak.enabled:
+        try:
+            users_by_name = {u["username"]: u for u in keycloak.list_users()}
+            leaders = set(keycloak.role_members("team-leader"))
+        except KeycloakAdminError as e:
+            # ABORT rather than migrate blind. Grants and ownership are derived
+            # from the Keycloak directory, so migrating without it would import
+            # the teams with nobody attached — and because the migration only runs
+            # on an empty database, that wrong state would be permanent. Leaving
+            # the database empty is loud, harmless and retried on the next restart.
+            logger.error(
+                "Keycloak directory unavailable (%s) — SKIPPING migration so it can "
+                "retry on the next start. The API will report no teams until then.", e
+            )
+            return
+
+    summary = store.migrate_from_legacy_json(
+        DATA_FILE,
+        members_of=keycloak.group_members if keycloak.enabled else (lambda ns: []),
+        users_by_name=users_by_name,
+        leaders=leaders,
+        default_namespace_of=default_namespace,
+    )
+    logger.info("Store migration: %s", summary)
 
 # Pydantic models
 class TeamCreate(BaseModel):
     name: str
+
+class OwnerRef(BaseModel):
+    user_id: str
+    username: str = ""
 
 class Team(BaseModel):
     id: str
     name: str
     created_at: datetime
     namespaces: List[str] = []
+    owners: List[OwnerRef] = []
 
 class NamespaceOrder(BaseModel):
     label: str                       # short suffix -> team-<name>-<label>
 
 class UserRef(BaseModel):
+    id: str = ""                     # Keycloak `sub` — what grants are keyed on
     username: str
     firstName: str = ""
     lastName: str = ""
     email: str = ""
-    roles: List[str] = []            # app realm roles (admin/team-leader/viewer)
+    roles: List[str] = []            # realm roles (only `admin` still carries authority)
+
+class OwnerAdd(BaseModel):
+    user_id: str                     # Keycloak id or username; resolved server-side
 
 class AccessGrant(BaseModel):
     namespace: str
-    username: str
+    user_id: str                     # Keycloak id or username; resolved server-side
+    role: str = "viewer"             # viewer | maintainer (ignored on revoke)
+
+class AccessUser(BaseModel):
+    user_id: str
+    username: str = ""
+    role: str
 
 class NamespaceAccess(BaseModel):
     namespace: str
     team_id: str
     team_name: str
-    users: List[str] = []
+    users: List[AccessUser] = []
+
+class NamespaceRole(BaseModel):
+    namespace: str
+    role: str                        # viewer | maintainer
+
+class Me(BaseModel):
+    """The caller's effective permissions, resolved server-side.
+
+    Authority lives in the database now, so the UI cannot infer it from token
+    roles — it asks for it here.
+    """
+    user_id: str = ""
+    username: str = ""
+    is_admin: bool = False
+    owned_team_ids: List[str] = []
+    namespaces: List[NamespaceRole] = []
 
 class PolicyResult(BaseModel):
     name: str
@@ -263,222 +274,186 @@ class TeamApplications(BaseModel):
     namespaces: List[str] = []
     applications: List[Application] = []
 
-# --- Namespace-scoped visibility -------------------------------------------
-# Visibility is per-namespace: each team namespace is a Keycloak group, and the
-# caller's token `groups` claim (namespace_scope) is the set of namespaces they
-# may see. A team is visible if the caller can see ANY of its namespaces. The
-# `admin` role (namespace_scope() -> None) sees everything.
-
-def _visible_namespaces(request: Request, team: dict, scope: Optional[Set[str]]) -> List[str]:
-    """The namespaces of `team` the caller is allowed to see:
-
-    - admin / auth disabled (scope is None): ALL namespaces.
-    - a **team-leader** with a foothold in the team (their groups intersect the
-      team's namespaces): ALL of the team's namespaces — a lead manages the whole
-      team, including namespaces they haven't been personally added to.
-    - otherwise (a **viewer**): only the namespaces explicitly granted to them
-      (the intersection of their groups with the team's namespaces).
-    """
-    nss = team.get("namespaces") or []
-    if scope is None:
-        return list(nss)
-    granted = [ns for ns in nss if ns in scope]
-    if granted and is_team_leader(request):
-        return list(nss)
-    return granted
-
-def _scoped_teams(request: Request) -> List[dict]:
-    """The teams the caller may see, each narrowed to their visible namespaces."""
-    scope = namespace_scope(request)
-    out = []
-    for team in teams_store.values():
-        visible = _visible_namespaces(request, team, scope)
-        if scope is None or visible:
-            out.append({**team, "namespaces": visible})
-    return out
-
-def _require_visible(request: Request, team_id: str) -> dict:
-    """Return the team (narrowed to visible namespaces) iff it exists AND the
-    caller can see at least one of its namespaces, else 404 (not 403) so
-    out-of-scope teams don't leak their existence."""
-    if team_id not in teams_store:
-        raise HTTPException(status_code=404, detail="Team not found")
-    team = teams_store[team_id]
-    scope = namespace_scope(request)
-    visible = _visible_namespaces(request, team, scope)
-    if scope is not None and not visible:
-        raise HTTPException(status_code=404, detail="Team not found")
-    return {**team, "namespaces": visible}
-
-# --- Access management (order namespaces + grant/revoke user visibility) -----
-# A caller "owns" a team if they can see any of its namespaces (admins own all).
-# Owning a team lets them manage ALL of its namespaces — including ones just
-# ordered that aren't in their own token yet.
-
-def _owned_teams(request: Request) -> List[dict]:
-    """Full team records (unmodified namespaces) the caller owns / may manage."""
-    scope = namespace_scope(request)
-    if scope is None:
-        return list(teams_store.values())
-    return [t for t in teams_store.values() if set(t.get("namespaces") or []) & scope]
-
-def _owned_by_caller(request: Request, team_id: str) -> bool:
-    """True if the caller owns/manages the given team."""
-    return team_id in {t["id"] for t in _owned_teams(request)}
-
-def _can_manage_namespace(request: Request, namespace: str) -> bool:
-    """True if the caller owns the team that this namespace belongs to."""
-    team = _team_for_namespace(namespace)
-    return team is not None and _owned_by_caller(request, team["id"])
+def _with_owners(team: dict) -> dict:
+    """Attach the team's owners for the API response."""
+    return {**team, "owners": store.owners_of(team["id"])}
 
 @app.get("/")
 async def root():
     return {"message": "Teams API is running"}
 
-@app.post("/teams", response_model=Team, dependencies=[Depends(require_admin)])
-async def create_team(team: TeamCreate):
-    """Create a new team (requires the admin role). The team gets a default
-    namespace `team-<name>` and a matching Keycloak group for access grants."""
-    # Check if team name already exists
-    for existing_team in teams_store.values():
-        if existing_team["name"].lower() == team.name.lower():
-            raise HTTPException(status_code=400, detail="Team name already exists")
+@app.get("/me", response_model=Me)
+def get_me(request: Request):
+    """The caller's effective permissions.
 
-    # Generate unique ID and create team. created_at is stored as an ISO string
-    # so the record round-trips cleanly through JSON persistence.
+    Ownership and per-namespace roles are database state, so the UI has no way to
+    derive them from the token — this is the single endpoint it trusts for what to
+    render. It also means a permission change shows up on the next call, with no
+    re-login or token refresh.
+    """
+    uid = caller_id(request)
+    admin = is_admin(request)
+    owned = sorted(store.owned_team_ids(uid))
+
+    roles: Dict[str, str] = {}
+    if admin:
+        for ns in store.all_namespaces():
+            roles[ns] = "maintainer"
+    else:
+        for team_id in owned:
+            for ns in store.namespaces_of(team_id):
+                roles[ns] = "maintainer"
+        for ns, role in store.grants_for_user(uid).items():
+            roles.setdefault(ns, role)
+
+    return Me(
+        user_id=uid,
+        username=caller_name(request),
+        is_admin=admin,
+        owned_team_ids=owned,
+        namespaces=[
+            NamespaceRole(namespace=ns, role=role) for ns, role in sorted(roles.items())
+        ],
+    )
+
+@app.post("/teams", response_model=Team, dependencies=[Depends(require_admin)])
+async def create_team(request: Request, team: TeamCreate):
+    """Create a new team with its default namespace `team-<name>` (admin only).
+
+    Assign owners separately via POST /teams/{id}/owners — ownership is what lets
+    somebody manage the team's namespaces and access.
+    """
+    if store.team_name_exists(team.name):
+        raise HTTPException(status_code=400, detail="Team name already exists")
+
     team_id = str(uuid.uuid4())
     ns = default_namespace(team.name)
-    new_team = {
-        "id": team_id,
-        "name": team.name,
-        "created_at": datetime.now().isoformat(),
-        "namespaces": [ns],
-    }
-
-    teams_store[team_id] = new_team
-    save_teams()
-
-    # Ensure the Keycloak group exists so users can be granted the namespace.
-    # Best-effort: a Keycloak blip must not fail team creation (the operator will
-    # still create the namespace; the group can be reconciled on next grant).
-    if keycloak.enabled:
-        try:
-            keycloak.ensure_group(ns)
-            access_store.setdefault(ns, set())
-        except KeycloakAdminError as e:
-            logger.error("Could not create Keycloak group for %s: %s", ns, e)
-
-    return Team(**new_team)
+    created = store.create_team(
+        team_id, team.name, ns, created_at=datetime.now().isoformat()
+    )
+    store.record(caller_name(request), "team.create", team.name, ns)
+    return Team(**_with_owners(created))
 
 @app.get("/teams", response_model=List[Team])
 async def get_teams(request: Request):
-    """Get the teams visible to the caller (scoped by their namespace grants)."""
-    return [Team(**team) for team in _scoped_teams(request)]
+    """The teams visible to the caller, each narrowed to their visible namespaces."""
+    return [Team(**_with_owners(team)) for team in authz.scoped_teams(request)]
 
 @app.get("/teams/{team_id}", response_model=Team)
 async def get_team(request: Request, team_id: str):
-    """Get a specific team by ID (must be in the caller's scope)."""
-    return Team(**_require_visible(request, team_id))
+    """A specific team (must be in the caller's scope)."""
+    return Team(**_with_owners(authz.require_visible_team(request, team_id)))
 
 @app.delete("/teams/{team_id}", dependencies=[Depends(require_admin)])
 async def delete_team(request: Request, team_id: str):
-    """Delete a team and prune its namespaces (admin only)."""
-    if team_id not in teams_store:
+    """Delete a team (admin only). Namespaces, owners and grants cascade away, and
+    the operator prunes the Kubernetes namespaces on its next poll."""
+    team = store.get_team(team_id)
+    if not team:
         raise HTTPException(status_code=404, detail="Team not found")
-    deleted_team = teams_store.pop(team_id)
-    for ns in deleted_team.get("namespaces") or []:
-        access_store.pop(ns, None)
-    save_teams()
-    return {"message": f"Team '{deleted_team['name']}' deleted successfully"}
+    store.delete_team(team_id)
+    store.record(caller_name(request), "team.delete", team["name"])
+    return {"message": f"Team '{team['name']}' deleted successfully"}
 
+
+# --- Ownership (admin only) --------------------------------------------------
+
+@app.get("/teams/{team_id}/owners", response_model=List[OwnerRef])
+def get_owners(request: Request, team_id: str):
+    """The team's owners (admin, or an owner of this team)."""
+    team = authz.require_team_owner(request, team_id)
+    return store.owners_of(team["id"])
 
 @app.post(
-    "/teams/{team_id}/namespaces",
-    response_model=Team,
-    dependencies=[Depends(require_manage)],
+    "/teams/{team_id}/owners",
+    response_model=List[OwnerRef],
+    dependencies=[Depends(require_admin)],
 )
-async def order_namespace(request: Request, team_id: str, order: NamespaceOrder):
-    """Order an extra namespace for a team (team-leader for owned teams, or admin).
+def add_owner(request: Request, team_id: str, body: OwnerAdd):
+    """Make a user an owner of this team (admin only).
 
-    Named `team-<name>-<label>`, added to the team's namespace list (the operator
-    provisions it on its next poll), with a matching Keycloak group. The caller is
-    auto-granted the new namespace so they keep managing it."""
-    if team_id not in teams_store:
+    The user must exist in Keycloak — ownership is meaningless for an identity
+    that can never log in, and a typo would otherwise be stored silently.
+    """
+    team = store.get_team(team_id)
+    if not team:
         raise HTTPException(status_code=404, detail="Team not found")
-    if not (_owned_by_caller(request, team_id)):
+    user = _lookup_user(body.user_id)
+    if not user:
+        raise HTTPException(status_code=400, detail="No such user in Keycloak")
+
+    store.add_owner(team_id, user["id"], user["username"])
+    store.record(caller_name(request), "owner.add", team["name"], user["username"])
+    return store.owners_of(team_id)
+
+@app.delete(
+    "/teams/{team_id}/owners/{user_id}",
+    response_model=List[OwnerRef],
+    dependencies=[Depends(require_admin)],
+)
+def remove_owner(request: Request, team_id: str, user_id: str):
+    """Remove an owner from this team (admin only)."""
+    team = store.get_team(team_id)
+    if not team:
         raise HTTPException(status_code=404, detail="Team not found")
+    store.remove_owner(team_id, user_id)
+    store.record(caller_name(request), "owner.remove", team["name"], user_id)
+    return store.owners_of(team_id)
+
+
+# --- Namespaces (admin or team owner) ----------------------------------------
+
+@app.post("/teams/{team_id}/namespaces", response_model=Team)
+async def order_namespace(request: Request, team_id: str, order: NamespaceOrder):
+    """Order an extra namespace `team-<name>-<label>` for a team (admin or owner).
+
+    The operator provisions the actual Kubernetes namespace on its next poll. No
+    grant is needed for the caller: owning the team already confers maintainer on
+    every one of its namespaces.
+    """
+    team = authz.require_team_owner(request, team_id)
     if not _sanitize(order.label):
         raise HTTPException(status_code=400, detail="Invalid namespace label")
 
-    team = teams_store[team_id]
     ns = ordered_namespace(team["name"], order.label)
-    if ns in team["namespaces"]:
+    if store.namespace_exists(ns):
         raise HTTPException(status_code=400, detail="Namespace already exists")
 
-    team["namespaces"].append(ns)
-    save_teams()
-
-    caller = getattr(request.state, "username", None)
-    if keycloak.enabled:
-        try:
-            keycloak.ensure_group(ns)
-            access_store.setdefault(ns, set())
-            # Auto-grant the ordering user so the new namespace is theirs to manage.
-            if caller:
-                keycloak.add_user_to_group(caller, ns)
-                access_store[ns].add(caller)
-        except KeycloakAdminError as e:
-            logger.error("Keycloak provisioning for %s failed: %s", ns, e)
-
-    return Team(**team)
+    store.add_namespace(team_id, ns)
+    store.record(caller_name(request), "namespace.create", ns, team["name"])
+    return Team(**_with_owners(store.get_team(team_id)))
 
 
-@app.delete(
-    "/teams/{team_id}/namespaces/{namespace}",
-    response_model=Team,
-    dependencies=[Depends(require_manage)],
-)
+@app.delete("/teams/{team_id}/namespaces/{namespace}", response_model=Team)
 async def delete_namespace(request: Request, team_id: str, namespace: str):
-    """Delete an ordered namespace from a team (team-leader for owned teams, or
-    admin). Removes it from the team's list — the operator then deletes the actual
-    Kubernetes namespace on its next poll — and cleans up its Keycloak group +
-    access entry. The team's default namespace (team-<name>) can't be deleted this
-    way; delete the whole team (admin) instead."""
-    if team_id not in teams_store:
-        raise HTTPException(status_code=404, detail="Team not found")
-    if not _owned_by_caller(request, team_id):
-        raise HTTPException(status_code=404, detail="Team not found")
+    """Delete an ordered namespace from a team (admin or owner).
 
-    team = teams_store[team_id]
-    if namespace not in (team.get("namespaces") or []):
+    The operator deletes the Kubernetes namespace on its next poll and the
+    namespace's grants cascade away. A team's default namespace can't be removed
+    this way — delete the whole team instead (admin).
+    """
+    team = authz.require_team_owner(request, team_id)
+    if namespace not in team["namespaces"]:
         raise HTTPException(status_code=404, detail="Namespace not found")
-    if namespace == default_namespace(team["name"]):
+    if store.is_default_namespace(namespace):
         raise HTTPException(
             status_code=400,
             detail="Cannot delete a team's default namespace; delete the team instead",
         )
 
-    team["namespaces"].remove(namespace)
-    save_teams()
-
-    access_store.pop(namespace, None)
-    if keycloak.enabled:
-        try:
-            keycloak.delete_group(namespace)
-        except KeycloakAdminError as e:
-            logger.error("Could not delete Keycloak group for %s: %s", namespace, e)
-
-    return Team(**team)
+    store.remove_namespace(namespace)
+    store.record(caller_name(request), "namespace.delete", namespace, team["name"])
+    return Team(**_with_owners(store.get_team(team_id)))
 
 @app.get("/compliance", response_model=List[ComplianceSummary])
 def get_all_compliance(request: Request):
     """Compliance summary (badge data) for the caller's visible teams."""
-    return compliance_checker.summarize_all(_scoped_teams(request))
+    return compliance_checker.summarize_all(authz.scoped_teams(request))
 
 @app.get("/teams/{team_id}/compliance", response_model=ComplianceDetail)
 def get_team_compliance(request: Request, team_id: str):
     """Detailed per-policy compliance breakdown for a single team (in scope)."""
-    return compliance_checker.evaluate_team(_require_visible(request, team_id))
+    return compliance_checker.evaluate_team(authz.require_visible_team(request, team_id))
 
 def _attach_compliance(team_apps: dict) -> dict:
     """Attach per-app compliance (supply-chain + Gatekeeper) to each app, using
@@ -494,78 +469,93 @@ def get_all_applications(request: Request):
     """Applications (name + version + compliance) in the caller's namespaces."""
     return [
         _attach_compliance(ta)
-        for ta in applications_reader.applications_for_all(_scoped_teams(request))
+        for ta in applications_reader.applications_for_all(authz.scoped_teams(request))
     ]
 
 @app.get("/teams/{team_id}/applications", response_model=TeamApplications)
 def get_team_applications(request: Request, team_id: str):
     """Applications running in a single team's namespaces (in scope)."""
-    team = _require_visible(request, team_id)
+    team = authz.require_visible_team(request, team_id)
     return _attach_compliance(applications_reader.applications_for_team(team))
 
 # --- Users + access management ----------------------------------------------
+# Keycloak is consulted only as the user DIRECTORY here. The grants themselves are
+# written to the database, which is what makes them effective immediately.
 
-@app.get("/users", response_model=List[UserRef], dependencies=[Depends(require_manage)])
-def list_users():
-    """All Keycloak realm users — the pool leads/admins pick from to grant access."""
+@app.get("/users", response_model=List[UserRef])
+def list_users(request: Request):
+    """All Keycloak realm users — the pool owners/admins pick from when granting."""
+    authz.require_any_owner(request)
     if not keycloak.enabled:
         return []
     try:
-        return keycloak.list_users()
+        users = keycloak.list_users()
     except KeycloakAdminError as e:
         logger.error("list users failed: %s", e)
         raise HTTPException(status_code=503, detail="Keycloak unavailable")
+    # Opportunistically re-sync the denormalised usernames; ids are authoritative,
+    # so a rename in Keycloak would otherwise leave stale display names behind.
+    store.refresh_usernames({u["id"]: u["username"] for u in users if u.get("id")})
+    return users
 
-@app.get(
-    "/access",
-    response_model=List[NamespaceAccess],
-    dependencies=[Depends(require_manage)],
-)
+@app.get("/access", response_model=List[NamespaceAccess])
 def list_access(request: Request):
     """Namespace -> users assignments, scoped to the teams the caller owns
-    (admins see every team's namespaces)."""
+    (admins see every namespace)."""
+    authz.require_any_owner(request)
+    admin = is_admin(request)
+    owned = store.owned_team_ids(caller_id(request))
+
     rows: List[dict] = []
-    for team in _owned_teams(request):
-        for ns in team.get("namespaces") or []:
+    for team in store.list_teams():
+        if not admin and team["id"] not in owned:
+            continue
+        for ns in team["namespaces"]:
             rows.append(
                 {
                     "namespace": ns,
                     "team_id": team["id"],
                     "team_name": team["name"],
-                    "users": sorted(access_store.get(ns, set())),
+                    "users": store.grants_for_namespace(ns),
                 }
             )
     return sorted(rows, key=lambda r: r["namespace"])
 
-@app.post("/access", dependencies=[Depends(require_manage)])
+@app.post("/access")
 def grant_access(request: Request, grant: AccessGrant):
-    """Grant a user visibility of a namespace (adds them to its Keycloak group)."""
-    if not _can_manage_namespace(request, grant.namespace):
-        raise HTTPException(status_code=403, detail="Not allowed to manage this namespace")
-    if not keycloak.enabled:
-        raise HTTPException(status_code=503, detail="Keycloak admin not configured")
-    try:
-        keycloak.add_user_to_group(grant.username, grant.namespace)
-    except KeycloakAdminError as e:
-        logger.error("grant failed: %s", e)
-        raise HTTPException(status_code=502, detail=f"Keycloak error: {e}")
-    access_store.setdefault(grant.namespace, set()).add(grant.username)
-    return {"message": f"Granted {grant.username} access to {grant.namespace}"}
+    """Grant a user a role in a namespace, or change the role they already hold.
 
-@app.delete("/access", dependencies=[Depends(require_manage)])
+    An upsert, so the UI has one code path for "add user" and "change role".
+    """
+    authz.require_namespace_manager(request, grant.namespace)
+    if grant.role not in store.ROLES:
+        raise HTTPException(
+            status_code=400, detail=f"role must be one of {', '.join(store.ROLES)}"
+        )
+    user = _lookup_user(grant.user_id)
+    if not user:
+        raise HTTPException(status_code=400, detail="No such user in Keycloak")
+
+    store.set_grant(grant.namespace, user["id"], user["username"], grant.role)
+    store.record(
+        caller_name(request), "access.grant", grant.namespace,
+        f"{user['username']} as {grant.role}",
+    )
+    return {
+        "message": f"Granted {user['username']} {grant.role} on {grant.namespace}"
+    }
+
+@app.delete("/access")
 def revoke_access(request: Request, grant: AccessGrant):
-    """Revoke a user's access to a namespace (removes them from its Keycloak group)."""
-    if not _can_manage_namespace(request, grant.namespace):
-        raise HTTPException(status_code=403, detail="Not allowed to manage this namespace")
-    if not keycloak.enabled:
-        raise HTTPException(status_code=503, detail="Keycloak admin not configured")
-    try:
-        keycloak.remove_user_from_group(grant.username, grant.namespace)
-    except KeycloakAdminError as e:
-        logger.error("revoke failed: %s", e)
-        raise HTTPException(status_code=502, detail=f"Keycloak error: {e}")
-    access_store.get(grant.namespace, set()).discard(grant.username)
-    return {"message": f"Revoked {grant.username} access to {grant.namespace}"}
+    """Revoke a user's role in a namespace. Effective on their next request."""
+    authz.require_namespace_manager(request, grant.namespace)
+    # Accept an id or a username, but never fail a revoke just because the
+    # directory is unreachable — removing access must always be possible.
+    user = _lookup_user(grant.user_id)
+    user_id = user["id"] if user else grant.user_id
+    store.remove_grant(grant.namespace, user_id)
+    store.record(caller_name(request), "access.revoke", grant.namespace, user_id)
+    return {"message": f"Revoked access to {grant.namespace}"}
 
 @app.get("/internal/teams")
 def internal_teams():
@@ -574,14 +564,14 @@ def internal_teams():
     unscoped (the operator provisions every team's namespaces). Intended for
     in-cluster control-plane use only — restrict via NetworkPolicy in production."""
     return [
-        {"id": t["id"], "name": t["name"], "namespaces": t.get("namespaces") or []}
-        for t in teams_store.values()
+        {"id": t["id"], "name": t["name"], "namespaces": t["namespaces"]}
+        for t in store.list_teams()
     ]
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint for Kubernetes"""
-    return {"status": "healthy", "teams_count": len(teams_store)}
+    return {"status": "healthy", "teams_count": len(store.list_teams())}
 
 if __name__ == "__main__":
     import uvicorn

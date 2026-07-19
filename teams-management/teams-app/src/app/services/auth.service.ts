@@ -86,6 +86,7 @@
 import { Injectable } from "@angular/core";
 import { KeycloakService } from "keycloak-angular";
 import { KeycloakProfile } from "keycloak-js";
+import { Me, NamespaceRole } from "../models/team.model";
 
 @Injectable({
   providedIn: "root",
@@ -93,6 +94,17 @@ import { KeycloakProfile } from "keycloak-js";
 export class AuthService {
   private _isLoggedIn = false;
   private _token = "";
+
+  /**
+   * The caller's effective permissions, from GET /me.
+   *
+   * Authorization is database state in the API (team ownership + per-namespace
+   * roles), so it CANNOT be derived from the token's realm roles any more — the
+   * UI has to ask. AppComponent loads this once after login and calls setMe();
+   * AuthService can't fetch it itself because AuthInterceptor injects AuthService,
+   * so injecting HttpClient here would be a circular dependency.
+   */
+  private _me: Me | null = null;
 
   constructor(private keycloak: KeycloakService) {
     this.initializeAuth();
@@ -169,6 +181,7 @@ export class AuthService {
     await this.keycloak.logout();
     this._isLoggedIn = false;
     this._token = "";
+    this._me = null;
   }
 
   public getTokenSync(): string {
@@ -229,37 +242,37 @@ export class AuthService {
     }
   }
 
-  /** Full admin: create/delete teams. Mirrors the teams-api require_admin. */
+  public setMe(me: Me | null): void {
+    this._me = me;
+  }
+
+  public get me(): Me | null {
+    return this._me;
+  }
+
+  /** Platform admin: create/delete teams, assign owners. */
   public isAdmin(): boolean {
-    return this.hasRole("admin");
+    return !!this._me?.is_admin;
   }
 
-  /** Can manage access (order namespaces, grant/revoke). Mirrors require_manage. */
+  /** Owns at least one team, so has something to manage (or is an admin). */
   public canManage(): boolean {
-    return this.hasRole("team-leader") || this.hasRole("admin");
+    return this.isAdmin() || (this._me?.owned_team_ids?.length ?? 0) > 0;
   }
 
-  /** Can view teams (read). Mirrors the teams-api require_read (viewer role). */
+  /** Every authenticated realm user may open the portal; what they actually see
+   *  is scoped server-side, so a user with no grants simply gets an empty list. */
   public canView(): boolean {
-    return this.canManage() || this.hasRole("viewer");
+    return this._isLoggedIn;
+  }
+
+  /** The caller's role in a namespace, or null if they have no access to it. */
+  public roleIn(namespace: string): NamespaceRole | null {
+    return this._me?.namespaces.find((n) => n.namespace === namespace)?.role ?? null;
   }
 
   public async refreshAuthState(): Promise<void> {
     await this.initializeAuth();
-  }
-
-  /**
-   * Force a token refresh so newly-changed Keycloak group memberships (e.g. a
-   * namespace just ordered/granted) land in the token's `groups` claim without a
-   * re-login. A large minValidity forces the refresh regardless of current expiry.
-   */
-  public async forceRefresh(): Promise<void> {
-    try {
-      await this.keycloak.updateToken(999999);
-      this._token = await this.keycloak.getToken();
-    } catch (error) {
-      console.error("Force token refresh failed:", error);
-    }
   }
 
   // Debug method to check token validity

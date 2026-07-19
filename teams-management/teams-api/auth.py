@@ -2,8 +2,12 @@
 
 Validates Keycloak-issued access tokens (RS256) against the realm's JWKS:
 signature, issuer, and expiry. Used as an app-level FastAPI dependency so every
-route is protected except the public ones (health/root/docs). Writes additionally
-require the `team-leader` realm role.
+route is protected except the public ones (health/root/docs).
+
+This module answers only "who is calling?". *What they may do* is resolved in
+authz.py from the database (team ownership + per-namespace roles) — the single
+exception being the `admin` realm role, which stays in the token because it is
+the bootstrap authority that grants everything else.
 
 Both the Angular UI (client `teams-ui`) and the CLI (client `teams-cli`) get
 tokens from the same `teams` realm, so a single issuer + JWKS validates both.
@@ -92,9 +96,10 @@ def _roles(claims: dict) -> list[str]:
     return list(claims.get("realm_access", {}).get("roles", []))
 
 
-# Realm roles that grant READ access to the API. Writes additionally require the
-# `team-leader` role (see require_team_leader). `viewer` = read-only.
-READ_ROLES = {"viewer", "team-leader", "admin"}
+# `admin` is the only realm role this API still reads. The legacy `team-leader`
+# and `viewer` realm roles are superseded by DB-held team ownership and
+# per-namespace grants (see store.py / authz.py); they remain defined in the realm
+# but no longer carry any authority here.
 
 
 def _is_public(request: Request) -> bool:
@@ -132,36 +137,34 @@ async def authenticate(request: Request) -> None:
 
     request.state.claims = claims
     request.state.username = claims.get("preferred_username")
+    # The Keycloak `sub` is the stable identity every authorization record is
+    # keyed on. Usernames are mutable in Keycloak and would silently re-point a
+    # grant, so they are only ever carried for display.
+    request.state.user_id = claims.get("sub")
 
 
 def require_read(request: Request) -> None:
-    """App-level dependency (runs after authenticate): on non-public paths the
-    caller must hold at least a read role (viewer/team-leader/admin). This is what
-    makes `viewer` meaningful — without it any authenticated token could read."""
+    """App-level dependency (runs after authenticate): the caller must be a valid
+    realm user.
+
+    Authorization proper is no longer a realm role — it lives in the database
+    (team ownership + per-namespace viewer/maintainer grants, see authz.py). A
+    user with no grants authenticates fine and simply sees nothing, so there is
+    nothing left for a coarse read-role gate to add.
+    """
     if not AUTH_ENABLED or _is_public(request):
         return
-    claims = getattr(request.state, "claims", None) or {}
-    if not (READ_ROLES & set(_roles(claims))):
-        raise HTTPException(
-            status_code=403,
-            detail="Requires a 'viewer' or 'team-leader' role",
-        )
-
-
-def require_team_leader(request: Request) -> None:
-    """Route dependency for write operations: require the `team-leader` role."""
-    if not AUTH_ENABLED:
-        return
-    claims = getattr(request.state, "claims", None) or {}
-    if "team-leader" not in _roles(claims):
-        raise HTTPException(
-            status_code=403,
-            detail="Requires the 'team-leader' realm role",
-        )
+    if not getattr(request.state, "claims", None):
+        raise HTTPException(status_code=401, detail="Authentication required")
 
 
 def require_admin(request: Request) -> None:
-    """Route dependency for team lifecycle (create/delete): require the `admin` role."""
+    """Route dependency for platform administration (team lifecycle, ownership).
+
+    `admin` stays a REALM role deliberately: it is the bootstrap authority that
+    hands out every DB-held permission, so it must not itself be DB-held —
+    otherwise a bad migration could leave nobody able to repair the system.
+    """
     if not AUTH_ENABLED:
         return
     claims = getattr(request.state, "claims", None) or {}
@@ -172,42 +175,19 @@ def require_admin(request: Request) -> None:
         )
 
 
-def require_manage(request: Request) -> None:
-    """Route dependency for access management (order namespaces, grant/revoke, list
-    users): require `admin` OR `team-leader`. Admins act cluster-wide; team-leaders
-    are further constrained to their own namespaces by namespace_scope at the route."""
-    if not AUTH_ENABLED:
-        return
-    claims = getattr(request.state, "claims", None) or {}
-    if not ({"admin", "team-leader"} & set(_roles(claims))):
-        raise HTTPException(
-            status_code=403,
-            detail="Requires the 'admin' or 'team-leader' realm role",
-        )
-
-
-def is_team_leader(request: Request) -> bool:
-    """True if the caller holds the `team-leader` realm role. Used to decide
-    whether they see ALL namespaces of a team they belong to (leaders manage the
-    whole team) vs. only the specific namespaces granted to them (viewers)."""
+def is_admin(request: Request) -> bool:
+    """True if the caller holds the `admin` realm role (or auth is disabled)."""
     if not AUTH_ENABLED:
         return True
     claims = getattr(request.state, "claims", None) or {}
-    return "team-leader" in _roles(claims)
+    return "admin" in _roles(claims)
 
 
-def namespace_scope(request: Request):
-    """Namespaces the caller is allowed to see.
+def caller_id(request: Request) -> str:
+    """The caller's Keycloak `sub` — the key every grant/ownership row uses."""
+    return getattr(request.state, "user_id", None) or ""
 
-    Returns None for UNRESTRICTED access (the `admin` realm role, or auth
-    disabled) — the caller sees everything. Otherwise returns the set of
-    namespace names taken from the token's `groups` claim (each Keycloak group
-    is named after the namespace it grants). An empty set means the caller can
-    see nothing. Team leads are members of exactly their team's group.
-    """
-    if not AUTH_ENABLED:
-        return None
-    claims = getattr(request.state, "claims", None) or {}
-    if "admin" in _roles(claims):
-        return None
-    return {g.lstrip("/") for g in (claims.get("groups") or [])}
+
+def caller_name(request: Request) -> str:
+    """The caller's username, for audit rows and display only."""
+    return getattr(request.state, "username", None) or ""

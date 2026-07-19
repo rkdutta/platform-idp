@@ -4,10 +4,13 @@ import { FormsModule, ReactiveFormsModule } from '@angular/forms';
 import { HttpClientModule, HTTP_INTERCEPTORS } from '@angular/common/http';
 import { KeycloakAngularModule, KeycloakService } from 'keycloak-angular';
 
+import { AppRoutingModule } from './app-routing.module';
 import { AppComponent } from './app.component';
 import { TeamFormComponent } from './components/team-form/team-form.component';
 import { TeamListComponent } from './components/team-list/team-list.component';
 import { HeaderComponent } from './components/header/header.component';
+import { TeamsPageComponent } from './components/teams-page/teams-page.component';
+import { UsersPageComponent } from './components/users-page/users-page.component';
 
 import { AuthInterceptor } from './interceptors/auth.interceptor';
 import keycloakConfig from './config/keycloak.config';
@@ -46,14 +49,17 @@ function initializeKeycloak(keycloak: KeycloakService) {
     AppComponent,
     TeamFormComponent,
     TeamListComponent,
-    HeaderComponent
+    HeaderComponent,
+    TeamsPageComponent,
+    UsersPageComponent
   ],
   imports: [
     BrowserModule,
     ReactiveFormsModule,
     FormsModule,
     HttpClientModule,
-    KeycloakAngularModule
+    KeycloakAngularModule,
+    AppRoutingModule
   ],
   providers: [
     {

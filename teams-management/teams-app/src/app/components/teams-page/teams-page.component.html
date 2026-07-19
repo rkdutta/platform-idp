@@ -1,0 +1,21 @@
+<main class="main-content" [class.read-only]="!authService.isAdmin()">
+  <!-- Creating a team is admin-only. Owners and plain users don't see it. -->
+  <div class="form-section" *ngIf="authService.isAdmin()">
+    <h2>Create New Team</h2>
+    <app-team-form (teamCreated)="teamList.loadTeams()"></app-team-form>
+  </div>
+
+  <div class="list-section">
+    <h2>Existing Teams</h2>
+    <p class="view-only-note" *ngIf="!authService.canManage()">
+      👁️ Read-only access — you can view the teams and applications you've been
+      granted, but not change them. Ask a team owner for access.
+    </p>
+    <p class="view-only-note" *ngIf="authService.canManage() && !authService.isAdmin()">
+      🛠️ Team owner — you can order and delete namespaces for the teams you own, and
+      manage who can access them from the
+      <a routerLink="/users">Users</a> page. Only admins create or delete teams.
+    </p>
+    <app-team-list #teamList></app-team-list>
+  </div>
+</main>

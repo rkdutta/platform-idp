@@ -5,58 +5,15 @@
   min-height: calc(100vh - 200px);
 }
 
-.main-content {
-  display: grid;
-  grid-template-columns: 1fr 2fr;
-  gap: 30px;
-  align-items: start;
-}
-
-/* Read-only (viewer): no create form, so the team list spans full width. */
-.main-content.read-only {
-  grid-template-columns: 1fr;
-}
-
-.view-only-note {
+/* Shown when GET /me fails: the portal still renders, but read-only. */
+.load-error {
   margin: 0 0 16px;
   padding: 10px 14px;
   border-radius: 6px;
   font-size: 0.9rem;
-  background: rgba(127, 127, 127, 0.12);
-  border: 1px solid var(--border, #e2e8f0);
-  color: var(--text);
-}
-
-.form-section, .list-section {
-  background: var(--surface);
-  padding: 30px;
-  border-radius: 8px;
-  box-shadow: var(--shadow-sm);
-}
-
-.form-section h2, .list-section h2 {
-  color: var(--text);
-  margin-bottom: 20px;
-  font-size: 1.5rem;
-}
-
-.access-denied {
-  background: var(--surface);
-  padding: 40px;
-  border-radius: 8px;
-  box-shadow: var(--shadow-sm);
-  text-align: center;
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-border);
   color: var(--danger);
-}
-
-.access-denied h2 {
-  margin-bottom: 20px;
-  color: var(--danger);
-}
-
-.access-denied p {
-  color: var(--text-muted);
-  margin-bottom: 10px;
 }
 
 .login-prompt {
@@ -143,11 +100,6 @@ a.btn {
 }
 
 @media (max-width: 768px) {
-  .main-content {
-    grid-template-columns: 1fr;
-    gap: 20px;
-  }
-
   .login-card {
     padding: 40px 20px;
   }

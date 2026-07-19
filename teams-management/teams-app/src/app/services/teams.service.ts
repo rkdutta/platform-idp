@@ -2,7 +2,7 @@ import { Injectable } from '@angular/core';
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { Observable, throwError } from 'rxjs';
 import { catchError } from 'rxjs/operators';
-import { Team, TeamCreate, ComplianceSummary, ComplianceDetail, TeamApplications, UserRef, NamespaceAccess } from '../models/team.model';
+import { Team, TeamCreate, ComplianceSummary, ComplianceDetail, TeamApplications, UserRef, NamespaceAccess, NamespaceRole, OwnerRef, Me } from '../models/team.model';
 import { environment } from '../../environments/environment';
 import { AuthService } from './auth.service';
 
@@ -74,30 +74,54 @@ export class TeamsService {
       .pipe(catchError(this.handleError));
   }
 
-  /** All Keycloak realm users, for the assignment picker. */
+  /** The caller's effective permissions. The API resolves these from its own
+   *  database, so this — not the token — is what the UI gates on. */
+  getMe(): Observable<Me> {
+    const url = `${this.apiUrl}/me`;
+    return this.http.get<Me>(url)
+      .pipe(catchError(this.handleError));
+  }
+
+  /** All Keycloak realm users, for the assignment pickers. */
   getUsers(): Observable<UserRef[]> {
     const url = `${this.apiUrl}/users`;
     return this.http.get<UserRef[]>(url)
       .pipe(catchError(this.handleError));
   }
 
-  /** Namespace -> users assignments, scoped to the caller's owned teams. */
+  /** Namespace -> users+roles, scoped to the caller's owned teams. */
   getAccess(): Observable<NamespaceAccess[]> {
     const url = `${this.apiUrl}/access`;
     return this.http.get<NamespaceAccess[]>(url)
       .pipe(catchError(this.handleError));
   }
 
-  grantAccess(namespace: string, username: string): Observable<any> {
+  /** Grant a role, or change an existing one — the API upserts, so this single
+   *  call covers both "add user" and "change role". */
+  setAccess(namespace: string, user_id: string, role: NamespaceRole): Observable<any> {
     const url = `${this.apiUrl}/access`;
-    return this.http.post(url, { namespace, username })
+    return this.http.post(url, { namespace, user_id, role })
       .pipe(catchError(this.handleError));
   }
 
-  revokeAccess(namespace: string, username: string): Observable<any> {
+  revokeAccess(namespace: string, user_id: string): Observable<any> {
     const url = `${this.apiUrl}/access`;
     // teams-api reads the grant from the request body on DELETE.
-    return this.http.request('delete', url, { body: { namespace, username } })
+    return this.http.request('delete', url, { body: { namespace, user_id } })
+      .pipe(catchError(this.handleError));
+  }
+
+  /** Team ownership (admin-managed). Owners control their team's namespaces
+   *  and who may access them. */
+  addOwner(teamId: string, user_id: string): Observable<OwnerRef[]> {
+    const url = `${this.apiUrl}/teams/${teamId}/owners`;
+    return this.http.post<OwnerRef[]>(url, { user_id })
+      .pipe(catchError(this.handleError));
+  }
+
+  removeOwner(teamId: string, userId: string): Observable<OwnerRef[]> {
+    const url = `${this.apiUrl}/teams/${teamId}/owners/${userId}`;
+    return this.http.delete<OwnerRef[]>(url)
       .pipe(catchError(this.handleError));
   }
 

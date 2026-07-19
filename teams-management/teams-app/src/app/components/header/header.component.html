@@ -3,6 +3,16 @@
     <div class="header-left">
       <h1>Engineering Platform</h1>
       <p class="subtitle">Teams Management</p>
+
+      <nav class="main-nav" *ngIf="isLoggedIn">
+        <a routerLink="/" routerLinkActive="active" [routerLinkActiveOptions]="{ exact: true }">
+          Teams
+        </a>
+        <!-- Access management is only useful to someone who owns a team. -->
+        <a routerLink="/users" routerLinkActive="active" *ngIf="authService.canManage()">
+          Users
+        </a>
+      </nav>
     </div>
 
     <div class="header-right">

@@ -198,14 +198,17 @@
   text-decoration: none;
 }
 
-.ns-count {
+/* The caller's own role in this namespace (viewer | maintainer). */
+.ns-role {
   margin-left: auto;
-  font-size: 11px;
-  color: var(--text-faint);
-}
-
-.ns-access {
-  margin-top: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--primary-soft);
+  color: var(--primary);
 }
 
 /* Keep the delete button and default tag compact in the namespace header. */
@@ -232,31 +235,33 @@
   border-top: 1px dashed var(--border);
 }
 
-.member-role {
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  padding: 0 6px;
-  border-radius: 8px;
-  background: var(--primary-soft);
-  color: var(--primary);
+/* --- Owners -------------------------------------------------------------- */
+.owners {
+  margin-bottom: 12px;
 }
 
-.member-list {
-  list-style: none;
-  margin: 0 0 8px;
-  padding: 0;
+.owners-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  margin: 0 0 6px;
+}
+
+.owner-list {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  margin-bottom: 8px;
 }
 
-.member {
+.owner-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   font-size: 12px;
+  font-weight: 600;
   padding: 2px 4px 2px 10px;
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -264,11 +269,7 @@
   color: var(--text);
 }
 
-.member-name {
-  font-weight: 600;
-}
-
-.btn-revoke {
+.owner-remove {
   border: none;
   background: transparent;
   color: var(--danger);
@@ -279,17 +280,17 @@
   border-radius: 50%;
 }
 
-.btn-revoke:hover {
+.owner-remove:hover {
   background: var(--danger-soft);
 }
 
-.member-empty {
+.owner-empty {
   font-size: 12px;
   font-style: italic;
   color: var(--text-faint);
 }
 
-.add-user,
+.add-owner,
 .order-ns {
   display: flex;
   gap: 8px;

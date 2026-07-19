@@ -10,7 +10,6 @@ import {
   Application,
   ApplicationGroup,
   UserRef,
-  NamespaceAccess,
 } from "../../models/team.model";
 
 @Component({
@@ -45,16 +44,14 @@ export class TeamListComponent implements OnInit {
   // is only present once the user has toggled that card.
   collapsed: { [teamId: string]: boolean } = {};
 
-  // --- Access management (team-leader / admin only) ---
-  // namespace -> usernames who can see it (scoped to the caller's owned teams).
-  accessByNs: { [namespace: string]: string[] } = {};
-  // The full Keycloak user pool for the assignment picker.
-  allUsers: UserRef[] = [];
+  // --- Namespace + ownership management ---
   // Per-team "order namespace" label input.
   orderLabel: { [teamId: string]: string } = {};
-  // Per-namespace selected user in the add-user picker.
-  addUserSel: { [namespace: string]: string } = {};
-  accessError = "";
+  // Per-team selected user in the owner picker (admins only).
+  addOwnerSel: { [teamId: string]: string } = {};
+  // The Keycloak user pool, loaded only for admins (the only ones who assign owners).
+  allUsers: UserRef[] = [];
+  actionError = "";
 
   // public so the template can gate the Delete button on manage rights.
   constructor(
@@ -69,9 +66,9 @@ export class TeamListComponent implements OnInit {
   loadTeams() {
     this.isLoading = true;
     this.errorMessage = "";
-    // Clear any stale access banner; loadAccess/loadUsers below re-set it only if
-    // they fail again, so a recovered backend makes the banner disappear.
-    this.accessError = "";
+    // Clear any stale banner; the calls below re-set it only if they fail again,
+    // so a recovered backend makes the banner disappear.
+    this.actionError = "";
 
     this.teamsService.getTeams().subscribe({
       next: (teams) => {
@@ -79,8 +76,9 @@ export class TeamListComponent implements OnInit {
         this.isLoading = false;
         this.loadCompliance();
         this.loadApplications();
-        if (this.authService.canManage()) {
-          this.loadAccess();
+        // Only admins assign owners, so only they need the user directory here.
+        // Everyone else manages access from the Users page.
+        if (this.authService.isAdmin()) {
           this.loadUsers();
         }
       },
@@ -100,47 +98,56 @@ export class TeamListComponent implements OnInit {
     return this.collapsed[teamId] !== false;
   }
 
-  // --- Access management --------------------------------------------------
-  loadAccess() {
-    this.teamsService.getAccess().subscribe({
-      next: (rows) => {
-        this.accessByNs = {};
-        for (const row of rows) {
-          this.accessByNs[row.namespace] = row.users;
-        }
-      },
-      error: (error) => console.error("Failed to load access:", error),
-    });
-  }
+  // --- Namespace + ownership management -----------------------------------
 
   loadUsers() {
     this.teamsService.getUsers().subscribe({
       next: (users) => (this.allUsers = users),
       // Surface this: an empty picker usually means the Keycloak admin client
       // (teams-api-sa) isn't reachable/authorized, not "no users".
-      error: (error) => (this.accessError = "Could not load users: " + error),
+      error: (error) => (this.actionError = "Could not load users: " + error),
     });
   }
 
-  usersFor(namespace: string): string[] {
-    return this.accessByNs[namespace] || [];
+  /** True if the caller owns this team (or is an admin) — resolved server-side
+   *  and delivered via GET /me, since ownership isn't in the token. */
+  canManageTeam(team: Team): boolean {
+    return (
+      this.authService.isAdmin() ||
+      !!this.authService.me?.owned_team_ids.includes(team.id)
+    );
   }
 
-  // Users not already granted the namespace — the pool the picker offers.
-  assignableUsers(namespace: string): UserRef[] {
-    const granted = new Set(this.usersFor(namespace));
-    return this.allUsers.filter((u) => !granted.has(u.username));
+  /** Users who aren't already owners — the pool the owner picker offers. */
+  assignableOwners(team: Team): UserRef[] {
+    const owners = new Set((team.owners || []).map((o) => o.user_id));
+    return this.allUsers.filter((u) => !owners.has(u.id));
   }
 
-  // The app realm roles for a username (from the loaded user pool), e.g. for
-  // showing "teamlead1 (team-leader)" next to an assigned member.
-  rolesOf(username: string): string[] {
-    return this.allUsers.find((u) => u.username === username)?.roles || [];
+  addOwner(team: Team) {
+    const userId = this.addOwnerSel[team.id];
+    if (!userId) {
+      return;
+    }
+    this.actionError = "";
+    this.teamsService.addOwner(team.id, userId).subscribe({
+      next: () => {
+        this.addOwnerSel[team.id] = "";
+        this.loadTeams();
+      },
+      error: (error) => (this.actionError = error),
+    });
   }
 
-  roleLabel(username: string): string {
-    const roles = this.rolesOf(username);
-    return roles.length ? roles.join(", ") : "";
+  removeOwner(team: Team, userId: string, username: string) {
+    if (!confirm(`Remove ${username} as an owner of "${team.name}"?`)) {
+      return;
+    }
+    this.actionError = "";
+    this.teamsService.removeOwner(team.id, userId).subscribe({
+      next: () => this.loadTeams(),
+      error: (error) => (this.actionError = error),
+    });
   }
 
   orderNamespace(team: Team) {
@@ -148,20 +155,20 @@ export class TeamListComponent implements OnInit {
     if (!label) {
       return;
     }
-    this.accessError = "";
+    this.actionError = "";
     this.teamsService.orderNamespace(team.id, label).subscribe({
       next: () => {
         this.orderLabel[team.id] = "";
-        // The API auto-grants the ordering user the new namespace's Keycloak
-        // group; force a token refresh so the new `groups` claim lands and the
-        // namespace becomes visible to them immediately (no re-login).
-        this.authService.forceRefresh().then(() => this.loadTeams());
+        // No token refresh needed: owning the team already grants the new
+        // namespace, and the API resolves that from its database on the next call.
+        this.loadTeams();
       },
-      error: (error) => (this.accessError = error),
+      error: (error) => (this.actionError = error),
     });
   }
 
-  // The team's default namespace (index 0) can't be deleted — only ordered ones.
+  // The team's default namespace can't be deleted — only ordered ones. The API
+  // returns namespaces with the default first, and rejects the call regardless.
   isDefaultNamespace(team: Team, namespace: string): boolean {
     return team.namespaces[0] === namespace;
   }
@@ -174,33 +181,10 @@ export class TeamListComponent implements OnInit {
     ) {
       return;
     }
-    this.accessError = "";
+    this.actionError = "";
     this.teamsService.deleteNamespace(team.id, namespace).subscribe({
       next: () => this.loadTeams(),
-      error: (error) => (this.accessError = error),
-    });
-  }
-
-  grant(namespace: string) {
-    const username = this.addUserSel[namespace];
-    if (!username) {
-      return;
-    }
-    this.accessError = "";
-    this.teamsService.grantAccess(namespace, username).subscribe({
-      next: () => {
-        this.addUserSel[namespace] = "";
-        this.loadAccess();
-      },
-      error: (error) => (this.accessError = error),
-    });
-  }
-
-  revoke(namespace: string, username: string) {
-    this.accessError = "";
-    this.teamsService.revokeAccess(namespace, username).subscribe({
-      next: () => this.loadAccess(),
-      error: (error) => (this.accessError = error),
+      error: (error) => (this.actionError = error),
     });
   }
 

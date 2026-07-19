@@ -1,0 +1,47 @@
+.main-content {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  gap: 30px;
+  align-items: start;
+}
+
+/* No create form (non-admin), so the team list spans full width. */
+.main-content.read-only {
+  grid-template-columns: 1fr;
+}
+
+.view-only-note {
+  margin: 0 0 16px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  background: rgba(127, 127, 127, 0.12);
+  border: 1px solid var(--border, #e2e8f0);
+  color: var(--text);
+}
+
+.view-only-note a {
+  color: var(--primary);
+}
+
+.form-section,
+.list-section {
+  background: var(--surface);
+  padding: 30px;
+  border-radius: 8px;
+  box-shadow: var(--shadow-sm);
+}
+
+.form-section h2,
+.list-section h2 {
+  color: var(--text);
+  margin-bottom: 20px;
+  font-size: 1.5rem;
+}
+
+@media (max-width: 768px) {
+  .main-content {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+}

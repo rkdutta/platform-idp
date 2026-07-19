@@ -1,30 +1,60 @@
 // src/app/models/team.model.ts
+
+/** A user's role *within a single namespace*. Ownership of the team implies
+ *  `maintainer` on all of its namespaces (the API derives that). */
+export type NamespaceRole = 'viewer' | 'maintainer';
+
+export interface OwnerRef {
+  user_id: string;
+  username: string;
+}
+
 export interface Team {
   id: string;
   name: string;
   created_at: string;
   namespaces: string[];
+  owners: OwnerRef[];
 }
 
 export interface TeamCreate {
   name: string;
 }
 
-/** A Keycloak realm user (the pool leads/admins pick from to grant access). */
+/** A Keycloak realm user (the directory the pickers are populated from). */
 export interface UserRef {
+  id: string; // Keycloak `sub` — what grants are keyed on
   username: string;
   firstName: string;
   lastName: string;
   email: string;
-  roles: string[]; // app realm roles (admin/team-leader/viewer)
+  roles: string[]; // realm roles; only `admin` still carries authority
 }
 
-/** Which users can see a namespace (scoped to teams the caller owns). */
+export interface AccessUser {
+  user_id: string;
+  username: string;
+  role: NamespaceRole;
+}
+
+/** Which users hold which role in a namespace (scoped to teams the caller owns). */
 export interface NamespaceAccess {
   namespace: string;
   team_id: string;
   team_name: string;
-  users: string[];
+  users: AccessUser[];
+}
+
+/** The caller's effective permissions, resolved server-side.
+ *
+ *  Authority lives in the API database now, so the UI can't infer it from token
+ *  roles — everything role-gated reads from here. */
+export interface Me {
+  user_id: string;
+  username: string;
+  is_admin: boolean;
+  owned_team_ids: string[];
+  namespaces: { namespace: string; role: NamespaceRole }[];
 }
 
 export type ComplianceStatus = 'compliant' | 'non_compliant' | 'unknown';

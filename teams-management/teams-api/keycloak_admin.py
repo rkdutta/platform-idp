@@ -1,10 +1,13 @@
 """Keycloak Admin API client for teams-api.
 
-Manages the realm's groups and group memberships so a team-lead/admin can grant a
-user access to a namespace. Each namespace has a Keycloak group of the same name;
-adding a user to that group makes the namespace appear in their token's `groups`
-claim (which `auth.namespace_scope` reads), so this is what actually enforces
-per-user namespace visibility.
+Keycloak is the **user directory** for teams-api: it answers "who exists" so the
+API can validate an owner or grantee and populate the assignment pickers.
+
+It is no longer an authorization store. As of 2.0.0, ownership and per-namespace
+roles live in SQLite (see store.py) and are read live on every request, so access
+changes take effect immediately instead of waiting for a token refresh. The group
+methods below survive only because the one-time migration reads the pre-2.0 group
+membership to seed that database; nothing writes groups any more.
 
 Authenticates with the confidential `teams-api-sa` client via the client-credentials
 grant. The service account holds realm-management roles (manage-users / view-users /
@@ -190,8 +193,12 @@ class KeycloakAdmin:
         return [u["username"] for u in resp.json() if u.get("username")]
 
     def list_users(self) -> List[dict]:
-        """All realm users as {username, firstName, lastName, email, roles}, where
-        `roles` is the subset of the app realm roles (admin/team-leader/viewer)."""
+        """All realm users as {id, username, firstName, lastName, email, roles}.
+
+        `id` is the Keycloak `sub` — the stable key every ownership and access
+        grant is stored against (usernames are mutable). `roles` is the subset of
+        the app realm roles; only `admin` still carries authority in the API.
+        """
         resp = self._request("GET", "/users", params={"max": 1000})
         if resp.status_code != 200:
             raise KeycloakAdminError(f"list users {resp.status_code}: {resp.text}")
@@ -215,6 +222,7 @@ class KeycloakAdmin:
                 continue
             out.append(
                 {
+                    "id": u.get("id", ""),
                     "username": u["username"],
                     "firstName": u.get("firstName", ""),
                     "lastName": u.get("lastName", ""),
