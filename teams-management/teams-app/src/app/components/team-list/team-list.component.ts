@@ -40,7 +40,9 @@ export class TeamListComponent implements OnInit {
   // Each team's namespace, keyed by team id (for Rollouts dashboard deep links).
   teamNamespace: { [teamId: string]: string | null } = {};
 
-  // Collapsed team cards, keyed by team id. Cards start expanded.
+  // Expansion state per team id. Cards start COLLAPSED, so the list stays
+  // scannable (each collapsed card still shows its compliance badge); an entry
+  // is only present once the user has toggled that card.
   collapsed: { [teamId: string]: boolean } = {};
 
   // --- Access management (team-leader / admin only) ---
@@ -90,11 +92,12 @@ export class TeamListComponent implements OnInit {
   }
 
   toggleCollapse(teamId: string) {
-    this.collapsed[teamId] = !this.collapsed[teamId];
+    this.collapsed[teamId] = !this.isCollapsed(teamId);
   }
 
+  // Default is collapsed: only an explicit `false` counts as expanded.
   isCollapsed(teamId: string): boolean {
-    return !!this.collapsed[teamId];
+    return this.collapsed[teamId] !== false;
   }
 
   // --- Access management --------------------------------------------------
@@ -247,6 +250,72 @@ export class TeamListComponent implements OnInit {
     return this.appGroupsByNs[teamId]?.[namespace] || [];
   }
 
+  // --- Application (part-of) card collapse + rollups ----------------------
+  // Keyed by team:namespace:group, since the same app name can exist in more
+  // than one namespace. Like team cards, these start COLLAPSED.
+  appGroupCollapsed: { [key: string]: boolean } = {};
+
+  private appGroupKey(teamId: string, namespace: string, group: ApplicationGroup): string {
+    return `${teamId}:${namespace}:${group.name}`;
+  }
+
+  toggleAppGroup(teamId: string, namespace: string, group: ApplicationGroup) {
+    const key = this.appGroupKey(teamId, namespace, group);
+    this.appGroupCollapsed[key] = !this.isAppGroupCollapsed(teamId, namespace, group);
+  }
+
+  isAppGroupCollapsed(teamId: string, namespace: string, group: ApplicationGroup): boolean {
+    return this.appGroupCollapsed[this.appGroupKey(teamId, namespace, group)] !== false;
+  }
+
+  // Health of one component: a Rollout reports its own phase; a plain
+  // Deployment has none, so derive it from replica readiness.
+  private appHealth(app: Application): string {
+    if (app.rollout?.phase) {
+      return app.rollout.phase;
+    }
+    if (app.replicas > 0 && app.ready_replicas === app.replicas) {
+      return "Healthy";
+    }
+    if (app.ready_replicas < app.replicas) {
+      return "Progressing";
+    }
+    return "Unknown";
+  }
+
+  // Worst-wins rollup across the group's components.
+  groupHealth(group: ApplicationGroup): string {
+    const phases = group.apps.map((a) => this.appHealth(a));
+    for (const bad of ["Degraded", "Progressing", "Paused"]) {
+      if (phases.includes(bad)) {
+        return bad;
+      }
+    }
+    return phases.length && phases.every((p) => p === "Healthy") ? "Healthy" : "Unknown";
+  }
+
+  // Worst-wins compliance rollup: any non-compliant component fails the group.
+  groupCompliance(group: ApplicationGroup): ComplianceStatus {
+    const statuses = group.apps.map((a) => a.compliance?.status);
+    if (statuses.includes("non_compliant")) {
+      return "non_compliant";
+    }
+    return statuses.length && statuses.every((s) => s === "compliant")
+      ? "compliant"
+      : "unknown";
+  }
+
+  groupComplianceLabel(group: ApplicationGroup): string {
+    switch (this.groupCompliance(group)) {
+      case "compliant":
+        return "Compliant";
+      case "non_compliant":
+        return "Non-compliant";
+      default:
+        return "Unknown";
+    }
+  }
+
   // Group a namespace's workloads into application cards by their
   // app.kubernetes.io/part-of label; anything without one stands on its own.
   private groupApplications(apps: Application[]): ApplicationGroup[] {
@@ -351,6 +420,12 @@ export class TeamListComponent implements OnInit {
 
   statusOf(teamId: string): ComplianceStatus {
     return this.compliance[teamId]?.status ?? "unknown";
+  }
+
+  // Tooltip for the collapsed-card badge. Done here (not inline in the template)
+  // because the compliance map is empty until the summaries load.
+  complianceReason(teamId: string): string {
+    return this.compliance[teamId]?.reason || "Namespace policy compliance";
   }
 
   statusLabel(teamId: string): string {

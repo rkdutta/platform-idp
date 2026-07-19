@@ -41,6 +41,15 @@
           >
           <ng-template #plainName>{{ team.name }}</ng-template>
         </h3>
+        <!-- Collapsed cards still surface the team's compliance at a glance. -->
+        <span
+          class="badge team-header-badge"
+          *ngIf="isCollapsed(team.id)"
+          [ngClass]="'badge-' + statusOf(team.id)"
+          [title]="complianceReason(team.id)"
+        >
+          {{ statusLabel(team.id) }}
+        </span>
         <span class="team-header-spacer"></span>
         <button
           *ngIf="authService.isAdmin()"
@@ -143,15 +152,48 @@
                 class="app-groups"
                 *ngIf="appGroupsFor(team.id, ns).length > 0; else nsNoApps"
               >
-                <div class="app-group" *ngFor="let group of appGroupsFor(team.id, ns)">
-                  <div class="app-group-header">
+                <div
+                  class="app-group"
+                  [class.collapsed]="isAppGroupCollapsed(team.id, ns, group)"
+                  *ngFor="let group of appGroupsFor(team.id, ns)"
+                >
+                  <button
+                    class="app-group-header"
+                    (click)="toggleAppGroup(team.id, ns, group)"
+                    [attr.aria-expanded]="!isAppGroupCollapsed(team.id, ns, group)"
+                    [title]="
+                      (isAppGroupCollapsed(team.id, ns, group)
+                        ? 'Expand '
+                        : 'Collapse ') + group.name
+                    "
+                  >
+                    <span class="collapse-chevron">{{
+                      isAppGroupCollapsed(team.id, ns, group) ? "▸" : "▾"
+                    }}</span>
                     <span class="app-group-name">{{ group.name }}</span>
                     <span class="app-group-count"
                       >{{ group.apps.length }} components</span
                     >
-                  </div>
+                    <span class="app-group-spacer"></span>
+                    <!-- Rollups so a collapsed app card still reports its state -->
+                    <span
+                      class="app-phase"
+                      [ngClass]="'phase-' + groupHealth(group)"
+                      title="Workload health"
+                      >{{ groupHealth(group) }}</span
+                    >
+                    <span
+                      class="badge badge-sm"
+                      [ngClass]="'badge-' + groupCompliance(group)"
+                      title="Supply-chain + policy compliance"
+                      >{{ groupComplianceLabel(group) }}</span
+                    >
+                  </button>
 
-                  <div class="component-list">
+                  <div
+                    class="component-list"
+                    *ngIf="!isAppGroupCollapsed(team.id, ns, group)"
+                  >
                     <div class="component-card" *ngFor="let app of group.apps">
                       <div class="component-head">
                         <span class="app-name">{{ app.name }}</span>

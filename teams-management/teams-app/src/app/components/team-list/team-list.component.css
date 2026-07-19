@@ -56,6 +56,11 @@
   flex: 1;
 }
 
+/* Compliance badge shown in the header while the card is collapsed. */
+.team-header-badge {
+  flex: 0 0 auto;
+}
+
 .collapse-toggle {
   display: inline-flex;
   align-items: center;
@@ -350,11 +355,34 @@
   padding: 10px 12px;
 }
 
+/* Clickable header: resets button chrome so it still reads as a card header. */
 .app-group-header {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
+  width: 100%;
   margin-bottom: 10px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* Collapsed app card is just its header — drop the trailing gap. */
+.app-group.collapsed .app-group-header {
+  margin-bottom: 0;
+}
+
+.app-group-spacer {
+  flex: 1;
+}
+
+/* The spacer does the pushing here, so drop .app-phase's own auto margin. */
+.app-group-header .app-phase {
+  margin-left: 0;
 }
 
 .app-group-name {
