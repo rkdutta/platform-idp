@@ -432,6 +432,44 @@ async def order_namespace(request: Request, team_id: str, order: NamespaceOrder)
 
     return Team(**team)
 
+
+@app.delete(
+    "/teams/{team_id}/namespaces/{namespace}",
+    response_model=Team,
+    dependencies=[Depends(require_manage)],
+)
+async def delete_namespace(request: Request, team_id: str, namespace: str):
+    """Delete an ordered namespace from a team (team-leader for owned teams, or
+    admin). Removes it from the team's list — the operator then deletes the actual
+    Kubernetes namespace on its next poll — and cleans up its Keycloak group +
+    access entry. The team's default namespace (team-<name>) can't be deleted this
+    way; delete the whole team (admin) instead."""
+    if team_id not in teams_store:
+        raise HTTPException(status_code=404, detail="Team not found")
+    if not _owned_by_caller(request, team_id):
+        raise HTTPException(status_code=404, detail="Team not found")
+
+    team = teams_store[team_id]
+    if namespace not in (team.get("namespaces") or []):
+        raise HTTPException(status_code=404, detail="Namespace not found")
+    if namespace == default_namespace(team["name"]):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete a team's default namespace; delete the team instead",
+        )
+
+    team["namespaces"].remove(namespace)
+    save_teams()
+
+    access_store.pop(namespace, None)
+    if keycloak.enabled:
+        try:
+            keycloak.delete_group(namespace)
+        except KeycloakAdminError as e:
+            logger.error("Could not delete Keycloak group for %s: %s", namespace, e)
+
+    return Team(**team)
+
 @app.get("/compliance", response_model=List[ComplianceSummary])
 def get_all_compliance(request: Request):
     """Compliance summary (badge data) for the caller's visible teams."""

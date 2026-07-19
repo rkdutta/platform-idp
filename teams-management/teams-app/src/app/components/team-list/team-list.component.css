@@ -203,6 +203,23 @@
   margin-top: 8px;
 }
 
+/* Keep the delete button and default tag compact in the namespace header. */
+.ns-delete {
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
+.ns-default-tag {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--neutral-soft);
+  color: var(--text-muted);
+}
+
 /* Apps live inside their namespace card. */
 .ns-apps {
   margin-top: 10px;

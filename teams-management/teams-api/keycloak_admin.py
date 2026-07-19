@@ -146,6 +146,18 @@ class KeycloakAdmin:
             raise KeycloakAdminError(f"group '{name}' not found after create")
         return gid
 
+    def delete_group(self, name: str) -> None:
+        """Delete a group (idempotent). Called when a namespace is removed so its
+        access group doesn't linger and re-grant old members if the namespace name
+        is later reused."""
+        gid = self.group_id(name)
+        if not gid:
+            return
+        resp = self._request("DELETE", f"/groups/{gid}")
+        if resp.status_code not in (204, 200, 404):
+            raise KeycloakAdminError(f"delete group {resp.status_code}: {resp.text}")
+        self._group_ids.pop(name, None)
+
     def group_members(self, name: str) -> List[str]:
         """Usernames belonging to the group (empty if the group doesn't exist)."""
         gid = self.group_id(name)

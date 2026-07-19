@@ -79,6 +79,20 @@
               <span class="ns-count" *ngIf="authService.canManage()"
                 >{{ usersFor(ns).length }} user(s)</span
               >
+              <button
+                *ngIf="authService.canManage() && !isDefaultNamespace(team, ns)"
+                class="btn btn-danger btn-sm ns-delete"
+                (click)="deleteNamespace(team, ns)"
+                [title]="'Delete namespace ' + ns"
+              >
+                Delete
+              </button>
+              <span
+                *ngIf="authService.canManage() && isDefaultNamespace(team, ns)"
+                class="ns-default-tag"
+                title="A team's default namespace can't be deleted; delete the team instead"
+                >default</span
+              >
             </div>
 
             <!-- Access management is team-leader / admin only -->

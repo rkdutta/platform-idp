@@ -67,6 +67,9 @@ export class TeamListComponent implements OnInit {
   loadTeams() {
     this.isLoading = true;
     this.errorMessage = "";
+    // Clear any stale access banner; loadAccess/loadUsers below re-set it only if
+    // they fail again, so a recovered backend makes the banner disappear.
+    this.accessError = "";
 
     this.teamsService.getTeams().subscribe({
       next: (teams) => {
@@ -151,6 +154,26 @@ export class TeamListComponent implements OnInit {
         // namespace becomes visible to them immediately (no re-login).
         this.authService.forceRefresh().then(() => this.loadTeams());
       },
+      error: (error) => (this.accessError = error),
+    });
+  }
+
+  // The team's default namespace (index 0) can't be deleted — only ordered ones.
+  isDefaultNamespace(team: Team, namespace: string): boolean {
+    return team.namespaces[0] === namespace;
+  }
+
+  deleteNamespace(team: Team, namespace: string) {
+    if (
+      !confirm(
+        `Delete namespace "${namespace}"? This removes the namespace and everything running in it.`,
+      )
+    ) {
+      return;
+    }
+    this.accessError = "";
+    this.teamsService.deleteNamespace(team.id, namespace).subscribe({
+      next: () => this.loadTeams(),
       error: (error) => (this.accessError = error),
     });
   }

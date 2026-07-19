@@ -67,6 +67,13 @@ export class TeamsService {
       .pipe(catchError(this.handleError));
   }
 
+  /** Delete an ordered namespace from a team (not the default namespace). */
+  deleteNamespace(teamId: string, namespace: string): Observable<Team> {
+    const url = `${this.apiUrl}/teams/${teamId}/namespaces/${namespace}`;
+    return this.http.delete<Team>(url)
+      .pipe(catchError(this.handleError));
+  }
+
   /** All Keycloak realm users, for the assignment picker. */
   getUsers(): Observable<UserRef[]> {
     const url = `${this.apiUrl}/users`;
