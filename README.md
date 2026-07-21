@@ -1,6 +1,6 @@
 # 👥 Teams Management - Engineering Platform APIs & Developer Experience
 
-Welcome to the Teams Management module! This comprehensive module teaches you to build a complete engineering platform with APIs, CLI tools, and web interfaces for managing engineering teams. You'll learn to create developer-friendly tools that make platform operations simple and scalable.
+Welcome to the Teams Management module! This comprehensive module teaches you to build a complete engineering platform with APIs, CLI tools, and web interfaces for managing engineering teams. You'll learn to create developer-friendly tools that make platform operations simple and scalable. 
 
 ## 🎯 Learning Objectives
 
