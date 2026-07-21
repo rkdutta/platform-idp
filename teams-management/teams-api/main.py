@@ -501,7 +501,16 @@ def list_users(request: Request):
 @app.get("/access", response_model=List[NamespaceAccess])
 def list_access(request: Request):
     """Namespace -> users assignments, scoped to the teams the caller owns
-    (admins see every namespace)."""
+    (admins see every namespace).
+
+    A namespace's users are its explicit per-namespace grants PLUS its team's
+    owners — ownership confers implicit `maintainer` on every namespace of the
+    owned team (see authz.namespace_role) and isn't stored as a grant row, so it
+    must be merged in here or an owner with no separate grant would show up with
+    zero namespaces (they have full access via ownership, just never an explicit
+    grant). An owner who also somehow holds an explicit grant is deduplicated in
+    favor of the owner entry, since ownership is authoritative.
+    """
     authz.require_any_owner(request)
     admin = is_admin(request)
     owned = store.owned_team_ids(caller_id(request))
@@ -510,13 +519,21 @@ def list_access(request: Request):
     for team in store.list_teams():
         if not admin and team["id"] not in owned:
             continue
+        owners = [
+            {"user_id": o["user_id"], "username": o["username"], "role": "maintainer"}
+            for o in store.owners_of(team["id"])
+        ]
+        owner_ids = {o["user_id"] for o in owners}
         for ns in team["namespaces"]:
+            grants = [
+                g for g in store.grants_for_namespace(ns) if g["user_id"] not in owner_ids
+            ]
             rows.append(
                 {
                     "namespace": ns,
                     "team_id": team["id"],
                     "team_name": team["name"],
-                    "users": store.grants_for_namespace(ns),
+                    "users": owners + grants,
                 }
             )
     return sorted(rows, key=lambda r: r["namespace"])

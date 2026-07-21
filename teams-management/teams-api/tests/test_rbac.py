@@ -62,6 +62,42 @@ def test_ownership_implies_maintainer_without_a_grant(db, alice):
     assert authz.namespace_role(alice, "team-sss-staging") == "maintainer"
 
 
+def test_list_access_includes_owners_not_just_grants(db, alice, bob):
+    """Regression test: GET /access (main.list_access) is what the Users page
+    reads to show "which namespaces does this user have access to". An owner's
+    maintainer access is derived (see test_ownership_implies_maintainer_without_a_grant
+    above) rather than stored as a grant row, so a listing built from
+    store.grants_for_namespace() alone silently drops every owner — they'd show
+    zero namespaces despite having full access. list_access must merge in each
+    team's owners."""
+    import main  # noqa: PLC0415 - imported here, not at module scope, to avoid
+    # paying FastAPI app construction for the tests above that don't need it.
+
+    _team(db, "sss", "t-sss")
+    db.add_owner("t-sss", "alice-id", "alice")
+    db.set_grant("team-sss", "bob-id", "bob", "viewer")
+
+    rows = main.list_access(alice)
+    assert len(rows) == 1
+    users = {u["user_id"]: u["role"] for u in rows[0]["users"]}
+    assert users == {"alice-id": "maintainer", "bob-id": "viewer"}
+
+
+def test_list_access_owner_entry_wins_over_a_stale_grant_row(db, alice):
+    """An owner who also happens to hold an explicit grant row (e.g. left over
+    from before they became owner) must appear once, as maintainer — not twice
+    with conflicting roles."""
+    import main  # noqa: PLC0415
+
+    _team(db, "sss", "t-sss")
+    db.set_grant("team-sss", "alice-id", "alice", "viewer")
+    db.add_owner("t-sss", "alice-id", "alice")
+
+    rows = main.list_access(alice)
+    assert len(rows[0]["users"]) == 1
+    assert rows[0]["users"][0]["role"] == "maintainer"
+
+
 def test_admin_is_unrestricted(db, admin):
     _team(db, "sss", "t-sss")
     assert authz.visible_namespaces(admin) is None
