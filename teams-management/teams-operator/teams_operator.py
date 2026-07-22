@@ -288,8 +288,9 @@ class TeamsOperator:
     def _apply_namespaced_templates(self, namespace: str, templates_dir: str, create_fn) -> None:
         """Render every *.yaml template in `templates_dir` for `namespace`
         (substituting {{ NAMESPACE }}) and create-if-missing via `create_fn`
-        (a bound CoreV1Api create_namespaced_* method). Shared by
-        ensure_priority_quotas and ensure_limit_ranges — same contract
+        (a bound create_namespaced_* method, from whichever Api client
+        matches the template's kind). Shared by ensure_priority_quotas,
+        ensure_limit_ranges and ensure_network_policies — same contract
         (never patched again once it exists, so a hand-tuned value in the
         cluster doesn't get silently reverted), different Kubernetes API
         call and directory.
@@ -470,6 +471,7 @@ class TeamsOperator:
                 self.ensure_default_sa_pull_secret(namespace_name)
                 self.ensure_priority_quotas(namespace_name)
                 self.ensure_limit_ranges(namespace_name)
+                self.ensure_network_policies(namespace_name)
 
         # RBAC sync, part 2: the one binding that's still user-list-based —
         # cluster-admin for Keycloak `admin`-role holders. A single cluster-
