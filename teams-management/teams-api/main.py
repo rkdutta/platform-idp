@@ -1,7 +1,8 @@
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Optional, Set
+import base64
 import json
 import logging
 import os
@@ -33,6 +34,15 @@ logger = logging.getLogger("teams-api")
 # source and a backup — nothing writes to it any more.
 DATA_DIR = os.getenv("DATA_DIR", "/data")
 DATA_FILE = Path(DATA_DIR) / "teams.json"
+
+# How the cluster is reached from a developer's own machine — baked into the
+# kubeconfig GET /kubeconfig serves (see below). Both are set once at bootstrap
+# from the Terraform-generated kubeconfig (`grep server: platform-base/kubeconfig`)
+# and are NOT auto-detected: the API server's host port is dynamically assigned
+# by Docker and can change across a cluster recreate, at which point these must
+# be updated too — see bootstrap/README.md.
+K8S_API_SERVER = os.getenv("K8S_API_SERVER", "")
+K8S_API_CA_CERT = os.getenv("K8S_API_CA_CERT", "")
 
 
 def _sanitize(value: str) -> str:
@@ -329,6 +339,63 @@ def get_me(request: Request):
         ],
     )
 
+# A single template shared by every caller: it carries no per-user secret, just
+# the cluster's connection info plus a generic `exec:` credential plugin that
+# shells out to `teams-cli k8s-token` at kubectl invocation time. Identity
+# resolution happens locally, from the caller's own teams-cli login — so this
+# is safe to serve to any authenticated user (same authority as GET /me: read
+# access to your own effective permissions, nothing more).
+_KUBECONFIG_TEMPLATE = """\
+apiVersion: v1
+kind: Config
+clusters:
+  - name: teams
+    cluster:
+      server: {server}
+      certificate-authority-data: {ca_data}
+contexts:
+  - name: teams
+    context:
+      cluster: teams
+      user: teams-cli
+current-context: teams
+users:
+  - name: teams-cli
+    user:
+      exec:
+        apiVersion: client.authentication.k8s.io/v1
+        command: teams-cli
+        args: ["k8s-token"]
+        interactiveMode: IfAvailable
+"""
+
+
+@app.get("/kubeconfig")
+def get_kubeconfig():
+    """A ready-to-use kubeconfig: cluster connection info + an `exec:` stanza
+    that defers identity to a local `teams-cli login`. See _KUBECONFIG_TEMPLATE.
+
+    Requires K8S_API_SERVER/K8S_API_CA_CERT to be configured (see main.py's
+    top-level constants and bootstrap/README.md) — without them there's
+    nothing to serve, and every caller would otherwise get the same unusable
+    file, so this fails loudly instead.
+    """
+    if not K8S_API_SERVER or not K8S_API_CA_CERT:
+        raise HTTPException(
+            status_code=503,
+            detail="Cluster connection info not configured (K8S_API_SERVER/K8S_API_CA_CERT)",
+        )
+    body = _KUBECONFIG_TEMPLATE.format(
+        server=K8S_API_SERVER,
+        ca_data=base64.b64encode(K8S_API_CA_CERT.encode()).decode(),
+    )
+    return Response(
+        content=body,
+        media_type="application/yaml",
+        headers={"Content-Disposition": "attachment; filename=teams-kubeconfig.yaml"},
+    )
+
+
 @app.post("/teams", response_model=Team, dependencies=[Depends(require_admin)])
 async def create_team(request: Request, team: TeamCreate):
     """Create a new team with its default namespace `team-<name>` (admin only).
@@ -601,6 +668,46 @@ def internal_teams():
         {"id": t["id"], "name": t["name"], "namespaces": t["namespaces"]}
         for t in store.list_teams()
     ]
+
+
+@app.get("/internal/access")
+def internal_access():
+    """UNAUTHENTICATED internal endpoint for teams-operator to sync namespace
+    RBAC (Role/RoleBindings) to match teams-api's permission model:
+    `{"namespaces": {ns: {"viewer": [username,...], "maintainer": [...]}},
+    "admins": [username,...] | null}`.
+
+    More sensitive than /internal/teams (who has access, not just namespace
+    names exist) — same "restrict via NetworkPolicy in production" caveat as
+    that endpoint, not yet enforced here.
+
+    `admins` is null (never []) when the Keycloak directory is unreachable, so
+    teams-operator knows to leave its cluster-admin ClusterRoleBinding
+    untouched for that cycle rather than reconcile it to empty and revoke real
+    admins over a transient outage.
+    """
+    namespaces: Dict[str, Dict[str, List[str]]] = {}
+    for team in store.list_teams():
+        owners = store.owners_of(team["id"])
+        owner_ids = {o["user_id"] for o in owners}
+        for ns in team["namespaces"]:
+            viewer = []
+            maintainer = [o["username"] for o in owners]
+            for g in store.grants_for_namespace(ns):
+                if g["user_id"] in owner_ids:
+                    continue  # ownership already grants maintainer here
+                (viewer if g["role"] == "viewer" else maintainer).append(g["username"])
+            namespaces[ns] = {"viewer": viewer, "maintainer": maintainer}
+
+    admins: Optional[List[str]] = None
+    if keycloak.enabled:
+        try:
+            admins = keycloak.role_members("admin")
+        except KeycloakAdminError as e:
+            logger.error("Could not list admin role members: %s", e)
+
+    return {"namespaces": namespaces, "admins": admins}
+
 
 @app.get("/health")
 async def health_check():

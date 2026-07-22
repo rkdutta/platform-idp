@@ -205,14 +205,16 @@ class TeamsAPI:
         TOKEN_FILE.write_text(json.dumps(data))
         os.chmod(TOKEN_FILE, 0o600)
 
-    def _access_token(self) -> Optional[str]:
-        """Return a usable access token: from disk, refreshing if it's expired.
-        Returns None when the user hasn't logged in."""
+    def _ensure_fresh_tokens(self) -> Optional[dict]:
+        """Return the stored token set, refreshing it first if it's expired (or
+        nearly). Returns None when the user hasn't logged in. Shared by
+        _access_token() (bearer auth for the Teams API) and _id_token() (what
+        k8s's OIDC authenticator actually validates — see k8s-token below)."""
         if not TOKEN_FILE.exists():
             return None
         data = json.loads(TOKEN_FILE.read_text())
         if time.time() < data.get("expires_at", 0) - 30:
-            return data["access_token"]
+            return data
         # Expired (or nearly): try a refresh_token grant.
         if data.get("refresh_token"):
             try:
@@ -224,10 +226,23 @@ class TeamsAPI:
                 )
                 if resp.status_code == 200:
                     self._save_tokens(resp.json())
-                    return json.loads(TOKEN_FILE.read_text())["access_token"]
+                    return json.loads(TOKEN_FILE.read_text())
             except requests.exceptions.RequestException:
                 pass
-        return data.get("access_token")  # possibly stale; the API will 401
+        return data  # possibly stale; the caller (API or kubectl) will reject it
+
+    def _access_token(self) -> Optional[str]:
+        """A usable access token (bearer auth for the Teams API), refreshing
+        first if needed. Returns None when the user hasn't logged in."""
+        data = self._ensure_fresh_tokens()
+        return data.get("access_token") if data else None
+
+    def _id_token(self) -> Optional[str]:
+        """A usable id_token — what k8s's OIDC authenticator validates, not the
+        access_token (see k8s-token below). Returns None when the user hasn't
+        logged in."""
+        data = self._ensure_fresh_tokens()
+        return data.get("id_token") if data else None
 
     def login(self, no_browser: bool = False):
         """Browser login via Authorization Code + PKCE (S256) with a loopback
@@ -325,6 +340,63 @@ class TeamsAPI:
         else:
             print("⏱️  access token expired (auto-refreshes on next API call)")
 
+    # --- Kubernetes access (kubeconfig from teams-api + an exec credential plugin) --
+
+    def k8s_token(self):
+        """Print an ExecCredential object carrying the current id_token — the
+        contract a k8s `exec:` credential plugin must fulfill on stdout.
+        Invoked by `kubectl` itself (via the kubeconfig `kubeconfig` below
+        writes), not meant to be run directly. k8s's OIDC authenticator
+        validates the id_token, not the access_token used for the Teams API."""
+        token = self._id_token()
+        if not token:
+            print("Not logged in. Run: teams-cli login", file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps({
+            "apiVersion": "client.authentication.k8s.io/v1",
+            "kind": "ExecCredential",
+            "status": {"token": token},
+        }))
+
+    def kubeconfig(self, out: Optional[str] = None):
+        """Fetch the ready-to-use kubeconfig teams-api serves (GET /kubeconfig)
+        and write it to disk — a separate file, never the caller's default
+        kubeconfig. Its `exec:` stanza calls back into `teams-cli k8s-token`,
+        so cluster access rides on the same login this command triggers if
+        there isn't one yet."""
+        if not self._access_token():
+            print("Not logged in — starting browser login first...")
+            self.login()
+
+        try:
+            resp = requests.get(
+                f"{self.base_url}/kubeconfig",
+                headers={"Authorization": f"Bearer {self._access_token()}"},
+                verify=self.verify,
+            )
+        except requests.exceptions.SSLError as e:
+            print(f"❌ TLS Error: certificate verification failed for {self.base_url}")
+            print("   If this is a self-signed certificate, re-run with --insecure (-k).")
+            print(f"   ({e})")
+            sys.exit(1)
+        except requests.exceptions.ConnectionError:
+            print(f"❌ Error: Could not connect to API at {self.base_url}")
+            sys.exit(1)
+
+        if resp.status_code != 200:
+            detail = resp.text
+            if resp.headers.get("content-type", "").startswith("application/json"):
+                detail = resp.json().get("detail", detail)
+            print(f"❌ Could not fetch kubeconfig: {resp.status_code} {detail}")
+            sys.exit(1)
+
+        out_path = Path(out) if out else (TOKEN_DIR / "kubeconfig")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(resp.text)
+        os.chmod(out_path, 0o600)
+        print(f"✅ Wrote kubeconfig to {out_path}")
+        print(f"   export KUBECONFIG={out_path}")
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -337,6 +409,7 @@ Examples:
   teams-cli list                      # List all teams
   teams-cli get <team-id>            # Get specific team
   teams-cli delete <team-id>         # Delete a team
+  teams-cli kubeconfig               # Fetch a working kubeconfig
         """
     )
     
@@ -363,6 +436,15 @@ Examples:
         help="Print the login URL instead of opening a browser")
     subparsers.add_parser("logout", help="Remove the stored token")
     subparsers.add_parser("whoami", help="Show the logged-in user and token status")
+
+    # Kubernetes access
+    kubeconfig_parser = subparsers.add_parser(
+        "kubeconfig", help="Fetch a working kubeconfig from the Teams API (logs in first if needed)")
+    kubeconfig_parser.add_argument(
+        "--out", help="Where to write it (default: ~/.config/teams-cli/kubeconfig)")
+    subparsers.add_parser(
+        "k8s-token",
+        help="Print an ExecCredential with the current id_token (called by kubectl via `kubeconfig`, not run directly)")
 
     # Health command
     subparsers.add_parser("health", help="Check API health")
@@ -399,6 +481,10 @@ Examples:
             api.logout()
         elif args.command == "whoami":
             api.whoami()
+        elif args.command == "kubeconfig":
+            api.kubeconfig(out=args.out)
+        elif args.command == "k8s-token":
+            api.k8s_token()
         elif args.command == "health":
             api.health_check()
         elif args.command == "create":

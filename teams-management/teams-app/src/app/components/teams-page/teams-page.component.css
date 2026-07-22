@@ -5,6 +5,58 @@
   align-items: start;
 }
 
+.kubeconfig-section {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+
+.kubeconfig-note {
+  color: var(--text-muted, var(--text));
+  font-size: 0.82rem;
+}
+
+.kubeconfig-note code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.error-message {
+  width: 100%;
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.85rem;
+}
+
+.btn {
+  border: none;
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 0.85rem;
+}
+
+.btn-secondary {
+  background: var(--solid-neutral);
+  color: var(--on-solid);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--solid-neutral-hover);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* No create form (non-admin), so the team list spans full width. */
 .main-content.read-only {
   grid-template-columns: 1fr;

@@ -1,4 +1,19 @@
 <main class="main-content" [class.read-only]="!authService.isAdmin()">
+  <!-- Any logged-in user can fetch a kubeconfig — it carries no per-user
+       secret, just cluster info + a plugin that defers to a local
+       `teams-cli login`, so it's only usable once that's set up too. -->
+  <div class="kubeconfig-section">
+    <button
+      class="btn btn-secondary btn-sm"
+      (click)="downloadKubeconfig()"
+      [disabled]="downloadingKubeconfig"
+    >
+      {{ downloadingKubeconfig ? "Downloading…" : "⬇ Download kubeconfig" }}
+    </button>
+    <span class="kubeconfig-note">Requires <code>teams-cli login</code> locally to actually work.</span>
+    <p class="error-message" *ngIf="kubeconfigError">{{ kubeconfigError }}</p>
+  </div>
+
   <!-- Creating a team is admin-only. Owners and plain users don't see it. -->
   <div class="form-section" *ngIf="authService.isAdmin()">
     <h2>Create New Team</h2>

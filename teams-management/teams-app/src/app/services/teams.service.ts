@@ -125,6 +125,15 @@ export class TeamsService {
       .pipe(catchError(this.handleError));
   }
 
+  /** A ready-to-use kubeconfig (cluster info + an `exec:` stanza that defers
+   *  identity to a local `teams-cli login`) — same content for every caller,
+   *  see teams-api's GET /kubeconfig. Plain text, not JSON. */
+  getKubeconfig(): Observable<string> {
+    const url = `${this.apiUrl}/kubeconfig`;
+    return this.http.get(url, { responseType: 'text' })
+      .pipe(catchError(this.handleError));
+  }
+
   private handleError = (error: HttpErrorResponse) => {
     let errorMessage = 'An error occurred';
     

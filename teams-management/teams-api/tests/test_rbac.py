@@ -105,6 +105,109 @@ def test_list_access_owner_entry_wins_over_a_stale_grant_row(db, alice):
     assert rows[0]["users"][0]["via"] == "owner"
 
 
+# --------------------------------------------------------------------------- #
+# /internal/access — what teams-operator syncs into k8s RBAC
+# --------------------------------------------------------------------------- #
+class _FakeKeycloak:
+    """Stands in for a reachable Keycloak admin client in /internal/access
+    tests — only the bits internal_access() actually calls."""
+
+    enabled = True
+
+    def __init__(self, admins):
+        self._admins = admins
+
+    def role_members(self, role):
+        return self._admins if role == "admin" else []
+
+
+def test_internal_access_splits_viewer_and_maintainer_per_namespace(db, monkeypatch):
+    import main  # noqa: PLC0415
+
+    monkeypatch.setattr(main, "keycloak", _FakeKeycloak(["admin"]))
+
+    _team(db, "sss", "t-sss")
+    db.add_owner("t-sss", "alice-id", "alice")
+    db.set_grant("team-sss", "bob-id", "bob", "viewer")
+    db.set_grant("team-sss", "carol-id", "carol", "maintainer")
+
+    result = main.internal_access()
+    assert result["admins"] == ["admin"]
+    ns = result["namespaces"]["team-sss"]
+    assert sorted(ns["viewer"]) == ["bob"]
+    assert sorted(ns["maintainer"]) == ["alice", "carol"]
+
+
+def test_internal_access_owner_not_duplicated_as_a_stale_grant(db, monkeypatch):
+    """Same dedup rule as list_access: an owner who also holds a stale explicit
+    grant appears once, as maintainer (via ownership), not twice."""
+    import main  # noqa: PLC0415
+
+    monkeypatch.setattr(main, "keycloak", _FakeKeycloak([]))
+
+    _team(db, "sss", "t-sss")
+    db.set_grant("team-sss", "alice-id", "alice", "viewer")
+    db.add_owner("t-sss", "alice-id", "alice")
+
+    ns = main.internal_access()["namespaces"]["team-sss"]
+    assert ns["viewer"] == []
+    assert ns["maintainer"] == ["alice"]
+
+
+def test_internal_access_admins_null_when_keycloak_unreachable(db, monkeypatch):
+    """A Keycloak blip must not read as 'zero admins' — teams-operator treats
+    null as 'leave the cluster-admin binding alone this cycle', [] as 'revoke
+    everyone'. Those must never be confused."""
+    import main  # noqa: PLC0415
+    from keycloak_admin import KeycloakAdminError
+
+    class DownKeycloak:
+        enabled = True
+
+        def role_members(self, role):
+            raise KeycloakAdminError("connection refused")
+
+    monkeypatch.setattr(main, "keycloak", DownKeycloak())
+    _team(db, "sss", "t-sss")
+
+    assert main.internal_access()["admins"] is None
+
+
+# --------------------------------------------------------------------------- #
+# /kubeconfig
+# --------------------------------------------------------------------------- #
+def test_kubeconfig_renders_server_and_ca(db, monkeypatch):
+    import base64
+
+    import main  # noqa: PLC0415
+
+    monkeypatch.setattr(main, "K8S_API_SERVER", "https://127.0.0.1:50706")
+    monkeypatch.setattr(main, "K8S_API_CA_CERT", "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n")
+
+    resp = main.get_kubeconfig()
+    body = resp.body.decode()
+    assert "server: https://127.0.0.1:50706" in body
+    assert "command: teams-cli" in body
+    assert 'args: ["k8s-token"]' in body
+
+    # The CA is base64-encoded inline, not left as raw PEM (kubeconfig's
+    # certificate-authority-data field is always base64).
+    ca_line = next(l for l in body.splitlines() if "certificate-authority-data" in l)
+    encoded = ca_line.split(": ", 1)[1]
+    assert base64.b64decode(encoded).decode() == main.K8S_API_CA_CERT
+
+
+def test_kubeconfig_fails_loudly_when_unconfigured(db, monkeypatch):
+    import main  # noqa: PLC0415
+
+    monkeypatch.setattr(main, "K8S_API_SERVER", "")
+    monkeypatch.setattr(main, "K8S_API_CA_CERT", "")
+
+    with pytest.raises(HTTPException) as e:
+        main.get_kubeconfig()
+    assert e.value.status_code == 503
+
+
 def test_admin_is_unrestricted(db, admin):
     _team(db, "sss", "t-sss")
     assert authz.visible_namespaces(admin) is None
