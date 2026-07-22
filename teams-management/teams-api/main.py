@@ -24,6 +24,7 @@ from auth import (
     caller_id,
     caller_name,
     AUTH_ENABLED,
+    OIDC_ISSUER,
 )
 from keycloak_admin import KeycloakAdmin, KeycloakAdminError
 
@@ -43,6 +44,13 @@ DATA_FILE = Path(DATA_DIR) / "teams.json"
 # be updated too — see bootstrap/README.md.
 K8S_API_SERVER = os.getenv("K8S_API_SERVER", "")
 K8S_API_CA_CERT = os.getenv("K8S_API_CA_CERT", "")
+
+# The CA that validates Keycloak's TLS cert for `kubectl oidc-login` (see
+# _KUBECONFIG_TEMPLATE) — the same `platform-tls` wildcard cert every ingress
+# in this cluster uses, including teams-api's own, so it's sourced from the
+# Secret already mounted for that (no new out-of-band step — see
+# bootstrap/README.md's existing platform-tls section).
+KEYCLOAK_CA_CERT = os.getenv("KEYCLOAK_CA_CERT", "")
 
 
 def _sanitize(value: str) -> str:
@@ -340,11 +348,19 @@ def get_me(request: Request):
     )
 
 # A single template shared by every caller: it carries no per-user secret, just
-# the cluster's connection info plus a generic `exec:` credential plugin that
-# shells out to `teams-cli k8s-token` at kubectl invocation time. Identity
-# resolution happens locally, from the caller's own teams-cli login — so this
-# is safe to serve to any authenticated user (same authority as GET /me: read
+# the cluster's connection info plus a generic `exec:` credential plugin —
+# `kubectl oidc-login` (the standard int128/kubelogin plugin: must be installed
+# locally, e.g. `brew install int128/kubelogin/kubelogin`) doing its own PKCE
+# Authorization Code flow directly against Keycloak's `teams-cli` client (a
+# public, PKCE-only client — no secret needed). Identity resolution happens
+# entirely on the caller's own machine at kubectl invocation time, so this is
+# safe to serve to any authenticated user (same authority as GET /me: read
 # access to your own effective permissions, nothing more).
+#
+# --listen-address must match one of teams-cli's registered redirect URIs
+# (127.0.0.1:8400) — it also has a wildcard path registered there
+# (http://127.0.0.1:8400/*) because kubelogin's local callback server doesn't
+# use the /callback path teams-cli's own login flow does.
 _KUBECONFIG_TEMPLATE = """\
 apiVersion: v1
 kind: Config
@@ -357,37 +373,48 @@ contexts:
   - name: teams
     context:
       cluster: teams
-      user: teams-cli
+      user: oidc
 current-context: teams
 users:
-  - name: teams-cli
+  - name: oidc
     user:
       exec:
         apiVersion: client.authentication.k8s.io/v1
-        command: teams-cli
-        args: ["k8s-token"]
+        command: kubectl
+        args:
+          - oidc-login
+          - get-token
+          - --oidc-issuer-url={issuer}
+          - --oidc-client-id=teams-cli
+          - --oidc-extra-scope=profile
+          - --oidc-extra-scope=email
+          - --listen-address=127.0.0.1:8400
+          - --certificate-authority-data={keycloak_ca_data}
         interactiveMode: IfAvailable
 """
 
 
 @app.get("/kubeconfig")
 def get_kubeconfig():
-    """A ready-to-use kubeconfig: cluster connection info + an `exec:` stanza
-    that defers identity to a local `teams-cli login`. See _KUBECONFIG_TEMPLATE.
+    """A ready-to-use kubeconfig: cluster connection info + a `kubectl
+    oidc-login` `exec:` stanza. See _KUBECONFIG_TEMPLATE.
 
-    Requires K8S_API_SERVER/K8S_API_CA_CERT to be configured (see main.py's
-    top-level constants and bootstrap/README.md) — without them there's
-    nothing to serve, and every caller would otherwise get the same unusable
-    file, so this fails loudly instead.
+    Requires K8S_API_SERVER/K8S_API_CA_CERT/KEYCLOAK_CA_CERT to be configured
+    (see main.py's top-level constants and bootstrap/README.md) — without them
+    there's nothing to serve, and every caller would otherwise get the same
+    unusable file, so this fails loudly instead.
     """
-    if not K8S_API_SERVER or not K8S_API_CA_CERT:
+    if not K8S_API_SERVER or not K8S_API_CA_CERT or not KEYCLOAK_CA_CERT:
         raise HTTPException(
             status_code=503,
-            detail="Cluster connection info not configured (K8S_API_SERVER/K8S_API_CA_CERT)",
+            detail="Cluster connection info not configured "
+            "(K8S_API_SERVER/K8S_API_CA_CERT/KEYCLOAK_CA_CERT)",
         )
     body = _KUBECONFIG_TEMPLATE.format(
         server=K8S_API_SERVER,
         ca_data=base64.b64encode(K8S_API_CA_CERT.encode()).decode(),
+        issuer=OIDC_ISSUER,
+        keycloak_ca_data=base64.b64encode(KEYCLOAK_CA_CERT.encode()).decode(),
     )
     return Response(
         content=body,

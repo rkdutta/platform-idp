@@ -183,18 +183,28 @@ def test_kubeconfig_renders_server_and_ca(db, monkeypatch):
 
     monkeypatch.setattr(main, "K8S_API_SERVER", "https://127.0.0.1:50706")
     monkeypatch.setattr(main, "K8S_API_CA_CERT", "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n")
+    monkeypatch.setattr(main, "KEYCLOAK_CA_CERT", "-----BEGIN CERTIFICATE-----\nfakekc\n-----END CERTIFICATE-----\n")
 
     resp = main.get_kubeconfig()
     body = resp.body.decode()
     assert "server: https://127.0.0.1:50706" in body
-    assert "command: teams-cli" in body
-    assert 'args: ["k8s-token"]' in body
+    assert "command: kubectl" in body
+    assert "- oidc-login" in body
+    assert "- get-token" in body
+    assert f"--oidc-issuer-url={main.OIDC_ISSUER}" in body
+    assert "--oidc-client-id=teams-cli" in body
+    assert "--listen-address=127.0.0.1:8400" in body
 
-    # The CA is base64-encoded inline, not left as raw PEM (kubeconfig's
-    # certificate-authority-data field is always base64).
-    ca_line = next(l for l in body.splitlines() if "certificate-authority-data" in l)
+    # Both CAs are base64-encoded inline, not left as raw PEM (kubeconfig's
+    # certificate-authority-data field, and kubelogin's --certificate-
+    # authority-data flag, are both always base64).
+    ca_line = next(l for l in body.splitlines() if l.strip().startswith("certificate-authority-data"))
     encoded = ca_line.split(": ", 1)[1]
     assert base64.b64decode(encoded).decode() == main.K8S_API_CA_CERT
+
+    kc_ca_line = next(l for l in body.splitlines() if "--certificate-authority-data=" in l)
+    kc_encoded = kc_ca_line.split("--certificate-authority-data=", 1)[1]
+    assert base64.b64decode(kc_encoded).decode() == main.KEYCLOAK_CA_CERT
 
 
 def test_kubeconfig_fails_loudly_when_unconfigured(db, monkeypatch):
@@ -202,6 +212,22 @@ def test_kubeconfig_fails_loudly_when_unconfigured(db, monkeypatch):
 
     monkeypatch.setattr(main, "K8S_API_SERVER", "")
     monkeypatch.setattr(main, "K8S_API_CA_CERT", "")
+    monkeypatch.setattr(main, "KEYCLOAK_CA_CERT", "")
+
+    with pytest.raises(HTTPException) as e:
+        main.get_kubeconfig()
+    assert e.value.status_code == 503
+
+
+def test_kubeconfig_fails_loudly_when_only_keycloak_ca_missing(db, monkeypatch):
+    """The kubelogin exec stanza needs Keycloak's CA too — partially configured
+    (k8s side set, Keycloak side not) must still 503, not serve a kubeconfig
+    that can authenticate to the cluster but never actually get a token."""
+    import main  # noqa: PLC0415
+
+    monkeypatch.setattr(main, "K8S_API_SERVER", "https://127.0.0.1:50706")
+    monkeypatch.setattr(main, "K8S_API_CA_CERT", "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n")
+    monkeypatch.setattr(main, "KEYCLOAK_CA_CERT", "")
 
     with pytest.raises(HTTPException) as e:
         main.get_kubeconfig()

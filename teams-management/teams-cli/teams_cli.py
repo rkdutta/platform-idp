@@ -344,10 +344,13 @@ class TeamsAPI:
 
     def k8s_token(self):
         """Print an ExecCredential object carrying the current id_token — the
-        contract a k8s `exec:` credential plugin must fulfill on stdout.
-        Invoked by `kubectl` itself (via the kubeconfig `kubeconfig` below
-        writes), not meant to be run directly. k8s's OIDC authenticator
-        validates the id_token, not the access_token used for the Teams API."""
+        contract a k8s `exec:` credential plugin must fulfill on stdout. Not
+        used by the kubeconfig `kubeconfig` below fetches (that one's `exec:`
+        stanza calls `kubectl oidc-login` directly, doing its own PKCE login)
+        — this is here as a standalone alternative for a hand-built
+        kubeconfig that wants to reuse an existing `teams-cli login` session
+        instead. k8s's OIDC authenticator validates the id_token, not the
+        access_token used for the Teams API."""
         token = self._id_token()
         if not token:
             print("Not logged in. Run: teams-cli login", file=sys.stderr)
@@ -361,9 +364,11 @@ class TeamsAPI:
     def kubeconfig(self, out: Optional[str] = None):
         """Fetch the ready-to-use kubeconfig teams-api serves (GET /kubeconfig)
         and write it to disk — a separate file, never the caller's default
-        kubeconfig. Its `exec:` stanza calls back into `teams-cli k8s-token`,
-        so cluster access rides on the same login this command triggers if
-        there isn't one yet."""
+        kubeconfig. Its `exec:` stanza is `kubectl oidc-login` (the
+        int128/kubelogin plugin — must be installed separately, e.g.
+        `brew install int128/kubelogin/kubelogin`), which does its own PKCE
+        login against Keycloak at kubectl invocation time; it does not reuse
+        teams-cli's own login session."""
         if not self._access_token():
             print("Not logged in — starting browser login first...")
             self.login()
