@@ -43,6 +43,7 @@ class TeamsOperator:
 
         self.k8s_core_v1 = client.CoreV1Api()
         self.k8s_rbac_v1 = client.RbacAuthorizationV1Api()
+        self.k8s_networking_v1 = client.NetworkingV1Api()
 
         # Cluster-wide RBAC subjects mirror teams-api's permission model onto real
         # k8s RoleBindings (per-namespace) + one ClusterRoleBinding (admins) — see
@@ -80,6 +81,22 @@ class TeamsOperator:
         # ConfigMap, the volume updates in place) — no operator image
         # rebuild needed.
         self.QUOTA_TEMPLATES_DIR = os.getenv("QUOTA_TEMPLATES_DIR", "/app/quota-templates")
+
+        # Default per-container request/limit backstop for every tenant
+        # namespace — same ConfigMap-mounted-template approach as the quotas
+        # above (see apps/developer-control/teams-operator/manifests/
+        # limitrange-templates/ and this Deployment's limitrange-templates
+        # volume), rendered per namespace in ensure_limit_ranges.
+        self.LIMITRANGE_TEMPLATES_DIR = os.getenv("LIMITRANGE_TEMPLATES_DIR", "/app/limitrange-templates")
+
+        # Default network isolation for every tenant namespace (deny all
+        # ingress, explicitly allow all egress) — same ConfigMap-mounted-
+        # template approach as the quotas/limits above (see
+        # apps/developer-control/teams-operator/manifests/
+        # networkpolicy-templates/ and this Deployment's
+        # networkpolicy-templates volume), rendered per namespace in
+        # ensure_network_policies.
+        self.NETWORKPOLICY_TEMPLATES_DIR = os.getenv("NETWORKPOLICY_TEMPLATES_DIR", "/app/networkpolicy-templates")
 
 
     async def fetch_teams(self):
@@ -268,22 +285,21 @@ class TeamsOperator:
         except Exception as e:
             logger.error(f"❌ Unexpected error patching default ServiceAccount in '{namespace}': {e}")
 
-    def ensure_priority_quotas(self, namespace: str) -> None:
-        """Ensure `namespace` has one PriorityClass-scoped ResourceQuota per
-        tenant tier (tenant-critical/-standard/-besteffort), so best-effort
-        workloads can never starve a team's must-run ones of quota. Create-
-        if-missing only: like the RoleBindings, never patched again once it
-        exists, so hand-tuning a team's limits in the cluster (e.g. a one-off
-        capacity bump) doesn't get silently reverted on the next cycle.
+    def _apply_namespaced_templates(self, namespace: str, templates_dir: str, create_fn) -> None:
+        """Render every *.yaml template in `templates_dir` for `namespace`
+        (substituting {{ NAMESPACE }}) and create-if-missing via `create_fn`
+        (a bound CoreV1Api create_namespaced_* method). Shared by
+        ensure_priority_quotas and ensure_limit_ranges — same contract
+        (never patched again once it exists, so a hand-tuned value in the
+        cluster doesn't get silently reverted), different Kubernetes API
+        call and directory.
 
-        The manifests themselves live as templates on disk (QUOTA_TEMPLATES_DIR
-        — see the class-level comment), not as Python objects: this reads
-        every *.yaml file fresh on each call (never cached), so an edit to a
-        ConfigMap-mounted template takes effect on this operator's very next
-        reconciliation cycle, no restart required."""
-        template_paths = sorted(glob.glob(os.path.join(self.QUOTA_TEMPLATES_DIR, "*.yaml")))
+        Templates are read fresh from disk on every call (never cached), so
+        editing a ConfigMap-mounted template takes effect on this operator's
+        very next reconciliation cycle, no restart required."""
+        template_paths = sorted(glob.glob(os.path.join(templates_dir, "*.yaml")))
         if not template_paths:
-            logger.warning(f"No quota templates found in {self.QUOTA_TEMPLATES_DIR}; skipping quota provisioning")
+            logger.warning(f"No templates found in {templates_dir}; skipping")
             return
 
         for path in template_paths:
@@ -292,19 +308,51 @@ class TeamsOperator:
             try:
                 body = yaml.safe_load(rendered)
             except yaml.YAMLError as e:
-                logger.error(f"❌ Quota template {path} is not valid YAML after rendering: {e}")
+                logger.error(f"❌ Template {path} is not valid YAML after rendering: {e}")
                 continue
+            kind = body.get("kind", "resource")
             name = body.get("metadata", {}).get("name", os.path.basename(path))
             try:
-                self.k8s_core_v1.create_namespaced_resource_quota(namespace, body)
-                logger.info(f"✅ Created ResourceQuota '{name}' in '{namespace}' (from {os.path.basename(path)})")
+                create_fn(namespace, body)
+                logger.info(f"✅ Created {kind} '{name}' in '{namespace}' (from {os.path.basename(path)})")
             except ApiException as e:
                 if e.status == 409:
                     pass  # already exists
                 else:
-                    logger.error(f"❌ Failed to create ResourceQuota '{name}' in '{namespace}': {e}")
+                    logger.error(f"❌ Failed to create {kind} '{name}' in '{namespace}': {e}")
             except Exception as e:
-                logger.error(f"❌ Unexpected error creating ResourceQuota '{name}' in '{namespace}': {e}")
+                logger.error(f"❌ Unexpected error creating {kind} '{name}' in '{namespace}': {e}")
+
+    def ensure_priority_quotas(self, namespace: str) -> None:
+        """Ensure `namespace` has one PriorityClass-scoped ResourceQuota per
+        tenant tier (tenant-critical/-standard/-besteffort), so best-effort
+        workloads can never starve a team's must-run ones of quota. The
+        manifests themselves live as templates on disk (QUOTA_TEMPLATES_DIR
+        — see the class-level comment), not as Python objects."""
+        self._apply_namespaced_templates(
+            namespace, self.QUOTA_TEMPLATES_DIR, self.k8s_core_v1.create_namespaced_resource_quota
+        )
+
+    def ensure_limit_ranges(self, namespace: str) -> None:
+        """Ensure `namespace` has the default tenant LimitRange, so a
+        container that doesn't declare its own requests/limits gets a sane
+        default instead of running unbounded or with nothing at all. Same
+        template-on-disk approach as ensure_priority_quotas — see
+        LIMITRANGE_TEMPLATES_DIR."""
+        self._apply_namespaced_templates(
+            namespace, self.LIMITRANGE_TEMPLATES_DIR, self.k8s_core_v1.create_namespaced_limit_range
+        )
+
+    def ensure_network_policies(self, namespace: str) -> None:
+        """Ensure `namespace` has the default tenant NetworkPolicy (deny all
+        ingress, explicitly allow all egress — see
+        networkpolicy-templates/default.yaml for why egress needs an
+        explicit rule rather than just being left ungoverned). Same
+        template-on-disk approach as ensure_priority_quotas — see
+        NETWORKPOLICY_TEMPLATES_DIR."""
+        self._apply_namespaced_templates(
+            namespace, self.NETWORKPOLICY_TEMPLATES_DIR, self.k8s_networking_v1.create_namespaced_network_policy
+        )
 
     def create_namespace(self, team_id: str, team_name: str, namespace_name: str) -> bool:
         """Create a Kubernetes namespace for the team"""
@@ -421,6 +469,7 @@ class TeamsOperator:
                 self.ensure_harbor_pull_secret(namespace_name)
                 self.ensure_default_sa_pull_secret(namespace_name)
                 self.ensure_priority_quotas(namespace_name)
+                self.ensure_limit_ranges(namespace_name)
 
         # RBAC sync, part 2: the one binding that's still user-list-based —
         # cluster-admin for Keycloak `admin`-role holders. A single cluster-
