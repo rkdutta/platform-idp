@@ -59,6 +59,21 @@ class TeamsOperator:
         self.harbor_dockerconfigjson = os.getenv("HARBOR_DOCKERCONFIGJSON", "")
         self.HARBOR_PULL_SECRET = "harbor-pull"
 
+        # Priority-scoped resource governance: three PriorityClasses
+        # (tenant-critical/-standard/-besteffort — see
+        # apps/resource/tenant-priority-classes) each get their own quota
+        # bucket per tenant namespace, so a team's best-effort/batch work
+        # can't eat into the capacity reserved for its must-run workloads.
+        # A workload with no priorityClassName set gets defaulted to
+        # tenant-standard by a Gatekeeper mutation (see
+        # apps/security/tenant-guardrails's Assign objects), not here —
+        # this only owns the quota objects themselves.
+        self.PRIORITY_QUOTAS = {
+            "tenant-critical": {"requests.cpu": "8", "requests.memory": "16Gi", "pods": "20"},
+            "tenant-standard": {"requests.cpu": "16", "requests.memory": "32Gi", "pods": "50"},
+            "tenant-besteffort": {"requests.cpu": "4", "requests.memory": "8Gi", "pods": "30"},
+        }
+
 
     async def fetch_teams(self):
         """Fetch current teams from the Teams API.
@@ -246,6 +261,39 @@ class TeamsOperator:
         except Exception as e:
             logger.error(f"❌ Unexpected error patching default ServiceAccount in '{namespace}': {e}")
 
+    def ensure_priority_quotas(self, namespace: str) -> None:
+        """Ensure `namespace` has one PriorityClass-scoped ResourceQuota per
+        tenant tier (tenant-critical/-standard/-besteffort), so best-effort
+        workloads can never starve a team's must-run ones of quota. Create-
+        if-missing only: like the RoleBindings, never patched again once it
+        exists, so hand-tuning a team's limits in the cluster (e.g. a one-off
+        capacity bump) doesn't get silently reverted on the next cycle."""
+        for tier, hard in self.PRIORITY_QUOTAS.items():
+            name = f"quota-{tier.removeprefix('tenant-')}"
+            body = client.V1ResourceQuota(
+                metadata=client.V1ObjectMeta(name=name, namespace=namespace),
+                spec=client.V1ResourceQuotaSpec(
+                    hard=hard,
+                    scope_selector=client.V1ScopeSelector(
+                        match_expressions=[
+                            client.V1ScopedResourceSelectorRequirement(
+                                scope_name="PriorityClass", operator="In", values=[tier]
+                            )
+                        ]
+                    ),
+                ),
+            )
+            try:
+                self.k8s_core_v1.create_namespaced_resource_quota(namespace, body)
+                logger.info(f"✅ Created ResourceQuota '{name}' in '{namespace}' (PriorityClass: {tier})")
+            except ApiException as e:
+                if e.status == 409:
+                    pass  # already exists
+                else:
+                    logger.error(f"❌ Failed to create ResourceQuota '{name}' in '{namespace}': {e}")
+            except Exception as e:
+                logger.error(f"❌ Unexpected error creating ResourceQuota '{name}' in '{namespace}': {e}")
+
     def create_namespace(self, team_id: str, team_name: str, namespace_name: str) -> bool:
         """Create a Kubernetes namespace for the team"""
         try:
@@ -360,6 +408,7 @@ class TeamsOperator:
                 self.sync_namespace_rbac(namespace_name)
                 self.ensure_harbor_pull_secret(namespace_name)
                 self.ensure_default_sa_pull_secret(namespace_name)
+                self.ensure_priority_quotas(namespace_name)
 
         # RBAC sync, part 2: the one binding that's still user-list-based —
         # cluster-admin for Keycloak `admin`-role holders. A single cluster-
