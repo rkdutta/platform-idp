@@ -9,7 +9,6 @@ import {
   ComplianceDetail,
   Application,
   ApplicationGroup,
-  UserRef,
 } from "../../models/team.model";
 
 @Component({
@@ -44,13 +43,9 @@ export class TeamListComponent implements OnInit {
   // is only present once the user has toggled that card.
   collapsed: { [teamId: string]: boolean } = {};
 
-  // --- Namespace + ownership management ---
+  // --- Namespace management (ownership management lives on the Users page) ---
   // Per-team "order namespace" label input.
   orderLabel: { [teamId: string]: string } = {};
-  // Per-team selected user in the owner picker (admins only).
-  addOwnerSel: { [teamId: string]: string } = {};
-  // The Keycloak user pool, loaded only for admins (the only ones who assign owners).
-  allUsers: UserRef[] = [];
   actionError = "";
 
   // public so the template can gate the Delete button on manage rights.
@@ -76,11 +71,6 @@ export class TeamListComponent implements OnInit {
         this.isLoading = false;
         this.loadCompliance();
         this.loadApplications();
-        // Only admins assign owners, so only they need the user directory here.
-        // Everyone else manages access from the Users page.
-        if (this.authService.isAdmin()) {
-          this.loadUsers();
-        }
       },
       error: (error) => {
         this.errorMessage = error;
@@ -98,16 +88,7 @@ export class TeamListComponent implements OnInit {
     return this.collapsed[teamId] !== false;
   }
 
-  // --- Namespace + ownership management -----------------------------------
-
-  loadUsers() {
-    this.teamsService.getUsers().subscribe({
-      next: (users) => (this.allUsers = users),
-      // Surface this: an empty picker usually means the Keycloak admin client
-      // (teams-api-sa) isn't reachable/authorized, not "no users".
-      error: (error) => (this.actionError = "Could not load users: " + error),
-    });
-  }
+  // --- Namespace management -------------------------------------------------
 
   /** True if the caller owns this team (or is an admin) — resolved server-side
    *  and delivered via GET /me, since ownership isn't in the token. */
@@ -116,38 +97,6 @@ export class TeamListComponent implements OnInit {
       this.authService.isAdmin() ||
       !!this.authService.me?.owned_team_ids.includes(team.id)
     );
-  }
-
-  /** Users who aren't already owners — the pool the owner picker offers. */
-  assignableOwners(team: Team): UserRef[] {
-    const owners = new Set((team.owners || []).map((o) => o.user_id));
-    return this.allUsers.filter((u) => !owners.has(u.id));
-  }
-
-  addOwner(team: Team) {
-    const userId = this.addOwnerSel[team.id];
-    if (!userId) {
-      return;
-    }
-    this.actionError = "";
-    this.teamsService.addOwner(team.id, userId).subscribe({
-      next: () => {
-        this.addOwnerSel[team.id] = "";
-        this.loadTeams();
-      },
-      error: (error) => (this.actionError = error),
-    });
-  }
-
-  removeOwner(team: Team, userId: string, username: string) {
-    if (!confirm(`Remove ${username} as an owner of "${team.name}"?`)) {
-      return;
-    }
-    this.actionError = "";
-    this.teamsService.removeOwner(team.id, userId).subscribe({
-      next: () => this.loadTeams(),
-      error: (error) => (this.actionError = error),
-    });
   }
 
   orderNamespace(team: Team) {
@@ -167,18 +116,18 @@ export class TeamListComponent implements OnInit {
     });
   }
 
-  // The team's default namespace can't be deleted — only ordered ones. The API
-  // returns namespaces with the default first, and rejects the call regardless.
+  // The default namespace is just informational now — it's deletable like any
+  // other. Read from the API's explicit field rather than array position:
+  // once the default can be deleted, no namespace is guaranteed to sort first.
   isDefaultNamespace(team: Team, namespace: string): boolean {
-    return team.namespaces[0] === namespace;
+    return team.default_namespace === namespace;
   }
 
   deleteNamespace(team: Team, namespace: string) {
-    if (
-      !confirm(
-        `Delete namespace "${namespace}"? This removes the namespace and everything running in it.`,
-      )
-    ) {
+    const message = this.isDefaultNamespace(team, namespace)
+      ? `Delete "${namespace}"? It's this team's default namespace — deleting it removes everything running there, and the team will have no namespaces left until a new one is ordered.`
+      : `Delete namespace "${namespace}"? This removes the namespace and everything running in it.`;
+    if (!confirm(message)) {
       return;
     }
     this.actionError = "";

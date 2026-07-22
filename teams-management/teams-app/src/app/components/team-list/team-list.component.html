@@ -69,40 +69,16 @@
       </div>
 
       <!-- Owners run the team: they order/delete its namespaces and decide who
-           may access them. Only admins can change who the owners are. -->
+           may access them. Read-only here — managed from the Users page. -->
       <div class="owners">
         <p class="owners-label">Owners</p>
         <div class="owner-list">
           <span class="owner-chip" *ngFor="let o of team.owners">
             {{ o.username || o.user_id }}
-            <button
-              *ngIf="authService.isAdmin()"
-              class="owner-remove"
-              (click)="removeOwner(team, o.user_id, o.username)"
-              [title]="'Remove ' + o.username + ' as owner'"
-            >
-              ✕
-            </button>
           </span>
           <span class="owner-empty" *ngIf="!team.owners?.length">
-            No owners yet{{ authService.isAdmin() ? " — assign one below" : "" }}
+            No owners yet — assign one from the <a routerLink="/users">Users</a> page.
           </span>
-        </div>
-
-        <div class="add-owner" *ngIf="authService.isAdmin()">
-          <select [(ngModel)]="addOwnerSel[team.id]" class="user-select">
-            <option value="">Add owner…</option>
-            <option *ngFor="let u of assignableOwners(team)" [value]="u.id">
-              {{ u.username }}{{ u.email ? " — " + u.email : "" }}
-            </option>
-          </select>
-          <button
-            class="btn btn-sm"
-            (click)="addOwner(team)"
-            [disabled]="!addOwnerSel[team.id]"
-          >
-            Add
-          </button>
         </div>
       </div>
 
@@ -125,20 +101,20 @@
               </a>
               <!-- The caller's own role here, so it's obvious what they may do. -->
               <span class="ns-role" *ngIf="authService.roleIn(ns) as role">{{ role }}</span>
+              <span
+                *ngIf="isDefaultNamespace(team, ns)"
+                class="ns-default-tag"
+                title="The namespace this team was created with — deletable like any other"
+                >default</span
+              >
               <button
-                *ngIf="canManageTeam(team) && !isDefaultNamespace(team, ns)"
+                *ngIf="canManageTeam(team)"
                 class="btn btn-danger btn-sm ns-delete"
                 (click)="deleteNamespace(team, ns)"
                 [title]="'Delete namespace ' + ns"
               >
                 Delete
               </button>
-              <span
-                *ngIf="canManageTeam(team) && isDefaultNamespace(team, ns)"
-                class="ns-default-tag"
-                title="A team's default namespace can't be deleted; delete the team instead"
-                >default</span
-              >
             </div>
 
             <!-- Applications running in THIS namespace, grouped by part-of -->

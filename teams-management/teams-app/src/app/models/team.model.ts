@@ -15,6 +15,7 @@ export interface Team {
   created_at: string;
   namespaces: string[];
   owners: OwnerRef[];
+  default_namespace: string | null;
 }
 
 export interface TeamCreate {
@@ -35,6 +36,7 @@ export interface AccessUser {
   user_id: string;
   username: string;
   role: NamespaceRole;
+  via: 'owner' | 'grant'; // implicit (team ownership) vs an explicit per-namespace grant
 }
 
 /** Which users hold which role in a namespace (scoped to teams the caller owns). */

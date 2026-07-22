@@ -269,40 +269,25 @@
   color: var(--text);
 }
 
-.owner-remove {
-  border: none;
-  background: transparent;
-  color: var(--danger);
-  cursor: pointer;
-  font-size: 12px;
-  line-height: 1;
-  padding: 2px 4px;
-  border-radius: 50%;
-}
-
-.owner-remove:hover {
-  background: var(--danger-soft);
-}
-
 .owner-empty {
   font-size: 12px;
   font-style: italic;
   color: var(--text-faint);
 }
 
-.add-owner,
+.owner-empty a {
+  color: inherit;
+  text-decoration: underline;
+}
+
 .order-ns {
   display: flex;
   gap: 8px;
   align-items: center;
   flex-wrap: wrap;
-}
-
-.order-ns {
   margin-top: 10px;
 }
 
-.user-select,
 .order-input {
   flex: 1;
   min-width: 160px;

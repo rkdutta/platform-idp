@@ -106,6 +106,19 @@ export class AuthService {
    */
   private _me: Me | null = null;
 
+  /**
+   * Resolves once setMe() has been called for the first time (success or
+   * failure — AppComponent.loadPermissions() calls it on both paths).
+   *
+   * Angular's initial router navigation runs concurrently with
+   * AppComponent.ngOnInit(), not after it, so a route guard that reads
+   * canManage()/isAdmin() synchronously can run before /me has loaded on a
+   * hard refresh — wrongly redirecting a real owner/admin away. Guards should
+   * await this before checking permissions.
+   */
+  private meReadyResolve!: () => void;
+  private meReady = new Promise<void>((resolve) => (this.meReadyResolve = resolve));
+
   constructor(private keycloak: KeycloakService) {
     this.initializeAuth();
   }
@@ -244,6 +257,12 @@ export class AuthService {
 
   public setMe(me: Me | null): void {
     this._me = me;
+    this.meReadyResolve();
+  }
+
+  /** Resolves once the initial /me load (success or failure) has landed. */
+  public whenMeReady(): Promise<void> {
+    return this.meReady;
   }
 
   public get me(): Me | null {

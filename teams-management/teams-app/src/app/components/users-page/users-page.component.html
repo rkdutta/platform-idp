@@ -3,8 +3,8 @@
     <div>
       <h2>User Access</h2>
       <p class="page-sub">
-        Grant each user a role per namespace. Changes take effect immediately — no
-        re-login needed.
+        Manage team ownership and per-namespace roles. Changes take effect
+        immediately — no re-login needed.
       </p>
     </div>
     <button class="btn btn-secondary btn-sm" (click)="load()" [disabled]="loading">
@@ -17,11 +17,12 @@
   <p class="empty" *ngIf="loading">Loading users…</p>
 
   <ng-container *ngIf="!loading">
-    <p class="empty" *ngIf="!access.length">
-      You don't manage any namespaces yet. Ask an admin to make you an owner of a team.
+    <p class="empty" *ngIf="!access.length && !teams.length">
+      You don't manage any teams or namespaces yet. Ask an admin to make you an
+      owner of a team.
     </p>
 
-    <ng-container *ngIf="access.length">
+    <ng-container *ngIf="access.length || teams.length">
       <div class="toolbar">
         <input
           class="filter-input"
@@ -46,6 +47,9 @@
           <span class="tag tag-admin" *ngIf="isPlatformAdmin(user)" title="Platform admin — unrestricted access">
             admin
           </span>
+          <span class="tag" [class.tag-none]="!ownedTeamsOf(user).length">
+            {{ ownedTeamsOf(user).length }} team(s) owned
+          </span>
           <span class="tag" [class.tag-none]="!grantsOf(user).length">
             {{ grantsOf(user).length }} namespace(s)
           </span>
@@ -53,36 +57,86 @@
 
         <div class="user-body" *ngIf="isExpanded(user)">
           <p class="none" *ngIf="isPlatformAdmin(user)">
-            Platform admins already have full access to every namespace. Grants below
-            are redundant for this user.
+            Platform admins already have full access to every team and namespace.
+            Ownership/grants below are redundant for this user.
           </p>
 
+          <!-- Team ownership: full control of a team's namespaces + who can
+               access them. Add/remove is admin-only server-side. -->
+          <div class="owned-teams">
+            <p class="section-label">Teams owned</p>
+            <div class="owner-chips" *ngIf="ownedTeamsOf(user).length">
+              <span class="owner-chip" *ngFor="let t of ownedTeamsOf(user)">
+                {{ t.name }}
+                <button
+                  *ngIf="authService.isAdmin()"
+                  class="owner-remove"
+                  (click)="removeOwnership(user, t)"
+                  [disabled]="saving === user.id"
+                  [title]="'Remove ' + user.username + ' as owner of ' + t.name"
+                >
+                  ✕
+                </button>
+              </span>
+            </div>
+            <p class="none" *ngIf="!ownedTeamsOf(user).length">Owns no teams.</p>
+
+            <div class="add-row" *ngIf="authService.isAdmin() && assignableTeamsFor(user).length">
+              <select class="ns-select" [(ngModel)]="addTeamSel[user.id]">
+                <option value="">Add as owner of…</option>
+                <option *ngFor="let t of assignableTeamsFor(user)" [value]="t.id">
+                  {{ t.name }}
+                </option>
+              </select>
+              <button
+                class="btn btn-primary btn-sm"
+                (click)="addOwnership(user)"
+                [disabled]="!addTeamSel[user.id] || saving === user.id"
+              >
+                Add
+              </button>
+            </div>
+          </div>
+
+          <!-- Per-namespace grants: viewer/maintainer in one specific namespace.
+               A row here `via` ownership is read-only — it's not a grant, there's
+               nothing to revoke without removing ownership above. -->
+          <p class="section-label">Namespace access</p>
           <table class="grants" *ngIf="grantsOf(user).length">
             <tr *ngFor="let g of grantsOf(user); trackBy: trackByNamespace">
               <td class="g-ns">
                 {{ g.namespace }}
                 <span class="g-team">{{ g.team_name }}</span>
               </td>
-              <td class="g-role">
-                <select
-                  class="role-select"
-                  [ngModel]="g.role"
-                  (ngModelChange)="setRole(user, g.namespace, $event)"
-                  [disabled]="saving === user.id"
-                >
-                  <option *ngFor="let r of roles" [value]="r">{{ r }}</option>
-                </select>
-              </td>
-              <td class="g-act">
-                <button
-                  class="btn-revoke"
-                  (click)="revoke(user, g.namespace)"
-                  [disabled]="saving === user.id"
-                  [title]="'Revoke access to ' + g.namespace"
-                >
-                  ✕
-                </button>
-              </td>
+              <ng-container *ngIf="g.via === 'grant'; else ownerRow">
+                <td class="g-role">
+                  <select
+                    class="role-select"
+                    [ngModel]="g.role"
+                    (ngModelChange)="setRole(user, g.namespace, $event)"
+                    [disabled]="saving === user.id"
+                  >
+                    <option *ngFor="let r of roles" [value]="r">{{ r }}</option>
+                  </select>
+                </td>
+                <td class="g-act">
+                  <button
+                    class="btn-revoke"
+                    (click)="revoke(user, g.namespace)"
+                    [disabled]="saving === user.id"
+                    [title]="'Revoke access to ' + g.namespace"
+                  >
+                    ✕
+                  </button>
+                </td>
+              </ng-container>
+              <ng-template #ownerRow>
+                <td class="g-role" colspan="2">
+                  <span class="via-owner" [title]="'Full access via ownership of ' + g.team_name">
+                    {{ g.role }} — via ownership
+                  </span>
+                </td>
+              </ng-template>
             </tr>
           </table>
 

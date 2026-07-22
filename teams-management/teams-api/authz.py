@@ -94,12 +94,22 @@ def scoped_teams(request: Request) -> list:
 
     Shape matches what workloads.py / compliance.py consume, so they need no
     changes: {id, name, created_at, namespaces:[...]}.
+
+    Ownership grants visibility of the *team* in its own right, independent of
+    namespace count — otherwise an owner who deletes their team's only
+    namespace would lose the team from their own view (including the one
+    place they could order a replacement namespace). Non-owned teams still
+    only show up via an explicit namespace grant, narrowed to those namespaces.
     """
-    scope = visible_namespaces(request)
-    if scope is None:
+    if is_admin(request):
         return store.list_teams()
+    owned = store.owned_team_ids(caller_id(request))
+    scope = visible_namespaces(request)
     out = []
     for team in store.list_teams():
+        if team["id"] in owned:
+            out.append(team)
+            continue
         visible = [ns for ns in team["namespaces"] if ns in scope]
         if visible:
             out.append({**team, "namespaces": visible})
@@ -107,10 +117,14 @@ def scoped_teams(request: Request) -> list:
 
 
 def require_visible_team(request: Request, team_id: str) -> dict:
-    """The team narrowed to the caller's visible namespaces, or 404."""
+    """The team (narrowed to the caller's visible namespaces unless they own
+    it, in which case they see it in full regardless of namespace count), or
+    404."""
     team = store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
+    if is_owner(request, team_id):
+        return team
     scope = visible_namespaces(request)
     if scope is None:
         return team

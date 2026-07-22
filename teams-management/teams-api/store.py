@@ -232,6 +232,17 @@ def is_default_namespace(namespace: str) -> bool:
     return bool(row and row["is_default"])
 
 
+def default_namespace_of(team_id: str) -> Optional[str]:
+    """The team's default namespace, or None once it's been deleted (the
+    default namespace is no longer protected from deletion — see main.py's
+    delete_namespace)."""
+    row = _db().execute(
+        "SELECT namespace FROM team_namespaces WHERE team_id = ? AND is_default = 1",
+        (team_id,),
+    ).fetchone()
+    return row["namespace"] if row else None
+
+
 def add_namespace(team_id: str, namespace: str, is_default: bool = False) -> None:
     with _lock:
         _db().execute(

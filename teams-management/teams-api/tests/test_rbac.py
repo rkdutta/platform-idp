@@ -4,6 +4,7 @@ These exercise store.py + authz.py directly with a fake Request, which is where
 all the access decisions actually live — no tokens or HTTP needed.
 """
 
+import asyncio
 import json
 
 import pytest
@@ -82,6 +83,11 @@ def test_list_access_includes_owners_not_just_grants(db, alice, bob):
     users = {u["user_id"]: u["role"] for u in rows[0]["users"]}
     assert users == {"alice-id": "maintainer", "bob-id": "viewer"}
 
+    # `via` is what lets the Users page tell an implicit owner-row (nothing to
+    # revoke there — see test below) apart from a real, revocable grant.
+    via = {u["user_id"]: u["via"] for u in rows[0]["users"]}
+    assert via == {"alice-id": "owner", "bob-id": "grant"}
+
 
 def test_list_access_owner_entry_wins_over_a_stale_grant_row(db, alice):
     """An owner who also happens to hold an explicit grant row (e.g. left over
@@ -96,6 +102,7 @@ def test_list_access_owner_entry_wins_over_a_stale_grant_row(db, alice):
     rows = main.list_access(alice)
     assert len(rows[0]["users"]) == 1
     assert rows[0]["users"][0]["role"] == "maintainer"
+    assert rows[0]["users"][0]["via"] == "owner"
 
 
 def test_admin_is_unrestricted(db, admin):
@@ -103,6 +110,65 @@ def test_admin_is_unrestricted(db, admin):
     assert authz.visible_namespaces(admin) is None
     assert authz.namespace_role(admin, "team-sss") == "maintainer"
     assert authz.is_owner(admin, "t-sss")
+
+
+# --------------------------------------------------------------------------- #
+# Default namespace: naming, and deletability
+# --------------------------------------------------------------------------- #
+def test_default_namespace_naming():
+    import main  # noqa: PLC0415
+
+    assert main.default_namespace("sss") == "team-sss-default"
+    assert main.default_namespace("My Team!") == "team-my-team-default"
+
+
+def test_default_namespace_naming_stays_within_63_chars():
+    import main  # noqa: PLC0415
+
+    ns = main.default_namespace("x" * 100)
+    assert len(ns) <= 63
+    assert ns.endswith("-default")
+
+
+def test_default_namespace_of(db):
+    _team(db, "sss", "t-sss")
+    assert db.default_namespace_of("t-sss") == "team-sss"
+
+    db.remove_namespace("team-sss")
+    assert db.default_namespace_of("t-sss") is None
+
+
+def test_owner_can_delete_the_default_namespace(db, alice):
+    """The default namespace used to be permanently protected; it's now just a
+    namespace like any other, deletable by its team's owner."""
+    import main  # noqa: PLC0415
+
+    _team(db, "sss", "t-sss")
+    db.add_owner("t-sss", "alice-id", "alice")
+
+    team = asyncio.run(main.delete_namespace(alice, "t-sss", "team-sss"))
+    assert team.namespaces == []
+
+
+def test_owner_keeps_seeing_a_team_with_zero_namespaces(db, alice):
+    """Regression test: ownership must grant visibility of the team in its own
+    right. Before this fix, scoped_teams/require_visible_team narrowed a team to
+    its caller-visible *namespaces* — so an owner who deletes their team's only
+    namespace would lose the team from their own view entirely, including the
+    one place (order-namespace) they could recover from it."""
+    import main  # noqa: PLC0415
+
+    _team(db, "sss", "t-sss")
+    db.add_owner("t-sss", "alice-id", "alice")
+    asyncio.run(main.delete_namespace(alice, "t-sss", "team-sss"))
+
+    teams = authz.scoped_teams(alice)
+    assert len(teams) == 1
+    assert teams[0]["id"] == "t-sss"
+    assert teams[0]["namespaces"] == []
+
+    visible = authz.require_visible_team(alice, "t-sss")
+    assert visible["namespaces"] == []
 
 
 # --------------------------------------------------------------------------- #

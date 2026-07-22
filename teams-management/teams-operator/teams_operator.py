@@ -40,26 +40,8 @@ class TeamsOperator:
             logger.info("Loaded local kubeconfig")
         
         self.k8s_core_v1 = client.CoreV1Api()
-        
-    def sanitize_namespace_name(self, team_name: str) -> str:
-        """Convert team name to valid Kubernetes namespace name"""
-        # Lowercase, replace spaces/special chars with hyphens, remove consecutive hyphens
-        namespace = team_name.lower()
-        namespace = ''.join(c if c.isalnum() else '-' for c in namespace)
-        namespace = '-'.join(filter(None, namespace.split('-')))  # Remove consecutive hyphens
-        
-        # Ensure it starts and ends with alphanumeric
-        namespace = namespace.strip('-')
-        
-        # Kubernetes namespace names must be <= 63 characters
-        if len(namespace) > 63:
-            namespace = namespace[:63].rstrip('-')
-            
-        # Add prefix to avoid conflicts
-        namespace = f"team-{namespace}"
-        
-        return namespace
-    
+
+
     async def fetch_teams(self):
         """Fetch current teams from the Teams API.
 
@@ -161,11 +143,12 @@ class TeamsOperator:
         changed = False
 
         # Reconcile each existing team's desired namespace set. `namespaces` is
-        # authoritative (the API backfills a default `team-<name>` for legacy
-        # records); fall back to the derived default if it's somehow absent.
+        # authoritative and can legitimately be empty (a team whose only/default
+        # namespace was deleted) — that just means nothing is provisioned for it,
+        # not a signal to invent a fallback namespace the API never asked for.
         for team_id, team in current_teams.items():
             team_name = team['name']
-            desired = set(team.get('namespaces') or [self.sanitize_namespace_name(team_name)])
+            desired = set(team.get('namespaces') or [])
             provisioned = self.team_namespaces.setdefault(team_id, set())
 
             for namespace_name in desired - provisioned:      # newly wanted

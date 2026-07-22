@@ -47,8 +47,15 @@ def _sanitize(value: str) -> str:
 
 
 def default_namespace(team_name: str) -> str:
-    """The namespace a team gets by default: team-<sanitized-name>."""
-    return f"team-{_sanitize(team_name)}"
+    """The namespace a team gets by default: team-<sanitized-name>-default.
+
+    Re-truncates after _sanitize (which budgets for a bare "team-" prefix) so
+    the added "-default" suffix still fits Kubernetes' 63-char namespace limit.
+    """
+    suffix = "-default"
+    max_name_len = 63 - len("team-") - len(suffix)
+    name = _sanitize(team_name)[:max_name_len].strip("-")
+    return f"team-{name}{suffix}"
 
 
 def ordered_namespace(team_name: str, label: str) -> str:
@@ -159,6 +166,7 @@ class Team(BaseModel):
     created_at: datetime
     namespaces: List[str] = []
     owners: List[OwnerRef] = []
+    default_namespace: Optional[str] = None
 
 class NamespaceOrder(BaseModel):
     label: str                       # short suffix -> team-<name>-<label>
@@ -183,6 +191,7 @@ class AccessUser(BaseModel):
     user_id: str
     username: str = ""
     role: str
+    via: str = "grant"                # "owner" (implicit, via team ownership) | "grant" (explicit)
 
 class NamespaceAccess(BaseModel):
     namespace: str
@@ -275,8 +284,12 @@ class TeamApplications(BaseModel):
     applications: List[Application] = []
 
 def _with_owners(team: dict) -> dict:
-    """Attach the team's owners for the API response."""
-    return {**team, "owners": store.owners_of(team["id"])}
+    """Attach the team's owners and default namespace for the API response."""
+    return {
+        **team,
+        "owners": store.owners_of(team["id"]),
+        "default_namespace": store.default_namespace_of(team["id"]),
+    }
 
 @app.get("/")
 async def root():
@@ -426,20 +439,17 @@ async def order_namespace(request: Request, team_id: str, order: NamespaceOrder)
 
 @app.delete("/teams/{team_id}/namespaces/{namespace}", response_model=Team)
 async def delete_namespace(request: Request, team_id: str, namespace: str):
-    """Delete an ordered namespace from a team (admin or owner).
+    """Delete a namespace from a team, including its default namespace (admin
+    or owner).
 
     The operator deletes the Kubernetes namespace on its next poll and the
-    namespace's grants cascade away. A team's default namespace can't be removed
-    this way — delete the whole team instead (admin).
+    namespace's grants cascade away. A team can end up with zero namespaces
+    this way — that's fine, ownership (not namespace count) is what keeps the
+    team itself visible to its owner (see authz.scoped_teams).
     """
     team = authz.require_team_owner(request, team_id)
     if namespace not in team["namespaces"]:
         raise HTTPException(status_code=404, detail="Namespace not found")
-    if store.is_default_namespace(namespace):
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot delete a team's default namespace; delete the team instead",
-        )
 
     store.remove_namespace(namespace)
     store.record(caller_name(request), "namespace.delete", namespace, team["name"])
@@ -520,13 +530,20 @@ def list_access(request: Request):
         if not admin and team["id"] not in owned:
             continue
         owners = [
-            {"user_id": o["user_id"], "username": o["username"], "role": "maintainer"}
+            {
+                "user_id": o["user_id"],
+                "username": o["username"],
+                "role": "maintainer",
+                "via": "owner",
+            }
             for o in store.owners_of(team["id"])
         ]
         owner_ids = {o["user_id"] for o in owners}
         for ns in team["namespaces"]:
             grants = [
-                g for g in store.grants_for_namespace(ns) if g["user_id"] not in owner_ids
+                {**g, "via": "grant"}
+                for g in store.grants_for_namespace(ns)
+                if g["user_id"] not in owner_ids
             ]
             rows.append(
                 {
