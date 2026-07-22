@@ -4,12 +4,14 @@ Teams Operator - Creates Kubernetes namespaces when teams are created in the Tea
 """
 
 import asyncio
+import glob
 import json
 import logging
 import os
 import time
 from typing import Set, Dict, Any
 import aiohttp
+import yaml
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
@@ -68,11 +70,16 @@ class TeamsOperator:
         # tenant-standard by a Gatekeeper mutation (see
         # apps/security/tenant-guardrails's Assign objects), not here —
         # this only owns the quota objects themselves.
-        self.PRIORITY_QUOTAS = {
-            "tenant-critical": {"requests.cpu": "8", "requests.memory": "16Gi", "pods": "20"},
-            "tenant-standard": {"requests.cpu": "16", "requests.memory": "32Gi", "pods": "50"},
-            "tenant-besteffort": {"requests.cpu": "4", "requests.memory": "8Gi", "pods": "30"},
-        }
+        #
+        # The ResourceQuota manifests themselves are NOT hardcoded here —
+        # they're templates mounted from a ConfigMap (see
+        # apps/developer-control/teams-operator/manifests/quota-templates/
+        # and this Deployment's quota-templates volume), rendered per
+        # namespace in ensure_priority_quotas. Tuning a limit is then a
+        # platform-infra-only change (edit the template, Argo syncs the
+        # ConfigMap, the volume updates in place) — no operator image
+        # rebuild needed.
+        self.QUOTA_TEMPLATES_DIR = os.getenv("QUOTA_TEMPLATES_DIR", "/app/quota-templates")
 
 
     async def fetch_teams(self):
@@ -267,25 +274,30 @@ class TeamsOperator:
         workloads can never starve a team's must-run ones of quota. Create-
         if-missing only: like the RoleBindings, never patched again once it
         exists, so hand-tuning a team's limits in the cluster (e.g. a one-off
-        capacity bump) doesn't get silently reverted on the next cycle."""
-        for tier, hard in self.PRIORITY_QUOTAS.items():
-            name = f"quota-{tier.removeprefix('tenant-')}"
-            body = client.V1ResourceQuota(
-                metadata=client.V1ObjectMeta(name=name, namespace=namespace),
-                spec=client.V1ResourceQuotaSpec(
-                    hard=hard,
-                    scope_selector=client.V1ScopeSelector(
-                        match_expressions=[
-                            client.V1ScopedResourceSelectorRequirement(
-                                scope_name="PriorityClass", operator="In", values=[tier]
-                            )
-                        ]
-                    ),
-                ),
-            )
+        capacity bump) doesn't get silently reverted on the next cycle.
+
+        The manifests themselves live as templates on disk (QUOTA_TEMPLATES_DIR
+        — see the class-level comment), not as Python objects: this reads
+        every *.yaml file fresh on each call (never cached), so an edit to a
+        ConfigMap-mounted template takes effect on this operator's very next
+        reconciliation cycle, no restart required."""
+        template_paths = sorted(glob.glob(os.path.join(self.QUOTA_TEMPLATES_DIR, "*.yaml")))
+        if not template_paths:
+            logger.warning(f"No quota templates found in {self.QUOTA_TEMPLATES_DIR}; skipping quota provisioning")
+            return
+
+        for path in template_paths:
+            with open(path) as f:
+                rendered = f.read().replace("{{ NAMESPACE }}", namespace)
+            try:
+                body = yaml.safe_load(rendered)
+            except yaml.YAMLError as e:
+                logger.error(f"❌ Quota template {path} is not valid YAML after rendering: {e}")
+                continue
+            name = body.get("metadata", {}).get("name", os.path.basename(path))
             try:
                 self.k8s_core_v1.create_namespaced_resource_quota(namespace, body)
-                logger.info(f"✅ Created ResourceQuota '{name}' in '{namespace}' (PriorityClass: {tier})")
+                logger.info(f"✅ Created ResourceQuota '{name}' in '{namespace}' (from {os.path.basename(path)})")
             except ApiException as e:
                 if e.status == 409:
                     pass  # already exists
