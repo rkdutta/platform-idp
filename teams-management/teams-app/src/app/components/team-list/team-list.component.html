@@ -182,7 +182,21 @@
                       <dl class="meta">
                         <div class="meta-row">
                           <dt>Version</dt>
-                          <dd>v{{ app.rollout?.active_version || app.version }}</dd>
+                          <dd>
+                            <a
+                              *ngIf="app.rollout?.release_url || app.release_url as vurl"
+                              class="version-link"
+                              [href]="vurl"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              title="Open this release on GitHub"
+                              >v{{ app.rollout?.active_version || app.version }} ↗</a
+                            >
+                            <ng-container
+                              *ngIf="!(app.rollout?.release_url || app.release_url)"
+                              >v{{ app.rollout?.active_version || app.version }}</ng-container
+                            >
+                          </dd>
                         </div>
                         <div class="meta-row">
                           <dt>Image</dt>
@@ -191,7 +205,18 @@
                         <div class="meta-row" *ngIf="app.rollout?.preview_version">
                           <dt>Preview</dt>
                           <dd>
-                            v{{ app.rollout?.preview_version }}
+                            <a
+                              *ngIf="app.rollout?.preview_release_url as purl"
+                              class="version-link"
+                              [href]="purl"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              title="Open this release on GitHub"
+                              >v{{ app.rollout?.preview_version }} ↗</a
+                            >
+                            <ng-container *ngIf="!app.rollout?.preview_release_url"
+                              >v{{ app.rollout?.preview_version }}</ng-container
+                            >
                             <span
                               class="promote-flag"
                               *ngIf="app.rollout?.awaiting_promotion"

@@ -367,6 +367,8 @@ class RolloutStatus(BaseModel):
     active_version: Optional[str] = None
     preview_version: Optional[str] = None
     awaiting_promotion: bool = False
+    release_url: Optional[str] = None        # GitHub release for active_version
+    preview_release_url: Optional[str] = None  # GitHub release for preview_version
 
 class AppPolicyResult(BaseModel):
     id: str
@@ -396,6 +398,7 @@ class Application(BaseModel):
     part_of: Optional[str] = None    # app.kubernetes.io/part-of (grouping key)
     component: Optional[str] = None  # app.kubernetes.io/component (web | api)
     url: Optional[str] = None        # browser URL: web -> page, api -> docs
+    release_url: Optional[str] = None  # GitHub release page for `version`
     compliance: Optional[AppCompliance] = None
     rollout: Optional[RolloutStatus] = None
 

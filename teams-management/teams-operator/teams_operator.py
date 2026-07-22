@@ -50,6 +50,15 @@ class TeamsOperator:
         self.MAINTAINER_BINDING = "teams-sync-maintainer"
         self.ADMIN_BINDING = "teams-admins"
 
+        # Pre-built .dockerconfigjson for Harbor's private `platform` project,
+        # sourced from this Deployment's own harbor-pull Secret (see
+        # manifests/deployment.yaml) so the robot-account credential lives in
+        # exactly one place. Empty means "not configured yet" (fresh bootstrap,
+        # before the harbor-pull runbook step) - image-pull provisioning is
+        # then skipped rather than crash-looping. See ensure_harbor_pull_secret.
+        self.harbor_dockerconfigjson = os.getenv("HARBOR_DOCKERCONFIGJSON", "")
+        self.HARBOR_PULL_SECRET = "harbor-pull"
+
 
     async def fetch_teams(self):
         """Fetch current teams from the Teams API.
@@ -177,6 +186,66 @@ class TeamsOperator:
         except Exception as e:
             logger.error(f"❌ Unexpected error syncing ClusterRoleBinding '{self.ADMIN_BINDING}': {e}")
 
+    def ensure_harbor_pull_secret(self, namespace: str) -> None:
+        """Ensure `namespace` has the harbor-pull imagePullSecret, so
+        workloads deployed there can pull from Harbor's private `platform`
+        project — without this, every tenant workload 403s on image pull the
+        same way engineering-platform's own components would without it.
+        Create-if-missing only: like the RoleBindings, this is never patched
+        again once it exists, so a manual credential rotation (new Secret
+        content + operator redeploy) can't be silently overwritten by a
+        stale in-memory value from a long-running pod."""
+        if not self.harbor_dockerconfigjson:
+            return
+        body = client.V1Secret(
+            metadata=client.V1ObjectMeta(name=self.HARBOR_PULL_SECRET, namespace=namespace),
+            type="kubernetes.io/dockerconfigjson",
+            string_data={".dockerconfigjson": self.harbor_dockerconfigjson},
+        )
+        try:
+            self.k8s_core_v1.create_namespaced_secret(namespace, body)
+            logger.info(f"✅ Created imagePullSecret '{self.HARBOR_PULL_SECRET}' in '{namespace}'")
+        except ApiException as e:
+            if e.status == 409:
+                pass  # already exists
+            else:
+                logger.error(f"❌ Failed to create imagePullSecret in '{namespace}': {e}")
+        except Exception as e:
+            logger.error(f"❌ Unexpected error creating imagePullSecret in '{namespace}': {e}")
+
+    def ensure_default_sa_pull_secret(self, namespace: str) -> None:
+        """Attach harbor-pull to the namespace's default ServiceAccount, so
+        every pod using it (the common case — app manifests owned by their
+        own repos don't declare imagePullSecrets themselves) picks it up
+        with no per-workload change needed."""
+        if not self.harbor_dockerconfigjson:
+            return
+        try:
+            sa = self.k8s_core_v1.read_namespaced_service_account("default", namespace)
+        except ApiException as e:
+            if e.status != 404:
+                logger.error(f"❌ Could not read default ServiceAccount in '{namespace}': {e}")
+            return
+        except Exception as e:
+            logger.error(f"❌ Unexpected error reading default ServiceAccount in '{namespace}': {e}")
+            return
+
+        existing = sa.image_pull_secrets or []
+        if any(ref.name == self.HARBOR_PULL_SECRET for ref in existing):
+            return  # already attached
+
+        try:
+            self.k8s_core_v1.patch_namespaced_service_account(
+                "default",
+                namespace,
+                {"imagePullSecrets": [ref.to_dict() for ref in existing] + [{"name": self.HARBOR_PULL_SECRET}]},
+            )
+            logger.info(f"✅ Attached imagePullSecret '{self.HARBOR_PULL_SECRET}' to default SA in '{namespace}'")
+        except ApiException as e:
+            logger.error(f"❌ Failed to patch default ServiceAccount in '{namespace}': {e}")
+        except Exception as e:
+            logger.error(f"❌ Unexpected error patching default ServiceAccount in '{namespace}': {e}")
+
     def create_namespace(self, team_id: str, team_name: str, namespace_name: str) -> bool:
         """Create a Kubernetes namespace for the team"""
         try:
@@ -289,6 +358,8 @@ class TeamsOperator:
         for provisioned in self.team_namespaces.values():
             for namespace_name in provisioned:
                 self.sync_namespace_rbac(namespace_name)
+                self.ensure_harbor_pull_secret(namespace_name)
+                self.ensure_default_sa_pull_secret(namespace_name)
 
         # RBAC sync, part 2: the one binding that's still user-list-based —
         # cluster-admin for Keycloak `admin`-role holders. A single cluster-

@@ -92,6 +92,8 @@ export interface RolloutStatus {
   active_version: string | null;
   preview_version: string | null;
   awaiting_promotion: boolean;
+  release_url: string | null; // GitHub release for active_version
+  preview_release_url: string | null; // GitHub release for preview_version
 }
 
 export interface AppPolicyResult {
@@ -124,6 +126,7 @@ export interface Application {
   part_of?: string | null; // app.kubernetes.io/part-of (grouping key)
   component?: string | null; // app.kubernetes.io/component (web | api)
   url?: string | null; // browser URL: web -> page, api -> Swagger docs
+  release_url?: string | null; // GitHub release page for `version`
   compliance?: AppCompliance | null;
   rollout?: RolloutStatus | null;
 }

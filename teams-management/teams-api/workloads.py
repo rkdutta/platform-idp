@@ -36,6 +36,15 @@ COMPONENT_LABEL = "app.kubernetes.io/component"
 # app's landing page lives (overrides the / default).
 DOCS_PATH_ANNOTATION = "platform.example.com/docs-path"
 URL_PATH_ANNOTATION = "platform.example.com/url-path"
+# "owner/repo" this workload's image is built from, so the portal can link a
+# deployed version to its GitHub release. Only needed when the image name
+# doesn't match the repo name (e.g. the engineering-platform components,
+# which all build from the platform-idp monorepo) - otherwise it's derived
+# from the image itself.
+SOURCE_REPO_ANNOTATION = "platform.example.com/source-repo"
+# Owner used when SOURCE_REPO_ANNOTATION gives a bare repo name (no "/"), and
+# when deriving a repo from the image name.
+GITHUB_ORG = os.getenv("GITHUB_ORG", "rkdutta")
 
 ROLLOUT_GROUP = "argoproj.io"
 ROLLOUT_VERSION = "v1alpha1"
@@ -177,8 +186,13 @@ class ApplicationsReader:
             app["rollout"] = self._rollout_status(spec, status, rs_versions.get(name, {}))
             # For a blue/green rollout the live version is the active one, which
             # differs from the spec image while a promotion is pending.
-            if app["rollout"] and app["rollout"].get("active_version"):
-                app["version"] = app["rollout"]["active_version"]
+            repo = _repo_slug(meta.get("annotations", {}), image)
+            if app["rollout"]:
+                app["rollout"]["release_url"] = _release_url(repo, app["rollout"].get("active_version"))
+                app["rollout"]["preview_release_url"] = _release_url(repo, app["rollout"].get("preview_version"))
+                if app["rollout"].get("active_version"):
+                    app["version"] = app["rollout"]["active_version"]
+            app["release_url"] = _release_url(repo, app["version"])
             apps.append(app)
         return apps
 
@@ -283,9 +297,10 @@ class ApplicationsReader:
         ingress = ingress or {}
         component = labels.get(COMPONENT_LABEL)
         host = ingress.get(serving_service) if serving_service else ingress.get(name)
+        version = _resolve_version(image, labels.get(VERSION_LABEL))
         return {
             "name": labels.get(NAME_LABEL) or name,
-            "version": _resolve_version(image, labels.get(VERSION_LABEL)),
+            "version": version,
             "kind": kind,
             "image": image,
             "replicas": replicas or 0,
@@ -293,6 +308,7 @@ class ApplicationsReader:
             "part_of": labels.get(PART_OF_LABEL),
             "component": component,
             "url": self._app_url(host, component, annotations) if host else None,
+            "release_url": _release_url(_repo_slug(annotations, image), version),
             "rollout": None,  # populated for Rollout kind by _rollouts()
         }
 
@@ -369,6 +385,36 @@ def _image_tag(image: str) -> str:
     if ":" in last:
         return last.rsplit(":", 1)[1]
     return "latest"
+
+
+def _image_repo_name(image: str) -> Optional[str]:
+    """Extract the bare repo/image name from a reference, e.g.
+    'harbor.example.com/platform/demo-api-go:2.2.0' -> 'demo-api-go'."""
+    if not image:
+        return None
+    ref = image.split("@", 1)[0].split(":", 1)[0]
+    name = ref.rsplit("/", 1)[-1]
+    return name or None
+
+
+def _repo_slug(annotations: dict, image: str) -> Optional[str]:
+    """The GitHub "owner/repo" this workload's image is built from: the
+    explicit override annotation if set, else the image name assumed to
+    match the repo name (true for every standalone app repo so far)."""
+    repo = (annotations or {}).get(SOURCE_REPO_ANNOTATION)
+    if repo:
+        return repo if "/" in repo else f"{GITHUB_ORG}/{repo}"
+    name = _image_repo_name(image)
+    return f"{GITHUB_ORG}/{name}" if name else None
+
+
+def _release_url(repo_slug: Optional[str], version: Optional[str]) -> Optional[str]:
+    """The GitHub release page for a deployed version, or None if either half
+    is missing/meaningless (untagged image, no known source repo)."""
+    if not repo_slug or not version or version in ("latest", "unknown"):
+        return None
+    tag = version if version.startswith("v") else f"v{version}"
+    return f"https://github.com/{repo_slug}/releases/tag/{tag}"
 
 
 def _resolve_version(image: str, label: Optional[str]) -> str:
