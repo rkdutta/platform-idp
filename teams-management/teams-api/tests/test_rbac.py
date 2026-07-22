@@ -6,6 +6,7 @@ all the access decisions actually live — no tokens or HTTP needed.
 
 import asyncio
 import json
+from typing import Dict, Set
 
 import pytest
 from fastapi import HTTPException
@@ -171,6 +172,224 @@ def test_internal_access_admins_null_when_keycloak_unreachable(db, monkeypatch):
     _team(db, "sss", "t-sss")
 
     assert main.internal_access()["admins"] is None
+
+
+# --------------------------------------------------------------------------- #
+# k8s RBAC via Keycloak groups
+#
+# teams-operator binds two static RoleBindings per namespace to Group subjects
+# named "{namespace}-viewer" / "{namespace}-maintainer" (see plan). teams-api
+# is what keeps those groups' *membership* in sync with the DB — these tests
+# exercise that sync directly against a fake Keycloak directory that both
+# resolves users (like _lookup_user needs) and tracks group membership.
+# --------------------------------------------------------------------------- #
+class _FakeKeycloakDirectory:
+    """Keycloak double good enough for main.py-level tests: resolves a small
+    fixed user roster (so _lookup_user works) and tracks group membership
+    (so tests can assert on it) without any network calls."""
+
+    enabled = True
+
+    def __init__(self):
+        self._users = {
+            "alice": {"id": "alice-id", "username": "alice"},
+            "bob": {"id": "bob-id", "username": "bob"},
+            "carol": {"id": "carol-id", "username": "carol"},
+        }
+        self.groups: Dict[str, Set[str]] = {}
+
+    def list_users(self):
+        return list(self._users.values())
+
+    def role_members(self, role):
+        return []
+
+    def add_user_to_group(self, username, group):
+        self.groups.setdefault(group, set()).add(username)
+
+    def remove_user_from_group(self, username, group):
+        self.groups.get(group, set()).discard(username)
+
+    def delete_group(self, name):
+        self.groups.pop(name, None)
+
+    def group_members(self, name):
+        return list(self.groups.get(name, set()))
+
+
+def test_grant_access_syncs_k8s_group(db, admin, monkeypatch):
+    import main  # noqa: PLC0415
+
+    fake_kc = _FakeKeycloakDirectory()
+    monkeypatch.setattr(main, "keycloak", fake_kc)
+    _team(db, "sss", "t-sss")
+
+    main.grant_access(admin, main.AccessGrant(namespace="team-sss", user_id="bob", role="viewer"))
+
+    assert fake_kc.group_members("team-sss-viewer") == ["bob"]
+    assert fake_kc.group_members("team-sss-maintainer") == []
+
+
+def test_grant_access_role_change_moves_between_groups(db, admin, monkeypatch):
+    """viewer -> maintainer must remove from the old group, not just add to
+    the new one — otherwise a former viewer grant lingers forever."""
+    import main  # noqa: PLC0415
+
+    fake_kc = _FakeKeycloakDirectory()
+    monkeypatch.setattr(main, "keycloak", fake_kc)
+    _team(db, "sss", "t-sss")
+
+    main.grant_access(admin, main.AccessGrant(namespace="team-sss", user_id="bob", role="viewer"))
+    main.grant_access(admin, main.AccessGrant(namespace="team-sss", user_id="bob", role="maintainer"))
+
+    assert fake_kc.group_members("team-sss-viewer") == []
+    assert fake_kc.group_members("team-sss-maintainer") == ["bob"]
+
+
+def test_revoke_access_removes_from_group(db, admin, monkeypatch):
+    import main  # noqa: PLC0415
+
+    fake_kc = _FakeKeycloakDirectory()
+    monkeypatch.setattr(main, "keycloak", fake_kc)
+    _team(db, "sss", "t-sss")
+    main.grant_access(admin, main.AccessGrant(namespace="team-sss", user_id="bob", role="viewer"))
+
+    main.revoke_access(admin, main.AccessGrant(namespace="team-sss", user_id="bob", role="viewer"))
+
+    assert fake_kc.group_members("team-sss-viewer") == []
+
+
+def test_grant_access_on_an_owner_has_no_group_effect(db, admin, monkeypatch):
+    """Ownership always wins over an explicit grant (see internal_access's
+    dedup) — granting an owner an explicit "viewer" role changes the DB row
+    but must not demote their actual k8s access; they stay in -maintainer,
+    never move to -viewer."""
+    import main  # noqa: PLC0415
+
+    fake_kc = _FakeKeycloakDirectory()
+    monkeypatch.setattr(main, "keycloak", fake_kc)
+    _team(db, "sss", "t-sss")
+    db.add_owner("t-sss", "alice-id", "alice")
+    fake_kc.add_user_to_group("alice", "team-sss-maintainer")  # what add_owner would have done
+
+    main.grant_access(admin, main.AccessGrant(namespace="team-sss", user_id="alice", role="viewer"))
+
+    assert fake_kc.group_members("team-sss-viewer") == []
+    assert fake_kc.group_members("team-sss-maintainer") == ["alice"]
+
+
+def test_add_owner_syncs_maintainer_group_for_every_namespace(db, admin, monkeypatch):
+    import main  # noqa: PLC0415
+
+    fake_kc = _FakeKeycloakDirectory()
+    monkeypatch.setattr(main, "keycloak", fake_kc)
+    _team(db, "sss", "t-sss")
+    db.add_namespace("t-sss", "team-sss-prod")
+
+    main.add_owner(admin, "t-sss", main.OwnerAdd(user_id="alice"))
+
+    assert fake_kc.group_members("team-sss-maintainer") == ["alice"]
+    assert fake_kc.group_members("team-sss-prod-maintainer") == ["alice"]
+
+
+def test_remove_owner_keeps_group_if_independent_grant_remains(db, admin, monkeypatch):
+    """Removing ownership clears -maintainer everywhere *except* a namespace
+    where the same user separately holds an explicit maintainer grant — that
+    grant alone still justifies the group membership."""
+    import main  # noqa: PLC0415
+
+    fake_kc = _FakeKeycloakDirectory()
+    monkeypatch.setattr(main, "keycloak", fake_kc)
+    _team(db, "sss", "t-sss")
+    db.add_namespace("t-sss", "team-sss-prod")
+    main.add_owner(admin, "t-sss", main.OwnerAdd(user_id="alice"))
+    main.grant_access(
+        admin, main.AccessGrant(namespace="team-sss-prod", user_id="alice", role="maintainer")
+    )
+
+    main.remove_owner(admin, "t-sss", "alice-id")
+
+    assert fake_kc.group_members("team-sss-maintainer") == []
+    assert fake_kc.group_members("team-sss-prod-maintainer") == ["alice"]
+
+
+def test_order_namespace_adds_existing_owners_to_new_namespace_group(db, admin, monkeypatch):
+    import main  # noqa: PLC0415
+
+    fake_kc = _FakeKeycloakDirectory()
+    monkeypatch.setattr(main, "keycloak", fake_kc)
+    _team(db, "sss", "t-sss")
+    db.add_owner("t-sss", "alice-id", "alice")
+
+    asyncio.run(main.order_namespace(admin, "t-sss", main.NamespaceOrder(label="prod")))
+
+    assert fake_kc.group_members("team-sss-prod-maintainer") == ["alice"]
+
+
+def test_delete_namespace_cleans_up_k8s_groups(db, admin, monkeypatch):
+    import main  # noqa: PLC0415
+
+    fake_kc = _FakeKeycloakDirectory()
+    monkeypatch.setattr(main, "keycloak", fake_kc)
+    _team(db, "sss", "t-sss")
+    db.add_namespace("t-sss", "team-sss-prod")
+    fake_kc.add_user_to_group("bob", "team-sss-prod-viewer")
+
+    asyncio.run(main.delete_namespace(admin, "t-sss", "team-sss-prod"))
+
+    assert "team-sss-prod-viewer" not in fake_kc.groups
+    assert "team-sss-prod-maintainer" not in fake_kc.groups
+
+
+def test_delete_team_cleans_up_k8s_groups_for_every_namespace(db, admin, monkeypatch):
+    import main  # noqa: PLC0415
+
+    fake_kc = _FakeKeycloakDirectory()
+    monkeypatch.setattr(main, "keycloak", fake_kc)
+    _team(db, "sss", "t-sss")
+    db.add_namespace("t-sss", "team-sss-prod")
+    fake_kc.add_user_to_group("bob", "team-sss-viewer")
+    fake_kc.add_user_to_group("bob", "team-sss-prod-viewer")
+
+    asyncio.run(main.delete_team(admin, "t-sss"))
+
+    assert not fake_kc.groups.get("team-sss-viewer")
+    assert not fake_kc.groups.get("team-sss-prod-viewer")
+
+
+def test_group_reconciliation_corrects_drift(db, monkeypatch):
+    """The self-healing backstop: given DB state that was never (or only
+    partially) synced, one reconciliation pass brings Keycloak groups back
+    in line — adding whoever's missing, removing whoever shouldn't be there."""
+    import main  # noqa: PLC0415
+
+    fake_kc = _FakeKeycloakDirectory()
+    monkeypatch.setattr(main, "keycloak", fake_kc)
+    _team(db, "sss", "t-sss")
+    db.add_owner("t-sss", "alice-id", "alice")
+    db.set_grant("team-sss", "bob-id", "bob", "viewer")
+    # Drift: bob/alice were never actually synced, and carol is a stale
+    # member who shouldn't be there at all.
+    fake_kc.add_user_to_group("carol", "team-sss-viewer")
+
+    main._reconcile_k8s_groups_once()
+
+    assert fake_kc.group_members("team-sss-viewer") == ["bob"]
+    assert fake_kc.group_members("team-sss-maintainer") == ["alice"]
+
+
+def test_group_reconciliation_noop_when_keycloak_disabled(db, monkeypatch):
+    """Must not raise (e.g. on a None-like fake) when Keycloak isn't
+    configured — same degrade-gracefully posture as everywhere else."""
+    import main  # noqa: PLC0415
+
+    class DisabledKeycloak:
+        enabled = False
+
+    monkeypatch.setattr(main, "keycloak", DisabledKeycloak())
+    _team(db, "sss", "t-sss")
+
+    main._reconcile_k8s_groups_once()  # must not raise
 
 
 # --------------------------------------------------------------------------- #
@@ -501,7 +720,7 @@ def test_startup_aborts_migration_when_keycloak_is_down(db, legacy, monkeypatch)
     monkeypatch.setattr(main, "keycloak", DownKeycloak())
     monkeypatch.setattr(main, "DATA_FILE", path)
 
-    main._startup()
+    asyncio.run(main._startup())
 
     # Nothing imported, so the next restart retries with a healthy directory.
     assert db.list_teams() == []

@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Optional, Set
+import asyncio
 import base64
 import json
 import logging
@@ -113,9 +114,16 @@ applications_reader = ApplicationsReader()
 # Per-app compliance (supply-chain evidence + Gatekeeper), attached to each app.
 app_compliance_reader = AppComplianceReader(compliance_checker)
 
-# Keycloak Admin API client — the user DIRECTORY only. Access grants are no longer
-# written to Keycloak groups: the database is the sole authority (see store.py), so
-# there is no second copy to drift. Groups are read exactly once, by the migration.
+# Keycloak Admin API client. The database is still the sole authority for
+# *app-layer* authorization (who owns what, who's granted what — nothing about
+# that changes here). It's also used for one more thing: mirroring a derived
+# slice of that DB state into Keycloak group membership, so k8s RBAC — which
+# has no way to ask the DB anything — can learn "who's a viewer/maintainer of
+# this namespace" via the OIDC `groups` claim instead. See
+# _sync_group_membership / _group_reconciliation_loop below. Keycloak groups
+# are a synced *projection*, never a second place authorization decisions are
+# made — the reconciliation loop always overwrites them back to what the DB
+# says, so hand-editing group membership in Keycloak wouldn't stick.
 keycloak = KeycloakAdmin()
 
 
@@ -133,8 +141,98 @@ def _lookup_user(identifier: str) -> Optional[dict]:
     return None
 
 
+# --- k8s RBAC via Keycloak groups --------------------------------------------
+# teams-operator binds two static, never-updated RoleBindings per namespace —
+# `{namespace}-viewer` -> ClusterRole view, `{namespace}-maintainer` ->
+# ClusterRole edit — to Group subjects of these exact names. Kubernetes'
+# native RBAC has no idea what "viewer"/"maintainer" mean; that meaning is
+# entirely this naming convention plus that fixed wiring. Keycloak group
+# *membership* is the only thing that changes at grant/revoke time, never a
+# k8s object.
+
+def _k8s_group_name(namespace: str, role: str) -> str:
+    return f"{namespace}-{role}"
+
+
+def _sync_group_membership(namespace: str, role: str, username: str, add: bool) -> None:
+    """Best-effort mirror of one namespace-role grant into the matching
+    Keycloak group. Never raises: the DB write already committed is the real
+    source of truth for this request, and _group_reconciliation_loop is the
+    self-healing backstop for whatever a transient Keycloak failure here
+    misses — the same tolerance teams-operator's own poll loop already has
+    for a transient teams-api outage."""
+    if not keycloak.enabled:
+        return
+    group = _k8s_group_name(namespace, role)
+    try:
+        if add:
+            keycloak.add_user_to_group(username, group)
+        else:
+            keycloak.remove_user_from_group(username, group)
+    except KeycloakAdminError as e:
+        logger.error(
+            "k8s RBAC group sync failed (%s %s %s %s): %s",
+            "add" if add else "remove", username, "->" if add else "<-", group, e,
+        )
+
+
+def _delete_k8s_groups(namespace: str) -> None:
+    """Best-effort cleanup of a namespace's two k8s RBAC groups once the
+    namespace/team is gone — otherwise Keycloak accumulates orphaned groups
+    forever. Never raises."""
+    if not keycloak.enabled:
+        return
+    for role in store.ROLES:
+        try:
+            keycloak.delete_group(_k8s_group_name(namespace, role))
+        except KeycloakAdminError as e:
+            logger.error("Could not delete k8s RBAC group for %s/%s: %s", namespace, role, e)
+
+
+GROUP_RECONCILE_INTERVAL = int(os.getenv("GROUP_RECONCILE_INTERVAL", "60"))
+
+
+def _reconcile_k8s_groups_once() -> None:
+    """One reconciliation pass: recompute desired k8s RBAC group membership
+    straight from the DB — the same computation internal_access() does,
+    called in-process here (no HTTP hop needed, this runs inside teams-api
+    itself) — and correct any drift against live Keycloak group membership.
+    Split out from _group_reconciliation_loop so a single cycle is directly
+    callable/testable without dealing with the sleep loop around it."""
+    if not keycloak.enabled:
+        return
+    try:
+        desired = internal_access()["namespaces"]
+        for ns, roles in desired.items():
+            for role in store.ROLES:
+                want = set(roles.get(role, []))
+                try:
+                    have = set(keycloak.group_members(_k8s_group_name(ns, role)))
+                except KeycloakAdminError as e:
+                    logger.error(
+                        "Could not read k8s RBAC group members for %s/%s: %s", ns, role, e
+                    )
+                    continue
+                for username in want - have:
+                    _sync_group_membership(ns, role, username, add=True)
+                for username in have - want:
+                    _sync_group_membership(ns, role, username, add=False)
+    except Exception as e:  # noqa: BLE001 - a bad cycle must not kill the loop
+        logger.error("k8s RBAC group reconciliation cycle failed: %s", e)
+
+
+async def _group_reconciliation_loop() -> None:
+    """Runs _reconcile_k8s_groups_once forever, spaced GROUP_RECONCILE_INTERVAL
+    apart — the self-healing backstop for the best-effort syncs above. One bad
+    cycle (e.g. Keycloak transiently unreachable) just retries next interval.
+    """
+    while True:
+        await asyncio.sleep(GROUP_RECONCILE_INTERVAL)
+        _reconcile_k8s_groups_once()
+
+
 @app.on_event("startup")
-def _startup() -> None:
+async def _startup() -> None:
     """Open the database and, on a first run, seed it from the pre-2.0 state.
 
     The migration derives ownership and grants from the Keycloak groups this
@@ -142,6 +240,13 @@ def _startup() -> None:
     the database has no teams, making restarts safe.
     """
     store.connect()
+
+    # Started unconditionally, before the (unrelated) migration below can
+    # early-return: the reconciliation loop already tolerates Keycloak being
+    # down at any given cycle (see _group_reconciliation_loop) by skipping
+    # and retrying next interval — it must still get that chance even if
+    # Keycloak also happened to be down at this exact startup instant.
+    asyncio.create_task(_group_reconciliation_loop())
 
     users_by_name: Dict[str, dict] = {}
     leaders: Set[str] = set()
@@ -458,8 +563,11 @@ async def delete_team(request: Request, team_id: str):
     team = store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
+    namespaces = team.get("namespaces") or []
     store.delete_team(team_id)
     store.record(caller_name(request), "team.delete", team["name"])
+    for ns in namespaces:
+        _delete_k8s_groups(ns)
     return {"message": f"Team '{team['name']}' deleted successfully"}
 
 
@@ -491,6 +599,14 @@ def add_owner(request: Request, team_id: str, body: OwnerAdd):
 
     store.add_owner(team_id, user["id"], user["username"])
     store.record(caller_name(request), "owner.add", team["name"], user["username"])
+
+    # Ownership confers maintainer on every namespace of the team (see
+    # authz.namespace_role) — mirror that into each one's maintainer k8s
+    # group now, not just whichever namespace happens to exist by the next
+    # reconciliation cycle.
+    for ns in store.namespaces_of(team_id):
+        _sync_group_membership(ns, "maintainer", user["username"], add=True)
+
     return store.owners_of(team_id)
 
 @app.delete(
@@ -503,8 +619,22 @@ def remove_owner(request: Request, team_id: str, user_id: str):
     team = store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
+
+    # Resolve the username before the DB write removes the ownership row.
+    username = next(
+        (o["username"] for o in store.owners_of(team_id) if o["user_id"] == user_id), None
+    )
+
     store.remove_owner(team_id, user_id)
     store.record(caller_name(request), "owner.remove", team["name"], user_id)
+
+    if username:
+        for ns in store.namespaces_of(team_id):
+            # Don't pull them out of the maintainer group if an independent
+            # explicit grant on this namespace still justifies it.
+            if store.grant_role(ns, user_id) != "maintainer":
+                _sync_group_membership(ns, "maintainer", username, add=False)
+
     return store.owners_of(team_id)
 
 
@@ -528,6 +658,12 @@ async def order_namespace(request: Request, team_id: str, order: NamespaceOrder)
 
     store.add_namespace(team_id, ns)
     store.record(caller_name(request), "namespace.create", ns, team["name"])
+
+    # Every current owner is already maintainer here per the DB model — mirror
+    # that into the new namespace's maintainer k8s group immediately.
+    for o in store.owners_of(team_id):
+        _sync_group_membership(ns, "maintainer", o["username"], add=True)
+
     return Team(**_with_owners(store.get_team(team_id)))
 
 
@@ -547,6 +683,7 @@ async def delete_namespace(request: Request, team_id: str, namespace: str):
 
     store.remove_namespace(namespace)
     store.record(caller_name(request), "namespace.delete", namespace, team["name"])
+    _delete_k8s_groups(namespace)
     return Team(**_with_owners(store.get_team(team_id)))
 
 @app.get("/compliance", response_model=List[ComplianceSummary])
@@ -664,25 +801,46 @@ def grant_access(request: Request, grant: AccessGrant):
     if not user:
         raise HTTPException(status_code=400, detail="No such user in Keycloak")
 
+    old_role = store.grant_role(grant.namespace, user["id"])
     store.set_grant(grant.namespace, user["id"], user["username"], grant.role)
     store.record(
         caller_name(request), "access.grant", grant.namespace,
         f"{user['username']} as {grant.role}",
     )
+
+    # Ownership already gives maintainer here via k8s group membership (see
+    # add_owner) and always wins over an explicit grant (see internal_access's
+    # dedup) — an explicit grant on an owner only changes the DB row, no
+    # separate k8s-group effect.
+    team = store.team_for_namespace(grant.namespace)
+    if not (team and store.is_owner(user["id"], team["id"])):
+        if old_role and old_role != grant.role:
+            _sync_group_membership(grant.namespace, old_role, user["username"], add=False)
+        _sync_group_membership(grant.namespace, grant.role, user["username"], add=True)
+
     return {
         "message": f"Granted {user['username']} {grant.role} on {grant.namespace}"
     }
 
 @app.delete("/access")
 def revoke_access(request: Request, grant: AccessGrant):
-    """Revoke a user's role in a namespace. Effective on their next request."""
+    """Revoke a user's role in a namespace. Effective on their next token
+    refresh (see _sync_group_membership — the Keycloak group is what k8s RBAC
+    actually reads, not a live per-request check anymore)."""
     authz.require_namespace_manager(request, grant.namespace)
     # Accept an id or a username, but never fail a revoke just because the
     # directory is unreachable — removing access must always be possible.
     user = _lookup_user(grant.user_id)
     user_id = user["id"] if user else grant.user_id
+    old_role = store.grant_role(grant.namespace, user_id)
     store.remove_grant(grant.namespace, user_id)
     store.record(caller_name(request), "access.revoke", grant.namespace, user_id)
+
+    if user and old_role:
+        team = store.team_for_namespace(grant.namespace)
+        if not (team and store.is_owner(user_id, team["id"])):
+            _sync_group_membership(grant.namespace, old_role, user["username"], add=False)
+
     return {"message": f"Revoked access to {grant.namespace}"}
 
 @app.get("/internal/teams")

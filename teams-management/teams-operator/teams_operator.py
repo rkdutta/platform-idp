@@ -107,43 +107,43 @@ class TeamsOperator:
             logger.error(f"Unexpected error fetching access: {e}")
             return None
 
-    def sync_namespace_rbac(self, namespace: str, viewers, maintainers) -> None:
-        """Reconcile the two RoleBindings that give viewer/maintainer grants
-        real effect in `namespace`, replacing the full subject list each call
-        (cheap, and needs no extra operator-side state to diff against)."""
-        for binding_name, role_name, usernames in (
-            (self.VIEWER_BINDING, "view", viewers),
-            (self.MAINTAINER_BINDING, "edit", maintainers),
+    def sync_namespace_rbac(self, namespace: str) -> None:
+        """Ensure the two static RoleBindings exist that give k8s RBAC real
+        effect in `namespace`, bound to Group subjects named deterministically
+        from the namespace ("{namespace}-viewer" / "{namespace}-maintainer" —
+        must match teams-api's _k8s_group_name). *Membership* in those groups
+        (who's actually a viewer/maintainer right now) is synced straight into
+        Keycloak by teams-api itself, not here — these bindings never change
+        once created, so this is create-if-missing, no per-cycle patch."""
+        for binding_name, cluster_role, role_tier in (
+            (self.VIEWER_BINDING, "view", "viewer"),
+            (self.MAINTAINER_BINDING, "edit", "maintainer"),
         ):
-            self._sync_role_binding(namespace, binding_name, role_name, usernames)
+            self._ensure_group_role_binding(namespace, binding_name, cluster_role, role_tier)
 
-    def _sync_role_binding(self, namespace: str, name: str, cluster_role: str, usernames) -> None:
-        subjects = [
-            client.V1Subject(kind="User", name=u, api_group="rbac.authorization.k8s.io")
-            for u in usernames
-        ]
+    def _ensure_group_role_binding(
+        self, namespace: str, name: str, cluster_role: str, role_tier: str
+    ) -> None:
+        group_name = f"{namespace}-{role_tier}"
         body = client.V1RoleBinding(
             metadata=client.V1ObjectMeta(name=name, namespace=namespace, labels=self.RBAC_MANAGED_BY),
             role_ref=client.V1RoleRef(
                 api_group="rbac.authorization.k8s.io", kind="ClusterRole", name=cluster_role
             ),
-            subjects=subjects,
+            subjects=[
+                client.V1Subject(kind="Group", name=group_name, api_group="rbac.authorization.k8s.io")
+            ],
         )
         try:
             self.k8s_rbac_v1.create_namespaced_role_binding(namespace, body)
-            logger.info(f"✅ Created RoleBinding '{name}' in '{namespace}' ({len(subjects)} subject(s))")
+            logger.info(f"✅ Created RoleBinding '{name}' in '{namespace}' (Group: {group_name})")
         except ApiException as e:
-            if e.status == 409:  # already exists — replace the subject list
-                try:
-                    self.k8s_rbac_v1.patch_namespaced_role_binding(
-                        name, namespace, {"subjects": [s.to_dict() for s in subjects]}
-                    )
-                except ApiException as patch_err:
-                    logger.error(f"❌ Failed to update RoleBinding '{name}' in '{namespace}': {patch_err}")
+            if e.status == 409:
+                pass  # already exists, subjects never change — nothing to reconcile
             else:
                 logger.error(f"❌ Failed to create RoleBinding '{name}' in '{namespace}': {e}")
         except Exception as e:
-            logger.error(f"❌ Unexpected error syncing RoleBinding '{name}' in '{namespace}': {e}")
+            logger.error(f"❌ Unexpected error creating RoleBinding '{name}' in '{namespace}': {e}")
 
     def sync_admin_binding(self, usernames) -> None:
         """Reconcile the single cluster-wide ClusterRoleBinding that gives
@@ -279,23 +279,26 @@ class TeamsOperator:
             total_ns = sum(len(v) for v in self.team_namespaces.values())
             logger.info(f"📊 Reconciliation complete: {len(current_teams)} teams, {total_ns} namespaces")
 
-        # RBAC sync: mirror teams-api's permission model onto real RoleBindings
-        # for every namespace we currently manage, plus the cluster-wide admin
-        # binding. A namespace just deleted above is skipped here too — no
-        # RoleBindings to sync for a namespace that no longer exists, and its
-        # old ones went with it (namespace-scoped, cascade-deleted).
-        access = await self.fetch_access()
-        if access is None:
-            logger.warning("Skipping RBAC sync: access could not be fetched from the API")
-            return
-
-        namespace_access = access.get("namespaces") or {}
+        # RBAC sync, part 1: ensure each namespace we manage has its two
+        # static Group-bound RoleBindings (see sync_namespace_rbac) — this
+        # needs nothing from teams-api beyond the namespace name itself, so
+        # it doesn't depend on /internal/access succeeding. A namespace just
+        # deleted above is skipped too — no RoleBindings to ensure for a
+        # namespace that no longer exists, and its old ones went with it
+        # (namespace-scoped, cascade-deleted).
         for provisioned in self.team_namespaces.values():
             for namespace_name in provisioned:
-                grants = namespace_access.get(namespace_name, {"viewer": [], "maintainer": []})
-                self.sync_namespace_rbac(
-                    namespace_name, grants.get("viewer", []), grants.get("maintainer", [])
-                )
+                self.sync_namespace_rbac(namespace_name)
+
+        # RBAC sync, part 2: the one binding that's still user-list-based —
+        # cluster-admin for Keycloak `admin`-role holders. A single cluster-
+        # wide object, never part of the per-namespace proliferation this
+        # design otherwise avoids, so it's not worth a Keycloak-group
+        # indirection of its own.
+        access = await self.fetch_access()
+        if access is None:
+            logger.warning("Skipping admin ClusterRoleBinding sync: access could not be fetched from the API")
+            return
 
         admins = access.get("admins")
         if admins is None:
