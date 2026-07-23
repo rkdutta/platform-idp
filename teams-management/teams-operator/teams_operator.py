@@ -461,7 +461,7 @@ class TeamsOperator:
         except OSError as e:
             logger.error(f"❌ Could not read OpenBao policy template: {e}")
             return
-        resp = self._openbao_request("PUT", f"sys/policies/acl/team-{namespace}", {"policy": policy_hcl})
+        resp = self._openbao_request("PUT", f"sys/policies/acl/team-{namespace}-policy", {"policy": policy_hcl})
         if resp is None:
             return  # already logged; nothing else in this method can succeed without OpenBao access
         if resp.ok:
