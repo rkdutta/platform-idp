@@ -9,8 +9,9 @@ import json
 import logging
 import os
 import time
-from typing import Set, Dict, Any
+from typing import Set, Dict, Any, Optional
 import aiohttp
+import requests
 import yaml
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
@@ -98,6 +99,36 @@ class TeamsOperator:
         # ensure_network_policies.
         self.NETWORKPOLICY_TEMPLATES_DIR = os.getenv("NETWORKPOLICY_TEMPLATES_DIR", "/app/networkpolicy-templates")
 
+        # SPIFFE-authenticated OpenBao access: every team-* pod gets a JWT-SVID
+        # + an openbao-agent sidecar (see apps/security/tenant-guardrails's
+        # openbao-spiffe-volume-*.yaml / openbao-sidecar-*.yaml mutations) that
+        # logs into a per-namespace JWT auth role scoped to that namespace's
+        # slice of the kv-teams KV mount. This operator creates that role (plus
+        # its policy and the sidecars' agent-config ConfigMap) per namespace —
+        # same ConfigMap-mounted-template approach as quotas/limits/netpols
+        # above, except these templates aren't Kubernetes objects: the policy/
+        # role templates become OpenBao HTTP API bodies (see
+        # ensure_openbao_access), and the agentconfig templates become the
+        # data keys of a per-namespace ConfigMap tenant pods mount directly.
+        self.OPENBAO_POLICY_TEMPLATES_DIR = os.getenv("OPENBAO_POLICY_TEMPLATES_DIR", "/app/openbao-policy-templates")
+        self.OPENBAO_ROLE_TEMPLATES_DIR = os.getenv("OPENBAO_ROLE_TEMPLATES_DIR", "/app/openbao-role-templates")
+        self.OPENBAO_AGENTCONFIG_TEMPLATES_DIR = os.getenv("OPENBAO_AGENTCONFIG_TEMPLATES_DIR", "/app/openbao-agentconfig-templates")
+        self.OPENBAO_AGENT_CONFIGMAP = "openbao-agent-config"
+
+        # This operator's own access to OpenBao (to create the per-namespace
+        # policies/roles above) uses the same SPIFFE trust chain as tenant
+        # workloads, just with a more privileged role — see this Deployment's
+        # own spiffe-helper sidecar (manifests/deployment.yaml) and the
+        # one-time bootstrap in bootstrap/README.md. self._openbao_token /
+        # self._openbao_token_expiry cache the client token from `bao write
+        # auth/jwt/login`; _openbao_request() re-logs-in when it's stale or
+        # missing rather than eagerly at startup, so a slow/late SVID doesn't
+        # crash-loop the whole operator.
+        self.openbao_addr = os.getenv("OPENBAO_ADDR", "http://openbao.openbao.svc.cluster.local:8200")
+        self.openbao_jwt_path = os.getenv("OPENBAO_JWT_PATH", "/operator-shared/spiffe-jwt")
+        self.openbao_role = os.getenv("OPENBAO_ROLE", "teams-operator-admin")
+        self._openbao_token: Optional[str] = None
+        self._openbao_token_expiry: float = 0.0
 
     async def fetch_teams(self):
         """Fetch current teams from the Teams API.
@@ -355,6 +386,122 @@ class TeamsOperator:
             namespace, self.NETWORKPOLICY_TEMPLATES_DIR, self.k8s_networking_v1.create_namespaced_network_policy
         )
 
+    def _openbao_login(self) -> Optional[str]:
+        """Log in to OpenBao via its jwt auth method, using this pod's own
+        JWT-SVID (written by the spiffe-helper sidecar — see
+        manifests/deployment.yaml). Caches the client token until it's near
+        expiry (see _openbao_request). Returns None (logging the reason) on
+        any failure — a missing/late SVID or an unreachable OpenBao must not
+        crash-loop the operator, just skip this cycle's OpenBao work."""
+        try:
+            with open(self.openbao_jwt_path) as f:
+                jwt = f.read().strip()
+        except OSError as e:
+            logger.warning(f"⚠️ Could not read JWT-SVID from {self.openbao_jwt_path}: {e}")
+            return None
+        if not jwt:
+            logger.warning(f"⚠️ JWT-SVID at {self.openbao_jwt_path} is empty (spiffe-helper not ready yet?)")
+            return None
+
+        try:
+            resp = requests.post(
+                f"{self.openbao_addr}/v1/auth/jwt/login",
+                json={"role": self.openbao_role, "jwt": jwt},
+                timeout=5,
+            )
+            resp.raise_for_status()
+            auth = resp.json()["auth"]
+        except (requests.RequestException, KeyError, ValueError) as e:
+            logger.error(f"❌ OpenBao jwt login failed (role={self.openbao_role}): {e}")
+            return None
+
+        self._openbao_token = auth["client_token"]
+        # Refresh a bit before actual expiry so a request never races a token
+        # that's valid at read time but expired by the time it reaches OpenBao.
+        self._openbao_token_expiry = time.time() + max(auth.get("lease_duration", 0) - 30, 0)
+        logger.info(f"✅ OpenBao jwt login OK (role={self.openbao_role})")
+        return self._openbao_token
+
+    def _openbao_request(self, method: str, path: str, json_body: Any = None) -> Optional[requests.Response]:
+        """Authenticated call to OpenBao's HTTP API (`path` relative to
+        /v1/). Logs in (or re-logs-in if the cached token is stale) as
+        needed. Returns None — logging the reason — on login failure or a
+        request exception; callers treat that the same as any other
+        transient-failure case elsewhere in this file (skip, retry next
+        reconciliation cycle)."""
+        if self._openbao_token is None or time.time() >= self._openbao_token_expiry:
+            if self._openbao_login() is None:
+                return None
+        try:
+            resp = requests.request(
+                method,
+                f"{self.openbao_addr}/v1/{path}",
+                headers={"X-Vault-Token": self._openbao_token},
+                json=json_body,
+                timeout=5,
+            )
+            return resp
+        except requests.RequestException as e:
+            logger.error(f"❌ OpenBao request {method} {path} failed: {e}")
+            return None
+
+    def ensure_openbao_access(self, namespace: str) -> None:
+        """Ensure `namespace` has everything a tenant pod's openbao-agent
+        sidecar needs to authenticate and get scoped KV read/write: an ACL
+        policy limited to this namespace's slice of kv-teams, a jwt auth
+        role that maps this namespace's SPIFFE IDs to that policy, and the
+        agent-config ConfigMap the sidecars mount (see
+        apps/security/tenant-guardrails's openbao-spiffe-volume-*.yaml).
+        Create-if-missing/leave-as-is-on-conflict, same semantics as
+        _apply_namespaced_templates — no drift reconciliation of an
+        already-created policy/role/ConfigMap."""
+        try:
+            with open(os.path.join(self.OPENBAO_POLICY_TEMPLATES_DIR, "team.hcl")) as f:
+                policy_hcl = f.read().replace("{{ NAMESPACE }}", namespace)
+        except OSError as e:
+            logger.error(f"❌ Could not read OpenBao policy template: {e}")
+            return
+        resp = self._openbao_request("PUT", f"sys/policies/acl/team-{namespace}", {"policy": policy_hcl})
+        if resp is None:
+            return  # already logged; nothing else in this method can succeed without OpenBao access
+        if resp.ok:
+            logger.info(f"✅ Ensured OpenBao policy 'team-{namespace}-policy'")
+        else:
+            logger.error(f"❌ Failed to write OpenBao policy for '{namespace}': HTTP {resp.status_code} {resp.text}")
+
+        try:
+            with open(os.path.join(self.OPENBAO_ROLE_TEMPLATES_DIR, "team.json")) as f:
+                role_body = json.loads(f.read().replace("{{ NAMESPACE }}", namespace))
+        except (OSError, json.JSONDecodeError) as e:
+            logger.error(f"❌ Could not read/parse OpenBao role template: {e}")
+            return
+        resp = self._openbao_request("PUT", f"auth/jwt/role/team-{namespace}", role_body)
+        if resp is not None and resp.ok:
+            logger.info(f"✅ Ensured OpenBao jwt auth role 'team-{namespace}'")
+        elif resp is not None:
+            logger.error(f"❌ Failed to write OpenBao role for '{namespace}': HTTP {resp.status_code} {resp.text}")
+
+        try:
+            data = {}
+            for filename in ("spiffe-helper.conf", "agent.hcl"):
+                with open(os.path.join(self.OPENBAO_AGENTCONFIG_TEMPLATES_DIR, filename)) as f:
+                    data[filename] = f.read().replace("{{ NAMESPACE }}", namespace)
+        except OSError as e:
+            logger.error(f"❌ Could not read OpenBao agent-config templates: {e}")
+            return
+        configmap = client.V1ConfigMap(
+            metadata=client.V1ObjectMeta(name=self.OPENBAO_AGENT_CONFIGMAP),
+            data=data,
+        )
+        try:
+            self.k8s_core_v1.create_namespaced_config_map(namespace, configmap)
+            logger.info(f"✅ Created ConfigMap '{self.OPENBAO_AGENT_CONFIGMAP}' in '{namespace}'")
+        except ApiException as e:
+            if e.status != 409:
+                logger.error(f"❌ Failed to create ConfigMap '{self.OPENBAO_AGENT_CONFIGMAP}' in '{namespace}': {e}")
+        except Exception as e:
+            logger.error(f"❌ Unexpected error creating ConfigMap '{self.OPENBAO_AGENT_CONFIGMAP}' in '{namespace}': {e}")
+
     def create_namespace(self, team_id: str, team_name: str, namespace_name: str) -> bool:
         """Create a Kubernetes namespace for the team"""
         try:
@@ -472,6 +619,7 @@ class TeamsOperator:
                 self.ensure_priority_quotas(namespace_name)
                 self.ensure_limit_ranges(namespace_name)
                 self.ensure_network_policies(namespace_name)
+                self.ensure_openbao_access(namespace_name)
 
         # RBAC sync, part 2: the one binding that's still user-list-based —
         # cluster-admin for Keycloak `admin`-role holders. A single cluster-
