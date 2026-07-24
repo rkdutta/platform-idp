@@ -631,6 +631,62 @@
   background-color: var(--solid-success);
 }
 
+/* Hover popover for the namespace-status badge — a custom panel instead of
+   a native title="" tooltip, which is slow to appear and can't hold a
+   formatted list. CSS-only (no JS state): shown on :hover of the wrapper. */
+.ns-status-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.ns-status-popover {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 20;
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  min-width: 220px;
+  list-style: none;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-sm);
+  font-size: 12px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  white-space: nowrap;
+}
+
+.ns-status-wrap:hover .ns-status-popover {
+  display: block;
+}
+
+.ns-status-popover li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  color: var(--text);
+}
+
+.ns-status-popover .cond-icon {
+  color: var(--success);
+  font-weight: 700;
+  width: 14px;
+  text-align: center;
+}
+
+.ns-status-popover li.cond-fail .cond-icon {
+  color: var(--danger);
+}
+
+.ns-status-popover li.cond-fail .cond-label {
+  color: var(--text);
+}
+
 .badge-degraded {
   background-color: var(--solid-danger);
 }

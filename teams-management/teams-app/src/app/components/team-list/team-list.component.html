@@ -103,13 +103,27 @@
                    reconciled OK (RBAC, image pull, quotas, limits, network
                    policy, OpenBao access) — a snapshot, not a live probe. If
                    something's actually broken, the fix is a fresh namespace,
-                   not a repair action here. -->
+                   not a repair action here. A custom hover popover (not a
+                   native title="" tooltip - those are slow to appear and
+                   can't hold a formatted list), listing each check with a
+                   human-readable label, not the raw condition type. -->
               <span
-                class="badge badge-sm"
-                [ngClass]="'badge-' + nsStatusOf(team.id, ns)"
-                [title]="nsStatusReason(team.id, ns)"
-                >{{ nsStatusLabel(team.id, ns) }}</span
+                class="ns-status-wrap"
+                [title]="nsConditions(team.id, ns).length === 0 ? nsStatusReason(team.id, ns) : null"
               >
+                <span class="badge badge-sm" [ngClass]="'badge-' + nsStatusOf(team.id, ns)">{{
+                  nsStatusLabel(team.id, ns)
+                }}</span>
+                <ul
+                  class="ns-status-popover"
+                  *ngIf="nsConditions(team.id, ns).length > 0"
+                >
+                  <li *ngFor="let c of nsConditions(team.id, ns)" [class.cond-fail]="c.status !== 'True'">
+                    <span class="cond-icon">{{ c.status === "True" ? "✓" : "✗" }}</span>
+                    <span class="cond-label">{{ conditionLabel(c.type) }}</span>
+                  </li>
+                </ul>
+              </span>
               <!-- The caller's own role here, so it's obvious what they may do. -->
               <span class="ns-role" *ngIf="authService.roleIn(ns) as role">{{ role }}</span>
               <span

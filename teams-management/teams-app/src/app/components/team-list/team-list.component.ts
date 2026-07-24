@@ -9,6 +9,7 @@ import {
   ComplianceDetail,
   ProvisioningStatus,
   NamespaceProvisioningStatus,
+  NamespaceCondition,
   Application,
   ApplicationGroup,
 } from "../../models/team.model";
@@ -412,11 +413,32 @@ export class TeamListComponent implements OnInit {
     }
   }
 
-  // Tooltip for the badge — e.g. "2 of 6 checks not ready: OpenBaoAccess,
-  // NetworkPolicy" when degraded, or the generic reason (operator hasn't
-  // reconciled yet, etc.) when unknown.
+  // Fallback native title="" text, used only when there's no conditions list
+  // to show in the hover popover (the "unknown" case — e.g. the operator
+  // hasn't reconciled this namespace yet — where there's nothing to list).
   nsStatusReason(teamId: string, namespace: string): string {
     return this.namespaceStatus[teamId]?.[namespace]?.reason || "Namespace provisioning status";
+  }
+
+  nsConditions(teamId: string, namespace: string): NamespaceCondition[] {
+    return this.namespaceStatus[teamId]?.[namespace]?.conditions ?? [];
+  }
+
+  // Plain-English label for each condition `type` teams-operator provisions
+  // (see update_namespace_status in teams_operator.py) — the raw type
+  // strings are stable identifiers shared with the backend/operator, not
+  // meant to be read directly by a team lead.
+  private static readonly CONDITION_LABELS: { [type: string]: string } = {
+    RBAC: "Team member access (view/edit permissions)",
+    ImagePullAccess: "Container image pulls (Harbor)",
+    ResourceQuota: "Resource quotas",
+    LimitRange: "Default resource limits",
+    NetworkPolicy: "Network isolation",
+    OpenBaoAccess: "Secrets access (OpenBao)",
+  };
+
+  conditionLabel(type: string): string {
+    return TeamListComponent.CONDITION_LABELS[type] || type;
   }
 
   deleteTeam(teamId: string, teamName: string) {
