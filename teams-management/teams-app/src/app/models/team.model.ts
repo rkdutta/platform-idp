@@ -153,6 +153,7 @@ export interface Application {
   ready_replicas: number;
   part_of?: string | null; // app.kubernetes.io/part-of (grouping key)
   component?: string | null; // app.kubernetes.io/component (web | api)
+  priority_class?: string | null; // tenant-critical | tenant-standard | tenant-besteffort
   url?: string | null; // browser URL: web -> page, api -> Swagger docs
   release_url?: string | null; // GitHub release page for `version`
   compliance?: AppCompliance | null;

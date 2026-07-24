@@ -107,9 +107,9 @@
                    not a repair action here. A custom hover popover (not a
                    native title="" tooltip - those are slow to appear and
                    can't hold a formatted list), listing each check with a
-                   human-readable label, not the raw condition type. Just a
-                   colored tick, not a text label — color carries the
-                   status (green/red/yellow), the popover carries the detail. -->
+                   human-readable label, not the raw condition type. A
+                   single glyph, not a text label — tick/cross/light plus
+                   color carries the status, the popover carries the detail. -->
               <span
                 class="ns-status-wrap"
                 [title]="nsConditions(team.id, ns).length === 0 ? nsStatusReason(team.id, ns) : null"
@@ -118,7 +118,7 @@
                   class="ns-tick"
                   [ngClass]="'ns-tick-' + nsStatusOf(team.id, ns)"
                   [attr.aria-label]="nsStatusLabel(team.id, ns)"
-                  >✓</span
+                  >{{ nsStatusIcon(team.id, ns) }}</span
                 >
                 <ul
                   class="ns-status-popover"
@@ -250,9 +250,15 @@
                             >
                           </dd>
                         </div>
+                        <!-- PriorityClass this workload is actually running
+                             with right now (spec.template.spec.priorityClassName,
+                             read live off the Rollout/Deployment on every
+                             refresh - see priority_class in workloads.py) -
+                             every tenant workload gets one via a Gatekeeper
+                             mutation, so this is never missing in practice. -->
                         <div class="meta-row">
-                          <dt>Type</dt>
-                          <dd>{{ app.rollout?.strategy || app.kind }}</dd>
+                          <dt>Tier</dt>
+                          <dd>{{ app.priority_class || "Unassigned" }}</dd>
                         </div>
                       </dl>
 

@@ -475,6 +475,21 @@ export class TeamListComponent implements OnInit, OnDestroy {
     }
   }
 
+  // Glyph for the status indicator — green tick (success), red cross
+  // (failed), yellow light/dot (still being provisioned — "unknown" means
+  // teams-operator hasn't reconciled this namespace yet, which reads as
+  // "in progress" rather than a real failure).
+  nsStatusIcon(teamId: string, namespace: string): string {
+    switch (this.nsStatusOf(teamId, namespace)) {
+      case "ready":
+        return "✓";
+      case "degraded":
+        return "✗";
+      default:
+        return "●";
+    }
+  }
+
   // Fallback native title="" text, used only when there's no conditions list
   // to show in the hover popover (the "unknown" case — e.g. the operator
   // hasn't reconciled this namespace yet — where there's nothing to list).

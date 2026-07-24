@@ -155,6 +155,26 @@ class TeamsOperator:
             "OpenBaoAccess": "Secrets access (OpenBao)",
         }
 
+        # This operator's own namespace — the durable home for Events whose
+        # involvedObject namespace is being (or has been) deleted, since an
+        # Event stored *in* a namespace is cascade-deleted along with it and
+        # would never reach the UI (see delete_namespace / _emit_event).
+        # Set via the downward API in this Deployment's own manifest;
+        # defaults to the one namespace this operator actually runs in.
+        self.OPERATOR_NAMESPACE = os.getenv("OPERATOR_NAMESPACE", "engineering-platform")
+        # Label every Event this operator emits with the owning team, so
+        # teams-api can find them all with one cluster-wide label query
+        # (list_event_for_all_namespaces) regardless of which namespace
+        # actually stores them - see events_reader.py in teams-api.
+        self.EVENT_TEAM_LABEL = "teams.example.com/team-id"
+
+        # Last-synced admin subject set, so sync_admin_binding can emit an
+        # Event only when the actual admin list changes - unlike the
+        # per-namespace concerns, the ClusterRoleBinding here gets an
+        # unconditional PATCH every reconcile cycle regardless of whether
+        # anything changed, so without this an event would fire every ~30s.
+        self._last_admin_usernames: Optional[Set[str]] = None
+
     async def fetch_teams(self):
         """Fetch current teams from the Teams API.
 
@@ -260,6 +280,8 @@ class TeamsOperator:
         Keycloak `admin`-role holders real cluster-admin. Caller is
         responsible for not calling this when the admin list is unknown
         (None) — see reconcile_teams."""
+        new_admins = set(usernames)
+        changed = new_admins != self._last_admin_usernames
         subjects = [
             client.V1Subject(kind="User", name=u, api_group="rbac.authorization.k8s.io")
             for u in usernames
@@ -274,12 +296,23 @@ class TeamsOperator:
         try:
             self.k8s_rbac_v1.create_cluster_role_binding(body)
             logger.info(f"✅ Created ClusterRoleBinding '{self.ADMIN_BINDING}' ({len(subjects)} admin(s))")
+            self._emit_cluster_event(self.ADMIN_BINDING, "AdminBindingSynced",
+                                      f"cluster-admin granted to {len(subjects)} admin(s)")
+            self._last_admin_usernames = new_admins
         except ApiException as e:
             if e.status == 409:
                 try:
                     self.k8s_rbac_v1.patch_cluster_role_binding(
                         self.ADMIN_BINDING, {"subjects": [s.to_dict() for s in subjects]}
                     )
+                    # Patched every cycle regardless of change (the API call
+                    # itself doesn't distinguish a no-op patch) - only emit
+                    # an Event when the admin set actually differs from last
+                    # time, or this would fire every ~30s forever.
+                    if changed:
+                        self._emit_cluster_event(self.ADMIN_BINDING, "AdminBindingSynced",
+                                                  f"cluster-admin now granted to {len(subjects)} admin(s)")
+                        self._last_admin_usernames = new_admins
                 except ApiException as patch_err:
                     logger.error(f"❌ Failed to update ClusterRoleBinding '{self.ADMIN_BINDING}': {patch_err}")
             else:
@@ -562,19 +595,30 @@ class TeamsOperator:
 
         return ok
 
-    def _emit_event(self, namespace: str, reason: str, message: str, healthy: bool = True) -> None:
-        """Emit a Kubernetes Event on `namespace` (involvedObject = the
-        Namespace itself) — the Teams portal reads these (via teams-api's
-        events_reader.py) to show a per-team activity feed. Best-effort: a
-        failure to emit an Event must never break reconciliation, so this
-        only logs on error. Shared low-level primitive for both namespace
-        lifecycle events (create_namespace) and provisioning-condition
+    def _emit_event(
+        self, event_namespace: str, involved_namespace: str, team_id: Optional[str],
+        reason: str, message: str, healthy: bool = True,
+    ) -> None:
+        """Emit a Kubernetes Event whose involvedObject is the
+        `involved_namespace` Namespace, stored in `event_namespace` — the
+        Teams portal reads these (via teams-api's events_reader.py, a
+        cluster-wide query by the team-id label) to show a per-team
+        activity feed. `event_namespace` is normally the same as
+        `involved_namespace` (so `kubectl get events -n <ns>` keeps working
+        naturally), EXCEPT when the involved namespace is being/has been
+        deleted and can't hold it — an Event stored *in* a namespace is
+        cascade-deleted along with it, so delete_namespace passes
+        self.OPERATOR_NAMESPACE instead. Best-effort: a failure to emit an
+        Event must never break reconciliation, so this only logs on error.
+        Shared low-level primitive for namespace lifecycle events
+        (create_namespace/delete_namespace) and provisioning-condition
         transitions (update_namespace_status)."""
         now = datetime.now(timezone.utc)
+        labels = {self.EVENT_TEAM_LABEL: team_id} if team_id else {}
         body = client.CoreV1Event(
-            metadata=client.V1ObjectMeta(generate_name=f"teams-operator-{namespace}-"),
+            metadata=client.V1ObjectMeta(generate_name=f"teams-operator-{involved_namespace}-", labels=labels),
             involved_object=client.V1ObjectReference(
-                kind="Namespace", name=namespace, namespace=namespace, api_version="v1"
+                kind="Namespace", name=involved_namespace, namespace=involved_namespace, api_version="v1"
             ),
             reason=reason,
             message=message,
@@ -585,21 +629,52 @@ class TeamsOperator:
             count=1,
         )
         try:
-            self.k8s_core_v1.create_namespaced_event(namespace, body)
+            self.k8s_core_v1.create_namespaced_event(event_namespace, body)
         except ApiException as e:
-            logger.error(f"❌ Failed to emit Event ({reason}) in '{namespace}': {e}")
+            logger.error(f"❌ Failed to emit Event ({reason}) for '{involved_namespace}': {e}")
         except Exception as e:
-            logger.error(f"❌ Unexpected error emitting Event ({reason}) in '{namespace}': {e}")
+            logger.error(f"❌ Unexpected error emitting Event ({reason}) for '{involved_namespace}': {e}")
 
-    def _emit_condition_event(self, namespace: str, cond_type: str, healthy: bool) -> None:
+    def _emit_condition_event(self, namespace: str, team_id: str, cond_type: str, healthy: bool) -> None:
         """Build the reason/message for a provisioning condition's
         transition and emit it — see _emit_event."""
         label = self.CONDITION_LABELS.get(cond_type, cond_type)
         reason = f"{cond_type}Ready" if healthy else f"{cond_type}Failed"
         message = f"{label} is now ready" if healthy else f"{label} failed to provision"
-        self._emit_event(namespace, reason, message, healthy)
+        self._emit_event(namespace, namespace, team_id, reason, message, healthy)
 
-    def update_namespace_status(self, namespace: str, results: Dict[str, bool]) -> None:
+    def _emit_cluster_event(self, name: str, reason: str, message: str, healthy: bool = True) -> None:
+        """Emit an Event for a cluster-scoped action with no owning
+        team/namespace to attach to (e.g. the cluster-admin
+        ClusterRoleBinding sync, which applies to whichever Keycloak users
+        currently hold the `admin` realm role - not any single team). No
+        team-id label (there's no team), so this can't appear in the
+        per-team activity feed - it's still emitted (satisfies "every
+        cluster action gets an Event"), visible via `kubectl get events -n
+        <this operator's namespace>`, but the Teams portal has no
+        cluster-wide activity view today to show it in."""
+        now = datetime.now(timezone.utc)
+        body = client.CoreV1Event(
+            metadata=client.V1ObjectMeta(generate_name=f"teams-operator-{name}-"),
+            involved_object=client.V1ObjectReference(
+                kind="ClusterRoleBinding", name=name, api_version="rbac.authorization.k8s.io/v1"
+            ),
+            reason=reason,
+            message=message,
+            type="Normal" if healthy else "Warning",
+            source=client.V1EventSource(component="teams-operator"),
+            first_timestamp=now,
+            last_timestamp=now,
+            count=1,
+        )
+        try:
+            self.k8s_core_v1.create_namespaced_event(self.OPERATOR_NAMESPACE, body)
+        except ApiException as e:
+            logger.error(f"❌ Failed to emit Event ({reason}) for ClusterRoleBinding '{name}': {e}")
+        except Exception as e:
+            logger.error(f"❌ Unexpected error emitting Event ({reason}) for ClusterRoleBinding '{name}': {e}")
+
+    def update_namespace_status(self, namespace: str, team_id: str, results: Dict[str, bool]) -> None:
         """Write a Kubernetes-condition-shaped summary of this reconcile
         cycle's outcome onto the namespace itself, as a JSON-encoded list on
         the `teams.example.com/provisioning-status` annotation — one entry
@@ -640,12 +715,9 @@ class TeamsOperator:
             # Only emit an Event on an actual flip, not every ~30s reconcile
             # pass — otherwise a namespace sitting healthy forever would
             # accumulate a duplicate "ready" Event on every cycle, drowning
-            # out anything worth a team lead's attention. This is also the
-            # only place teams-operator emits Events from today (its
-            # `events: create` RBAC grant existed but was unused before
-            # this) — see _emit_event.
+            # out anything worth a team lead's attention.
             if transitioned:
-                self._emit_condition_event(namespace, cond_type, healthy)
+                self._emit_condition_event(namespace, team_id, cond_type, healthy)
 
         try:
             self.k8s_core_v1.patch_namespace(
@@ -679,7 +751,7 @@ class TeamsOperator:
             # Create the namespace
             self.k8s_core_v1.create_namespace(body=namespace_body)
             logger.info(f"✅ Created namespace '{namespace_name}' for team '{team_name}' (ID: {team_id})")
-            self._emit_event(namespace_name, "NamespaceProvisioned",
+            self._emit_event(namespace_name, namespace_name, team_id, "NamespaceProvisioned",
                               f"Namespace provisioned for team '{team_name}'")
             return True
             
@@ -694,11 +766,17 @@ class TeamsOperator:
             logger.error(f"❌ Unexpected error creating namespace: {e}")
             return False
     
-    def delete_namespace(self, namespace_name: str, team_name: str) -> bool:
+    def delete_namespace(self, namespace_name: str, team_name: str, team_id: str) -> bool:
         """Delete a Kubernetes namespace when team is removed"""
         try:
             self.k8s_core_v1.delete_namespace(name=namespace_name)
             logger.info(f"🗑️ Deleted namespace '{namespace_name}' for removed team '{team_name}'")
+            # Stored in this operator's own namespace, NOT namespace_name -
+            # that namespace is being torn down right now, and an Event
+            # stored inside it would be cascade-deleted along with it,
+            # never reaching the UI. See _emit_event.
+            self._emit_event(self.OPERATOR_NAMESPACE, namespace_name, team_id,
+                              "NamespaceDeleted", f"Namespace deleted for team '{team_name}'")
             return True
         except ApiException as e:
             if e.status == 404:  # Namespace doesn't exist
@@ -741,7 +819,7 @@ class TeamsOperator:
                     changed = True
 
             for namespace_name in provisioned - desired:      # no longer wanted
-                if self.delete_namespace(namespace_name, team_name):
+                if self.delete_namespace(namespace_name, team_name, team_id):
                     provisioned.discard(namespace_name)
                     changed = True
 
@@ -750,7 +828,7 @@ class TeamsOperator:
         for team_id in deleted_teams:
             team_name = f"team-{team_id}"  # fallback; the team record is gone
             for namespace_name in list(self.team_namespaces[team_id]):
-                if self.delete_namespace(namespace_name, team_name):
+                if self.delete_namespace(namespace_name, team_name, team_id):
                     self.team_namespaces[team_id].discard(namespace_name)
             if not self.team_namespaces[team_id]:
                 del self.team_namespaces[team_id]
@@ -767,7 +845,7 @@ class TeamsOperator:
         # deleted above is skipped too — no RoleBindings to ensure for a
         # namespace that no longer exists, and its old ones went with it
         # (namespace-scoped, cascade-deleted).
-        for provisioned in self.team_namespaces.values():
+        for team_id, provisioned in self.team_namespaces.items():
             for namespace_name in provisioned:
                 rbac_ok = self.sync_namespace_rbac(namespace_name)
                 pull_secret_ok = self.ensure_harbor_pull_secret(namespace_name)
@@ -780,7 +858,7 @@ class TeamsOperator:
                 # (teams-api reads this annotation directly) — see
                 # update_namespace_status's docstring for why this is a
                 # point-in-time snapshot, not live monitoring.
-                self.update_namespace_status(namespace_name, {
+                self.update_namespace_status(namespace_name, team_id, {
                     "RBAC": rbac_ok,
                     "ImagePullAccess": pull_secret_ok and sa_ok,
                     "ResourceQuota": quotas_ok,

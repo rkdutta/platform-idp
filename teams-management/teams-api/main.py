@@ -424,6 +424,7 @@ class Application(BaseModel):
     ready_replicas: int
     part_of: Optional[str] = None    # app.kubernetes.io/part-of (grouping key)
     component: Optional[str] = None  # app.kubernetes.io/component (web | api)
+    priority_class: Optional[str] = None  # tenant-critical | tenant-standard | tenant-besteffort
     url: Optional[str] = None        # browser URL: web -> page, api -> docs
     release_url: Optional[str] = None  # GitHub release page for `version`
     compliance: Optional[AppCompliance] = None

@@ -6,9 +6,16 @@ their name + version, so the portal can show what a team is running on its card.
 
 An "application" is an Argo Rollout or a Deployment in the team namespace. For
 each we derive:
-  * name    - the `app.kubernetes.io/name` label, else the workload's own name.
-  * version - the `app.kubernetes.io/version` label, else the image tag of the
-              first container.
+  * name           - the `app.kubernetes.io/name` label, else the workload's
+                     own name.
+  * version        - the `app.kubernetes.io/version` label, else the image tag
+                     of the first container.
+  * priority_class - spec.template.spec.priorityClassName read straight off
+                     the live object (every tenant workload gets one via a
+                     Gatekeeper mutation - see apps/security/tenant-guardrails
+                     - so this is never hand-maintained here). Refreshed on
+                     every cache cycle like everything else on the card - see
+                     CACHE_TTL_SECONDS.
 
 Team -> namespace is resolved via the label the teams-operator stamps
 (`teams.example.com/team-id`), the same approach used by the compliance checker.
@@ -163,7 +170,8 @@ class ApplicationsReader:
             meta = obj.get("metadata", {}) or {}
             spec = obj.get("spec", {}) or {}
             status = obj.get("status", {}) or {}
-            containers = (spec.get("template", {}).get("spec", {}) or {}).get("containers", [])
+            pod_spec = spec.get("template", {}).get("spec", {}) or {}
+            containers = pod_spec.get("containers", [])
             image = containers[0].get("image", "") if containers else ""
             name = meta.get("name", "")
             # The live host is served by the blue/green active Service.
@@ -182,6 +190,7 @@ class ApplicationsReader:
                 annotations=meta.get("annotations", {}),
                 serving_service=active_service,
                 ingress=ingress,
+                priority_class=pod_spec.get("priorityClassName"),
             )
             app["rollout"] = self._rollout_status(spec, status, rs_versions.get(name, {}))
             # For a blue/green rollout the live version is the active one, which
@@ -277,6 +286,7 @@ class ApplicationsReader:
                 # shares its name, so fall back to that when matching an ingress.
                 serving_service=dep.metadata.name,
                 ingress=ingress,
+                priority_class=dep.spec.template.spec.priority_class_name,
             ))
         return apps
 
@@ -291,6 +301,7 @@ class ApplicationsReader:
         annotations=None,
         serving_service=None,
         ingress=None,
+        priority_class=None,
     ) -> dict:
         labels = labels or {}
         annotations = annotations or {}
@@ -307,6 +318,7 @@ class ApplicationsReader:
             "ready_replicas": ready or 0,
             "part_of": labels.get(PART_OF_LABEL),
             "component": component,
+            "priority_class": priority_class,
             "url": self._app_url(host, component, annotations) if host else None,
             "release_url": _release_url(_repo_slug(annotations, image), version),
             "rollout": None,  # populated for Rollout kind by _rollouts()
