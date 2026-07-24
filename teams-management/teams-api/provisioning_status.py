@@ -93,8 +93,17 @@ class ProvisioningStatusChecker:
 
         failing = [c for c in conditions if c.get("status") != "True"]
         status = STATUS_DEGRADED if failing else STATUS_READY
-        reason = None if not failing else (
-            f"{len(failing)} of {len(conditions)} checks not ready: "
-            + ", ".join(c.get("type", "?") for c in failing)
-        )
+        if failing:
+            reason = (
+                f"{len(failing)} of {len(conditions)} checks not ready: "
+                + ", ".join(c.get("type", "?") for c in failing)
+            )
+        elif conditions:
+            # Ready still says *what* is ready, not just that nothing's
+            # failing — otherwise the only way to see the individual checks
+            # (RBAC, ImagePullAccess, ResourceQuota, LimitRange,
+            # NetworkPolicy, OpenBaoAccess) is already-failing ones.
+            reason = "All checks ready: " + ", ".join(c.get("type", "?") for c in conditions)
+        else:
+            reason = None
         return {**base, "status": status, "reason": reason, "conditions": conditions}
