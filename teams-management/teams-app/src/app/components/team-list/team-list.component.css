@@ -137,6 +137,19 @@
   font-size: 14px;
 }
 
+/* Icon-only delete buttons ("✕" instead of "Delete" text) — square instead
+   of the text button's wide rectangle. */
+.btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+}
+
 .teams-count {
   text-align: center;
   padding: 15px;
@@ -215,17 +228,6 @@
 .ns-delete {
   padding: 3px 10px;
   font-size: 12px;
-}
-
-.ns-default-tag {
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  padding: 2px 8px;
-  border-radius: 10px;
-  background: var(--neutral-soft);
-  color: var(--text-muted);
 }
 
 /* Apps live inside their namespace card. */
@@ -623,12 +625,29 @@
   background-color: var(--solid-neutral);
 }
 
-/* Namespace provisioning-status badge (RBAC/image-pull/quota/limits/
-   network-policy/OpenBao access) — "ready"/"degraded" reuse the same
-   green/red as compliant/non_compliant on purpose (same at-a-glance
-   meaning), "unknown" shares .badge-unknown above. */
-.badge-ready {
-  background-color: var(--solid-success);
+/* Namespace provisioning-status indicator (RBAC/image-pull/quota/limits/
+   network-policy/OpenBao access) — a single colored tick, not a text badge:
+   green = ready, red = degraded, yellow = unknown/still being provisioned
+   ("in progress"). Own class (not .badge-*) so it doesn't collide with the
+   team-level compliance badge, which keeps its grey "unknown" — these are
+   two different status vocabularies that happen to share the word. */
+.ns-tick {
+  font-weight: 700;
+  font-size: 15px;
+  line-height: 1;
+  cursor: default;
+}
+
+.ns-tick-ready {
+  color: var(--success);
+}
+
+.ns-tick-degraded {
+  color: var(--danger);
+}
+
+.ns-tick-unknown {
+  color: var(--warning);
 }
 
 /* Hover popover for the namespace-status badge — a custom panel instead of
@@ -685,10 +704,6 @@
 
 .ns-status-popover li.cond-fail .cond-label {
   color: var(--text);
-}
-
-.badge-degraded {
-  background-color: var(--solid-danger);
 }
 
 .policy-count {
@@ -786,6 +801,77 @@
 .policy-messages li {
   margin: 2px 0;
   word-break: break-word;
+}
+
+/* --- Team activity feed (teams-operator's Events) --- */
+.events-section {
+  margin-top: 15px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.events-detail {
+  margin-top: 12px;
+}
+
+.event-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.event {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.event-warning {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+}
+
+.event-mark {
+  font-weight: 700;
+}
+
+.event-normal .event-mark {
+  color: var(--success);
+}
+
+.event-warning .event-mark {
+  color: var(--danger);
+}
+
+.event-message {
+  color: var(--text);
+  flex: 1;
+}
+
+.event-ns {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-family: "Courier New", monospace;
+}
+
+.event-time {
+  color: var(--text-faint);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.event-count {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 /* --- Per-app compliance (on each component card) --- */

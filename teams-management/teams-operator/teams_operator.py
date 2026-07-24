@@ -142,6 +142,19 @@ class TeamsOperator:
         # own namespace.
         self.STATUS_ANNOTATION = "teams.example.com/provisioning-status"
 
+        # Human-readable text for the Events update_namespace_status emits
+        # on a condition transition (see _emit_event) — kept in sync with
+        # teams-app's CONDITION_LABELS map (team-list.component.ts), which
+        # renders the same condition types on the provisioning-status badge.
+        self.CONDITION_LABELS = {
+            "RBAC": "Team member access (view/edit permissions)",
+            "ImagePullAccess": "Container image pulls (Harbor)",
+            "ResourceQuota": "Resource quotas",
+            "LimitRange": "Default resource limits",
+            "NetworkPolicy": "Network isolation",
+            "OpenBaoAccess": "Secrets access (OpenBao)",
+        }
+
     async def fetch_teams(self):
         """Fetch current teams from the Teams API.
 
@@ -549,6 +562,43 @@ class TeamsOperator:
 
         return ok
 
+    def _emit_event(self, namespace: str, reason: str, message: str, healthy: bool = True) -> None:
+        """Emit a Kubernetes Event on `namespace` (involvedObject = the
+        Namespace itself) — the Teams portal reads these (via teams-api's
+        events_reader.py) to show a per-team activity feed. Best-effort: a
+        failure to emit an Event must never break reconciliation, so this
+        only logs on error. Shared low-level primitive for both namespace
+        lifecycle events (create_namespace) and provisioning-condition
+        transitions (update_namespace_status)."""
+        now = datetime.now(timezone.utc)
+        body = client.CoreV1Event(
+            metadata=client.V1ObjectMeta(generate_name=f"teams-operator-{namespace}-"),
+            involved_object=client.V1ObjectReference(
+                kind="Namespace", name=namespace, namespace=namespace, api_version="v1"
+            ),
+            reason=reason,
+            message=message,
+            type="Normal" if healthy else "Warning",
+            source=client.V1EventSource(component="teams-operator"),
+            first_timestamp=now,
+            last_timestamp=now,
+            count=1,
+        )
+        try:
+            self.k8s_core_v1.create_namespaced_event(namespace, body)
+        except ApiException as e:
+            logger.error(f"❌ Failed to emit Event ({reason}) in '{namespace}': {e}")
+        except Exception as e:
+            logger.error(f"❌ Unexpected error emitting Event ({reason}) in '{namespace}': {e}")
+
+    def _emit_condition_event(self, namespace: str, cond_type: str, healthy: bool) -> None:
+        """Build the reason/message for a provisioning condition's
+        transition and emit it — see _emit_event."""
+        label = self.CONDITION_LABELS.get(cond_type, cond_type)
+        reason = f"{cond_type}Ready" if healthy else f"{cond_type}Failed"
+        message = f"{label} is now ready" if healthy else f"{label} failed to provision"
+        self._emit_event(namespace, reason, message, healthy)
+
     def update_namespace_status(self, namespace: str, results: Dict[str, bool]) -> None:
         """Write a Kubernetes-condition-shaped summary of this reconcile
         cycle's outcome onto the namespace itself, as a JSON-encoded list on
@@ -578,7 +628,8 @@ class TeamsOperator:
         for cond_type, healthy in results.items():
             status = "True" if healthy else "False"
             prev = existing_by_type.get(cond_type)
-            last_transition = now if not prev or prev.get("status") != status else prev.get("lastTransitionTime", now)
+            transitioned = not prev or prev.get("status") != status
+            last_transition = now if transitioned else prev.get("lastTransitionTime", now)
             conditions.append({
                 "type": cond_type,
                 "status": status,
@@ -586,6 +637,15 @@ class TeamsOperator:
                 "lastTransitionTime": last_transition,
                 "lastCheckedTime": now,
             })
+            # Only emit an Event on an actual flip, not every ~30s reconcile
+            # pass — otherwise a namespace sitting healthy forever would
+            # accumulate a duplicate "ready" Event on every cycle, drowning
+            # out anything worth a team lead's attention. This is also the
+            # only place teams-operator emits Events from today (its
+            # `events: create` RBAC grant existed but was unused before
+            # this) — see _emit_event.
+            if transitioned:
+                self._emit_condition_event(namespace, cond_type, healthy)
 
         try:
             self.k8s_core_v1.patch_namespace(
@@ -619,6 +679,8 @@ class TeamsOperator:
             # Create the namespace
             self.k8s_core_v1.create_namespace(body=namespace_body)
             logger.info(f"✅ Created namespace '{namespace_name}' for team '{team_name}' (ID: {team_id})")
+            self._emit_event(namespace_name, "NamespaceProvisioned",
+                              f"Namespace provisioned for team '{team_name}'")
             return True
             
         except ApiException as e:

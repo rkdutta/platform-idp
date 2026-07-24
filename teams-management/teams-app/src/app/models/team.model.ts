@@ -104,6 +104,15 @@ export interface NamespaceProvisioningStatus {
   conditions: NamespaceCondition[];
 }
 
+export interface TeamEvent {
+  namespace: string;
+  type: string;   // "Normal" | "Warning"
+  reason: string;
+  message: string;
+  count: number;
+  last_timestamp: string | null;
+}
+
 export interface RolloutStatus {
   strategy: string; // BlueGreen | Canary | Unknown
   phase: string; // Healthy | Paused | Progressing | Degraded ...

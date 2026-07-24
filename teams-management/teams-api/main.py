@@ -18,6 +18,7 @@ from compliance import ComplianceChecker
 from workloads import ApplicationsReader
 from app_compliance import AppComplianceReader
 from provisioning_status import ProvisioningStatusChecker
+from events_reader import TeamEventsReader
 from auth import (
     authenticate,
     require_read,
@@ -107,6 +108,7 @@ app.add_middleware(
 # Compliance checker (reads Gatekeeper state from the Kubernetes API).
 compliance_checker = ComplianceChecker()
 provisioning_status_checker = ProvisioningStatusChecker()
+team_events_reader = TeamEventsReader()
 
 # Applications reader (lists Rollouts/Deployments in each team's namespace).
 # Promotion/rollout management is handled by the Argo Rollouts dashboard, so the
@@ -376,6 +378,14 @@ class NamespaceProvisioningStatus(BaseModel):
     status: str                      # ready | degraded | unknown
     reason: Optional[str] = None
     conditions: List[NamespaceCondition] = []
+
+class TeamEvent(BaseModel):
+    namespace: str
+    type: str                        # "Normal" | "Warning"
+    reason: str
+    message: str
+    count: int
+    last_timestamp: Optional[str] = None
 
 class RolloutStatus(BaseModel):
     strategy: str                    # BlueGreen | Canary | Unknown
@@ -724,6 +734,15 @@ def get_all_namespace_status(request: Request):
     quotas, limits, network policy, OpenBao access). A snapshot, not a live
     probe — see provisioning_status.py."""
     return provisioning_status_checker.summarize_all(authz.scoped_teams(request))
+
+@app.get("/teams/{team_id}/events", response_model=List[TeamEvent])
+def get_team_events(request: Request, team_id: str):
+    """Recent teams-operator activity (namespace provisioning + condition
+    transitions) across the team's namespaces, newest first. Loaded lazily
+    by the Teams portal on first expand of a team's events panel, then
+    polled — see events_reader.py for why this is team-scoped and
+    source-filtered."""
+    return team_events_reader.events_for_team(authz.require_visible_team(request, team_id))
 
 def _attach_compliance(team_apps: dict) -> dict:
     """Attach per-app compliance (supply-chain + Gatekeeper) to each app, using

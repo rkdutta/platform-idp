@@ -53,11 +53,12 @@
         <span class="team-header-spacer"></span>
         <button
           *ngIf="authService.isAdmin()"
-          class="btn btn-danger btn-sm"
+          class="btn btn-danger btn-sm btn-icon"
           (click)="deleteTeam(team.id, team.name)"
           title="Delete team"
+          aria-label="Delete team"
         >
-          Delete
+          ✕
         </button>
       </div>
 
@@ -106,14 +107,19 @@
                    not a repair action here. A custom hover popover (not a
                    native title="" tooltip - those are slow to appear and
                    can't hold a formatted list), listing each check with a
-                   human-readable label, not the raw condition type. -->
+                   human-readable label, not the raw condition type. Just a
+                   colored tick, not a text label — color carries the
+                   status (green/red/yellow), the popover carries the detail. -->
               <span
                 class="ns-status-wrap"
                 [title]="nsConditions(team.id, ns).length === 0 ? nsStatusReason(team.id, ns) : null"
               >
-                <span class="badge badge-sm" [ngClass]="'badge-' + nsStatusOf(team.id, ns)">{{
-                  nsStatusLabel(team.id, ns)
-                }}</span>
+                <span
+                  class="ns-tick"
+                  [ngClass]="'ns-tick-' + nsStatusOf(team.id, ns)"
+                  [attr.aria-label]="nsStatusLabel(team.id, ns)"
+                  >✓</span
+                >
                 <ul
                   class="ns-status-popover"
                   *ngIf="nsConditions(team.id, ns).length > 0"
@@ -126,19 +132,14 @@
               </span>
               <!-- The caller's own role here, so it's obvious what they may do. -->
               <span class="ns-role" *ngIf="authService.roleIn(ns) as role">{{ role }}</span>
-              <span
-                *ngIf="isDefaultNamespace(team, ns)"
-                class="ns-default-tag"
-                title="The namespace this team was created with — deletable like any other"
-                >default</span
-              >
               <button
                 *ngIf="canManageTeam(team)"
-                class="btn btn-danger btn-sm ns-delete"
+                class="btn btn-danger btn-sm btn-icon ns-delete"
                 (click)="deleteNamespace(team, ns)"
                 [title]="'Delete namespace ' + ns"
+                [attr.aria-label]="'Delete namespace ' + ns"
               >
-                Delete
+                ✕
               </button>
             </div>
 
@@ -458,6 +459,51 @@
                 <ul class="policy-messages" *ngIf="policy.messages.length > 0">
                   <li *ngFor="let msg of policy.messages">{{ msg }}</li>
                 </ul>
+              </li>
+            </ul>
+          </ng-container>
+        </div>
+      </div>
+
+      <!-- Team activity feed: teams-operator's own Events (namespace
+           provisioning + per-concern condition transitions), aggregated
+           across every namespace of this TEAM — not per-namespace, and not
+           a live probe (see docs/openbao-spiffe-access.md's reasoning on
+           why this platform doesn't watch namespaces after provisioning
+           them). Collapsed by default; lazy-loaded and auto-refreshed only
+           while expanded. -->
+      <div class="events-section">
+        <button
+          class="compliance-toggle"
+          (click)="toggleEvents(team.id)"
+          [attr.aria-expanded]="eventsExpanded[team.id]"
+        >
+          <span class="compliance-label">Recent activity</span>
+          <span class="chevron">{{ eventsExpanded[team.id] ? "▲" : "▼" }}</span>
+        </button>
+
+        <div class="events-detail" *ngIf="eventsExpanded[team.id]">
+          <div class="detail-loading" *ngIf="loadingEvents[team.id] && !teamEvents[team.id]">
+            Loading activity…
+          </div>
+
+          <ng-container *ngIf="teamEvents[team.id] as events">
+            <p class="detail-empty" *ngIf="events.length === 0">
+              No recent activity — nothing provisioned or changed yet.
+            </p>
+            <ul class="event-list" *ngIf="events.length > 0">
+              <li
+                class="event"
+                *ngFor="let e of events"
+                [ngClass]="e.type === 'Warning' ? 'event-warning' : 'event-normal'"
+              >
+                <span class="event-mark">{{ e.type === "Warning" ? "⚠" : "✓" }}</span>
+                <span class="event-message">{{ e.message }}</span>
+                <span class="event-ns">{{ e.namespace }}</span>
+                <span class="event-time" *ngIf="e.last_timestamp">{{
+                  formatDate(e.last_timestamp)
+                }}</span>
+                <span class="event-count" *ngIf="e.count > 1">×{{ e.count }}</span>
               </li>
             </ul>
           </ng-container>

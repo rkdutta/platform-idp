@@ -1,4 +1,4 @@
-import { Component, OnInit } from "@angular/core";
+import { Component, OnInit, OnDestroy } from "@angular/core";
 import { TeamsService } from "../../services/teams.service";
 import { AuthService } from "../../services/auth.service";
 import { environment } from "../../../environments/environment";
@@ -10,6 +10,7 @@ import {
   ProvisioningStatus,
   NamespaceProvisioningStatus,
   NamespaceCondition,
+  TeamEvent,
   Application,
   ApplicationGroup,
 } from "../../models/team.model";
@@ -19,7 +20,7 @@ import {
   templateUrl: "./team-list.component.html",
   styleUrls: ["./team-list.component.css"],
 })
-export class TeamListComponent implements OnInit {
+export class TeamListComponent implements OnInit, OnDestroy {
   teams: Team[] = [];
   isLoading = true;
   errorMessage = "";
@@ -38,6 +39,17 @@ export class TeamListComponent implements OnInit {
   // for drift after provisioning it, so it never fights a developer's own
   // changes inside their own namespace).
   namespaceStatus: { [teamId: string]: { [namespace: string]: NamespaceProvisioningStatus } } = {};
+
+  // Team activity feed (teams-operator's Events, aggregated across the
+  // team's namespaces) — collapsed by default, lazy-loaded on first
+  // expand, then auto-refreshed on a timer only while expanded (collapsing
+  // stops the poll, so a long-open tab with many teams doesn't keep
+  // hitting the API for panels nobody's looking at).
+  eventsExpanded: { [teamId: string]: boolean } = {};
+  teamEvents: { [teamId: string]: TeamEvent[] } = {};
+  loadingEvents: { [teamId: string]: boolean } = {};
+  private eventsPollHandle: { [teamId: string]: ReturnType<typeof setInterval> } = {};
+  private static readonly EVENTS_POLL_INTERVAL_MS = 15000;
 
   // Applications running in each team's namespace, keyed by team id, already
   // grouped by app.kubernetes.io/part-of into application cards.
@@ -358,6 +370,56 @@ export class TeamListComponent implements OnInit {
       return null;
     }
     return `${environment.rolloutsDashboardUrl}/rollouts/rollout/${ns}/${app.name}`;
+  }
+
+  toggleEvents(teamId: string) {
+    this.eventsExpanded[teamId] = !this.eventsExpanded[teamId];
+    if (this.eventsExpanded[teamId]) {
+      this.loadEvents(teamId);
+      // Clear any stale handle before starting a new one (defensive —
+      // toggling shouldn't normally double-arm this, but a leaked interval
+      // is a real bug class, not just a cosmetic one).
+      this.stopEventsPoll(teamId);
+      this.eventsPollHandle[teamId] = setInterval(
+        () => this.loadEvents(teamId),
+        TeamListComponent.EVENTS_POLL_INTERVAL_MS
+      );
+    } else {
+      this.stopEventsPoll(teamId);
+    }
+  }
+
+  private loadEvents(teamId: string) {
+    // Only show the loading indicator on the *first* load — a background
+    // refresh replacing an already-visible list shouldn't flash "Loading…"
+    // over it every 15s.
+    if (!this.teamEvents[teamId]) {
+      this.loadingEvents[teamId] = true;
+    }
+    this.teamsService.getTeamEvents(teamId).subscribe({
+      next: (events) => {
+        this.teamEvents[teamId] = events;
+        this.loadingEvents[teamId] = false;
+      },
+      error: (error) => {
+        console.error("Failed to load team events:", error);
+        this.loadingEvents[teamId] = false;
+      },
+    });
+  }
+
+  private stopEventsPoll(teamId: string) {
+    const handle = this.eventsPollHandle[teamId];
+    if (handle) {
+      clearInterval(handle);
+      delete this.eventsPollHandle[teamId];
+    }
+  }
+
+  ngOnDestroy() {
+    for (const teamId of Object.keys(this.eventsPollHandle)) {
+      this.stopEventsPoll(teamId);
+    }
   }
 
   toggleDetail(teamId: string) {
