@@ -623,6 +623,18 @@
   background-color: var(--solid-neutral);
 }
 
+/* Namespace provisioning-status badge (RBAC/image-pull/quota/limits/
+   network-policy/OpenBao access) — "ready"/"degraded" reuse the same
+   green/red as compliant/non_compliant on purpose (same at-a-glance
+   meaning), "unknown" shares .badge-unknown above. */
+.badge-ready {
+  background-color: var(--solid-success);
+}
+
+.badge-degraded {
+  background-color: var(--solid-danger);
+}
+
 .policy-count {
   flex: 1;
   color: var(--text-muted);

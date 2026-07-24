@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from typing import Set, Dict, Any, Optional
 import aiohttp
 import requests
@@ -130,6 +131,17 @@ class TeamsOperator:
         self._openbao_token: Optional[str] = None
         self._openbao_token_expiry: float = 0.0
 
+        # Per-namespace provisioning status (see update_namespace_status).
+        # Deliberately a point-in-time "did the last reconcile attempt for
+        # each concern succeed" snapshot, not continuous health monitoring
+        # or drift detection, and never triggers any repair action on its
+        # own — a team lead reads it (via teams-api/teams-app), it never
+        # reads back or acts on itself. That was an explicit choice: a
+        # system that actively polices/reverts a namespace's state would
+        # fight normal day-to-day changes a developer makes inside their
+        # own namespace.
+        self.STATUS_ANNOTATION = "teams.example.com/provisioning-status"
+
     async def fetch_teams(self):
         """Fetch current teams from the Teams API.
 
@@ -186,23 +198,27 @@ class TeamsOperator:
             logger.error(f"Unexpected error fetching access: {e}")
             return None
 
-    def sync_namespace_rbac(self, namespace: str) -> None:
+    def sync_namespace_rbac(self, namespace: str) -> bool:
         """Ensure the two static RoleBindings exist that give k8s RBAC real
         effect in `namespace`, bound to Group subjects named deterministically
         from the namespace ("{namespace}-viewer" / "{namespace}-maintainer" —
         must match teams-api's _k8s_group_name). *Membership* in those groups
         (who's actually a viewer/maintainer right now) is synced straight into
         Keycloak by teams-api itself, not here — these bindings never change
-        once created, so this is create-if-missing, no per-cycle patch."""
+        once created, so this is create-if-missing, no per-cycle patch.
+        Returns whether both bindings are present/created OK this cycle —
+        surfaced as the "RBAC" condition by update_namespace_status."""
+        ok = True
         for binding_name, cluster_role, role_tier in (
             (self.VIEWER_BINDING, "view", "viewer"),
             (self.MAINTAINER_BINDING, "edit", "maintainer"),
         ):
-            self._ensure_group_role_binding(namespace, binding_name, cluster_role, role_tier)
+            ok = self._ensure_group_role_binding(namespace, binding_name, cluster_role, role_tier) and ok
+        return ok
 
     def _ensure_group_role_binding(
         self, namespace: str, name: str, cluster_role: str, role_tier: str
-    ) -> None:
+    ) -> bool:
         group_name = f"{namespace}-{role_tier}"
         body = client.V1RoleBinding(
             metadata=client.V1ObjectMeta(name=name, namespace=namespace, labels=self.RBAC_MANAGED_BY),
@@ -216,13 +232,15 @@ class TeamsOperator:
         try:
             self.k8s_rbac_v1.create_namespaced_role_binding(namespace, body)
             logger.info(f"✅ Created RoleBinding '{name}' in '{namespace}' (Group: {group_name})")
+            return True
         except ApiException as e:
             if e.status == 409:
-                pass  # already exists, subjects never change — nothing to reconcile
-            else:
-                logger.error(f"❌ Failed to create RoleBinding '{name}' in '{namespace}': {e}")
+                return True  # already exists, subjects never change — nothing to reconcile
+            logger.error(f"❌ Failed to create RoleBinding '{name}' in '{namespace}': {e}")
+            return False
         except Exception as e:
             logger.error(f"❌ Unexpected error creating RoleBinding '{name}' in '{namespace}': {e}")
+            return False
 
     def sync_admin_binding(self, usernames) -> None:
         """Reconcile the single cluster-wide ClusterRoleBinding that gives
@@ -256,7 +274,7 @@ class TeamsOperator:
         except Exception as e:
             logger.error(f"❌ Unexpected error syncing ClusterRoleBinding '{self.ADMIN_BINDING}': {e}")
 
-    def ensure_harbor_pull_secret(self, namespace: str) -> None:
+    def ensure_harbor_pull_secret(self, namespace: str) -> bool:
         """Ensure `namespace` has the harbor-pull imagePullSecret, so
         workloads deployed there can pull from Harbor's private `platform`
         project — without this, every tenant workload 403s on image pull the
@@ -264,9 +282,12 @@ class TeamsOperator:
         Create-if-missing only: like the RoleBindings, this is never patched
         again once it exists, so a manual credential rotation (new Secret
         content + operator redeploy) can't be silently overwritten by a
-        stale in-memory value from a long-running pod."""
+        stale in-memory value from a long-running pod. Returns False (not
+        just skips) when harbor_dockerconfigjson isn't configured yet — that
+        genuinely means image pulls will fail, worth surfacing as
+        "ImagePullAccess" not-ready rather than hiding it as a silent skip."""
         if not self.harbor_dockerconfigjson:
-            return
+            return False
         body = client.V1Secret(
             metadata=client.V1ObjectMeta(name=self.HARBOR_PULL_SECRET, namespace=namespace),
             type="kubernetes.io/dockerconfigjson",
@@ -275,34 +296,36 @@ class TeamsOperator:
         try:
             self.k8s_core_v1.create_namespaced_secret(namespace, body)
             logger.info(f"✅ Created imagePullSecret '{self.HARBOR_PULL_SECRET}' in '{namespace}'")
+            return True
         except ApiException as e:
             if e.status == 409:
-                pass  # already exists
-            else:
-                logger.error(f"❌ Failed to create imagePullSecret in '{namespace}': {e}")
+                return True  # already exists
+            logger.error(f"❌ Failed to create imagePullSecret in '{namespace}': {e}")
+            return False
         except Exception as e:
             logger.error(f"❌ Unexpected error creating imagePullSecret in '{namespace}': {e}")
+            return False
 
-    def ensure_default_sa_pull_secret(self, namespace: str) -> None:
+    def ensure_default_sa_pull_secret(self, namespace: str) -> bool:
         """Attach harbor-pull to the namespace's default ServiceAccount, so
         every pod using it (the common case — app manifests owned by their
         own repos don't declare imagePullSecrets themselves) picks it up
         with no per-workload change needed."""
         if not self.harbor_dockerconfigjson:
-            return
+            return False
         try:
             sa = self.k8s_core_v1.read_namespaced_service_account("default", namespace)
         except ApiException as e:
             if e.status != 404:
                 logger.error(f"❌ Could not read default ServiceAccount in '{namespace}': {e}")
-            return
+            return False
         except Exception as e:
             logger.error(f"❌ Unexpected error reading default ServiceAccount in '{namespace}': {e}")
-            return
+            return False
 
         existing = sa.image_pull_secrets or []
         if any(ref.name == self.HARBOR_PULL_SECRET for ref in existing):
-            return  # already attached
+            return True  # already attached
 
         try:
             self.k8s_core_v1.patch_namespaced_service_account(
@@ -311,12 +334,15 @@ class TeamsOperator:
                 {"imagePullSecrets": [ref.to_dict() for ref in existing] + [{"name": self.HARBOR_PULL_SECRET}]},
             )
             logger.info(f"✅ Attached imagePullSecret '{self.HARBOR_PULL_SECRET}' to default SA in '{namespace}'")
+            return True
         except ApiException as e:
             logger.error(f"❌ Failed to patch default ServiceAccount in '{namespace}': {e}")
+            return False
         except Exception as e:
             logger.error(f"❌ Unexpected error patching default ServiceAccount in '{namespace}': {e}")
+            return False
 
-    def _apply_namespaced_templates(self, namespace: str, templates_dir: str, create_fn) -> None:
+    def _apply_namespaced_templates(self, namespace: str, templates_dir: str, create_fn) -> bool:
         """Render every *.yaml template in `templates_dir` for `namespace`
         (substituting {{ NAMESPACE }}) and create-if-missing via `create_fn`
         (a bound create_namespaced_* method, from whichever Api client
@@ -328,12 +354,17 @@ class TeamsOperator:
 
         Templates are read fresh from disk on every call (never cached), so
         editing a ConfigMap-mounted template takes effect on this operator's
-        very next reconciliation cycle, no restart required."""
+        very next reconciliation cycle, no restart required. Returns True
+        only if every template applied (or already existed) cleanly — one
+        failure among several templates still reports the whole concern as
+        not-ready, since e.g. a namespace with 2 of 3 quota tiers missing is
+        a real gap, not a detail to bury in a per-file log line."""
         template_paths = sorted(glob.glob(os.path.join(templates_dir, "*.yaml")))
         if not template_paths:
             logger.warning(f"No templates found in {templates_dir}; skipping")
-            return
+            return False
 
+        ok = True
         for path in template_paths:
             with open(path) as f:
                 rendered = f.read().replace("{{ NAMESPACE }}", namespace)
@@ -341,6 +372,7 @@ class TeamsOperator:
                 body = yaml.safe_load(rendered)
             except yaml.YAMLError as e:
                 logger.error(f"❌ Template {path} is not valid YAML after rendering: {e}")
+                ok = False
                 continue
             kind = body.get("kind", "resource")
             name = body.get("metadata", {}).get("name", os.path.basename(path))
@@ -348,41 +380,42 @@ class TeamsOperator:
                 create_fn(namespace, body)
                 logger.info(f"✅ Created {kind} '{name}' in '{namespace}' (from {os.path.basename(path)})")
             except ApiException as e:
-                if e.status == 409:
-                    pass  # already exists
-                else:
+                if e.status != 409:  # 409 = already exists, fine
                     logger.error(f"❌ Failed to create {kind} '{name}' in '{namespace}': {e}")
+                    ok = False
             except Exception as e:
                 logger.error(f"❌ Unexpected error creating {kind} '{name}' in '{namespace}': {e}")
+                ok = False
+        return ok
 
-    def ensure_priority_quotas(self, namespace: str) -> None:
+    def ensure_priority_quotas(self, namespace: str) -> bool:
         """Ensure `namespace` has one PriorityClass-scoped ResourceQuota per
         tenant tier (tenant-critical/-standard/-besteffort), so best-effort
         workloads can never starve a team's must-run ones of quota. The
         manifests themselves live as templates on disk (QUOTA_TEMPLATES_DIR
         — see the class-level comment), not as Python objects."""
-        self._apply_namespaced_templates(
+        return self._apply_namespaced_templates(
             namespace, self.QUOTA_TEMPLATES_DIR, self.k8s_core_v1.create_namespaced_resource_quota
         )
 
-    def ensure_limit_ranges(self, namespace: str) -> None:
+    def ensure_limit_ranges(self, namespace: str) -> bool:
         """Ensure `namespace` has the default tenant LimitRange, so a
         container that doesn't declare its own requests/limits gets a sane
         default instead of running unbounded or with nothing at all. Same
         template-on-disk approach as ensure_priority_quotas — see
         LIMITRANGE_TEMPLATES_DIR."""
-        self._apply_namespaced_templates(
+        return self._apply_namespaced_templates(
             namespace, self.LIMITRANGE_TEMPLATES_DIR, self.k8s_core_v1.create_namespaced_limit_range
         )
 
-    def ensure_network_policies(self, namespace: str) -> None:
+    def ensure_network_policies(self, namespace: str) -> bool:
         """Ensure `namespace` has the default tenant NetworkPolicy (deny all
         ingress, explicitly allow all egress — see
         networkpolicy-templates/default.yaml for why egress needs an
         explicit rule rather than just being left ungoverned). Same
         template-on-disk approach as ensure_priority_quotas — see
         NETWORKPOLICY_TEMPLATES_DIR."""
-        self._apply_namespaced_templates(
+        return self._apply_namespaced_templates(
             namespace, self.NETWORKPOLICY_TEMPLATES_DIR, self.k8s_networking_v1.create_namespaced_network_policy
         )
 
@@ -445,7 +478,7 @@ class TeamsOperator:
             logger.error(f"❌ OpenBao request {method} {path} failed: {e}")
             return None
 
-    def ensure_openbao_access(self, namespace: str) -> None:
+    def ensure_openbao_access(self, namespace: str) -> bool:
         """Ensure `namespace` has everything a tenant pod's openbao-agent
         sidecar needs to authenticate and get scoped KV read/write: an ACL
         policy limited to this namespace's slice of kv-teams, a jwt auth
@@ -454,32 +487,42 @@ class TeamsOperator:
         apps/security/tenant-guardrails's openbao-spiffe-volume-*.yaml).
         Create-if-missing/leave-as-is-on-conflict, same semantics as
         _apply_namespaced_templates — no drift reconciliation of an
-        already-created policy/role/ConfigMap."""
+        already-created policy/role/ConfigMap. Returns True only if all
+        three (policy, role, ConfigMap) are confirmed OK this cycle — a
+        partial success (e.g. policy written but role failed) is exactly
+        the kind of broken-but-not-obvious state that motivated surfacing
+        this as a per-namespace "OpenBaoAccess" condition in the first
+        place, so it's reported as not-ready, not silently swallowed."""
+        ok = True
+
         try:
             with open(os.path.join(self.OPENBAO_POLICY_TEMPLATES_DIR, "team.hcl")) as f:
                 policy_hcl = f.read().replace("{{ NAMESPACE }}", namespace)
         except OSError as e:
             logger.error(f"❌ Could not read OpenBao policy template: {e}")
-            return
+            return False
         resp = self._openbao_request("PUT", f"sys/policies/acl/team-{namespace}-policy", {"policy": policy_hcl})
         if resp is None:
-            return  # already logged; nothing else in this method can succeed without OpenBao access
+            return False  # already logged; nothing else in this method can succeed without OpenBao access
         if resp.ok:
             logger.info(f"✅ Ensured OpenBao policy 'team-{namespace}-policy'")
         else:
             logger.error(f"❌ Failed to write OpenBao policy for '{namespace}': HTTP {resp.status_code} {resp.text}")
+            ok = False
 
         try:
             with open(os.path.join(self.OPENBAO_ROLE_TEMPLATES_DIR, "team.json")) as f:
                 role_body = json.loads(f.read().replace("{{ NAMESPACE }}", namespace))
         except (OSError, json.JSONDecodeError) as e:
             logger.error(f"❌ Could not read/parse OpenBao role template: {e}")
-            return
+            return False
         resp = self._openbao_request("PUT", f"auth/jwt/role/team-{namespace}", role_body)
         if resp is not None and resp.ok:
             logger.info(f"✅ Ensured OpenBao jwt auth role 'team-{namespace}'")
-        elif resp is not None:
-            logger.error(f"❌ Failed to write OpenBao role for '{namespace}': HTTP {resp.status_code} {resp.text}")
+        else:
+            if resp is not None:
+                logger.error(f"❌ Failed to write OpenBao role for '{namespace}': HTTP {resp.status_code} {resp.text}")
+            ok = False
 
         try:
             data = {}
@@ -488,7 +531,7 @@ class TeamsOperator:
                     data[filename] = f.read().replace("{{ NAMESPACE }}", namespace)
         except OSError as e:
             logger.error(f"❌ Could not read OpenBao agent-config templates: {e}")
-            return
+            return False
         configmap = client.V1ConfigMap(
             metadata=client.V1ObjectMeta(name=self.OPENBAO_AGENT_CONFIGMAP),
             data=data,
@@ -499,8 +542,59 @@ class TeamsOperator:
         except ApiException as e:
             if e.status != 409:
                 logger.error(f"❌ Failed to create ConfigMap '{self.OPENBAO_AGENT_CONFIGMAP}' in '{namespace}': {e}")
+                ok = False
         except Exception as e:
             logger.error(f"❌ Unexpected error creating ConfigMap '{self.OPENBAO_AGENT_CONFIGMAP}' in '{namespace}': {e}")
+            ok = False
+
+        return ok
+
+    def update_namespace_status(self, namespace: str, results: Dict[str, bool]) -> None:
+        """Write a Kubernetes-condition-shaped summary of this reconcile
+        cycle's outcome onto the namespace itself, as a JSON-encoded list on
+        the `teams.example.com/provisioning-status` annotation — one entry
+        per concern (RBAC, ImagePullAccess, ResourceQuota, LimitRange,
+        NetworkPolicy, OpenBaoAccess), each `{type, status, reason,
+        lastTransitionTime, lastCheckedTime}`. teams-api reads this directly
+        (it already has its own K8s client — see compliance.py's identical
+        pattern) to expose a per-namespace status badge in the Teams portal.
+
+        `lastTransitionTime` only moves when status actually flips, same
+        convention as Pod/Deployment conditions — `lastCheckedTime` moves
+        every cycle regardless, so "stuck on Unknown because the operator
+        itself has been down" is distinguishable from "stable and healthy"."""
+        now = datetime.now(timezone.utc).isoformat()
+
+        existing_by_type: Dict[str, Dict[str, Any]] = {}
+        try:
+            ns = self.k8s_core_v1.read_namespace(namespace)
+            raw = (ns.metadata.annotations or {}).get(self.STATUS_ANNOTATION)
+            if raw:
+                existing_by_type = {c["type"]: c for c in json.loads(raw)}
+        except (ApiException, Exception) as e:
+            logger.warning(f"⚠️ Could not read existing provisioning-status on '{namespace}' (will overwrite): {e}")
+
+        conditions = []
+        for cond_type, healthy in results.items():
+            status = "True" if healthy else "False"
+            prev = existing_by_type.get(cond_type)
+            last_transition = now if not prev or prev.get("status") != status else prev.get("lastTransitionTime", now)
+            conditions.append({
+                "type": cond_type,
+                "status": status,
+                "reason": "ReconcileSucceeded" if healthy else "ReconcileFailed",
+                "lastTransitionTime": last_transition,
+                "lastCheckedTime": now,
+            })
+
+        try:
+            self.k8s_core_v1.patch_namespace(
+                namespace, {"metadata": {"annotations": {self.STATUS_ANNOTATION: json.dumps(conditions)}}}
+            )
+        except ApiException as e:
+            logger.error(f"❌ Failed to write provisioning-status on '{namespace}': {e}")
+        except Exception as e:
+            logger.error(f"❌ Unexpected error writing provisioning-status on '{namespace}': {e}")
 
     def create_namespace(self, team_id: str, team_name: str, namespace_name: str) -> bool:
         """Create a Kubernetes namespace for the team"""
@@ -613,13 +707,25 @@ class TeamsOperator:
         # (namespace-scoped, cascade-deleted).
         for provisioned in self.team_namespaces.values():
             for namespace_name in provisioned:
-                self.sync_namespace_rbac(namespace_name)
-                self.ensure_harbor_pull_secret(namespace_name)
-                self.ensure_default_sa_pull_secret(namespace_name)
-                self.ensure_priority_quotas(namespace_name)
-                self.ensure_limit_ranges(namespace_name)
-                self.ensure_network_policies(namespace_name)
-                self.ensure_openbao_access(namespace_name)
+                rbac_ok = self.sync_namespace_rbac(namespace_name)
+                pull_secret_ok = self.ensure_harbor_pull_secret(namespace_name)
+                sa_ok = self.ensure_default_sa_pull_secret(namespace_name)
+                quotas_ok = self.ensure_priority_quotas(namespace_name)
+                limits_ok = self.ensure_limit_ranges(namespace_name)
+                netpol_ok = self.ensure_network_policies(namespace_name)
+                openbao_ok = self.ensure_openbao_access(namespace_name)
+                # Surfaced in the Teams portal as a per-namespace status badge
+                # (teams-api reads this annotation directly) — see
+                # update_namespace_status's docstring for why this is a
+                # point-in-time snapshot, not live monitoring.
+                self.update_namespace_status(namespace_name, {
+                    "RBAC": rbac_ok,
+                    "ImagePullAccess": pull_secret_ok and sa_ok,
+                    "ResourceQuota": quotas_ok,
+                    "LimitRange": limits_ok,
+                    "NetworkPolicy": netpol_ok,
+                    "OpenBaoAccess": openbao_ok,
+                })
 
         # RBAC sync, part 2: the one binding that's still user-list-based —
         # cluster-admin for Keycloak `admin`-role holders. A single cluster-

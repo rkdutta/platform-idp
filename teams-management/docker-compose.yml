@@ -49,6 +49,13 @@ services:
       context: ./teams-api
     ports:
       - "8085:8000"
+    environment:
+      # store.py defaults DATA_DIR to /data, matching the real k8s PVC mount
+      # (see teams-api's deployment.yaml) - nothing provisions/owns that path
+      # here, and the container runs as non-root, so it 403s on mkdir.
+      # /tmp is writable by any UID by default; fine for local
+      # verification, where the store doesn't need to survive a restart.
+      DATA_DIR: /tmp/teams-api-data
     # Override the image's curl-based healthcheck (curl isn't in python:slim)
     healthcheck:
       test:

@@ -7,6 +7,8 @@ import {
   ComplianceStatus,
   ComplianceSummary,
   ComplianceDetail,
+  ProvisioningStatus,
+  NamespaceProvisioningStatus,
   Application,
   ApplicationGroup,
 } from "../../models/team.model";
@@ -26,6 +28,15 @@ export class TeamListComponent implements OnInit {
   complianceDetail: { [teamId: string]: ComplianceDetail } = {};
   expanded: { [teamId: string]: boolean } = {};
   loadingDetail: { [teamId: string]: boolean } = {};
+
+  // Namespace provisioning status (RBAC/image-pull/quota/limits/network-policy/
+  // OpenBao access), keyed by team id THEN namespace — a snapshot of
+  // teams-operator's last reconcile attempt for each concern, not a live
+  // health check (see docs/openbao-spiffe-access.md and provisioning_status.py
+  // in teams-api for why: the platform deliberately doesn't watch a namespace
+  // for drift after provisioning it, so it never fights a developer's own
+  // changes inside their own namespace).
+  namespaceStatus: { [teamId: string]: { [namespace: string]: NamespaceProvisioningStatus } } = {};
 
   // Applications running in each team's namespace, keyed by team id, already
   // grouped by app.kubernetes.io/part-of into application cards.
@@ -71,6 +82,7 @@ export class TeamListComponent implements OnInit {
         this.isLoading = false;
         this.loadCompliance();
         this.loadApplications();
+        this.loadNamespaceStatus();
       },
       error: (error) => {
         this.errorMessage = error;
@@ -147,6 +159,19 @@ export class TeamListComponent implements OnInit {
       },
       // Compliance is supplementary; a failure here must not blank the team list.
       error: (error) => console.error("Failed to load compliance:", error),
+    });
+  }
+
+  loadNamespaceStatus() {
+    this.teamsService.getNamespaceStatuses().subscribe({
+      next: (statuses) => {
+        this.namespaceStatus = {};
+        for (const s of statuses) {
+          (this.namespaceStatus[s.team_id] = this.namespaceStatus[s.team_id] || {})[s.namespace] = s;
+        }
+      },
+      // Same as compliance: supplementary, a failure here must not blank the team list.
+      error: (error) => console.error("Failed to load namespace status:", error),
     });
   }
 
@@ -370,6 +395,28 @@ export class TeamListComponent implements OnInit {
       default:
         return "Unknown";
     }
+  }
+
+  nsStatusOf(teamId: string, namespace: string): ProvisioningStatus {
+    return this.namespaceStatus[teamId]?.[namespace]?.status ?? "unknown";
+  }
+
+  nsStatusLabel(teamId: string, namespace: string): string {
+    switch (this.nsStatusOf(teamId, namespace)) {
+      case "ready":
+        return "Ready";
+      case "degraded":
+        return "Degraded";
+      default:
+        return "Unknown";
+    }
+  }
+
+  // Tooltip for the badge — e.g. "2 of 6 checks not ready: OpenBaoAccess,
+  // NetworkPolicy" when degraded, or the generic reason (operator hasn't
+  // reconciled yet, etc.) when unknown.
+  nsStatusReason(teamId: string, namespace: string): string {
+    return this.namespaceStatus[teamId]?.[namespace]?.reason || "Namespace provisioning status";
   }
 
   deleteTeam(teamId: string, teamName: string) {

@@ -8,6 +8,10 @@ WORKDIR /app
 # Browser-facing endpoints (defaults match docker-compose.yml)
 ARG API_URL=http://localhost:8000
 ARG KEYCLOAK_URL=http://localhost:8080
+# No Rollouts dashboard runs in docker-compose; default matches the real
+# environment.ts's value so rollout deep-links are at least well-formed
+# (they just won't resolve to anything reachable locally).
+ARG ROLLOUTS_DASHBOARD_URL=http://rollouts.127.0.0.1.sslip.io:8080
 
 COPY package*.json ./
 # Full install (Angular CLI lives in devDependencies and is needed to build)
@@ -24,6 +28,7 @@ RUN for f in src/environments/environment.ts src/environments/environment.prod.t
         "export const environment = {" \
         "  production: true," \
         "  apiUrl: '${API_URL}'," \
+        "  rolloutsDashboardUrl: '${ROLLOUTS_DASHBOARD_URL}'," \
         "  keycloak: { url: '${KEYCLOAK_URL}', realm: 'teams', clientId: 'teams-ui' }," \
         "};" > "$f"; \
     done \

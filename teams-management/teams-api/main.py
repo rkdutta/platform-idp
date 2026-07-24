@@ -17,6 +17,7 @@ import authz
 from compliance import ComplianceChecker
 from workloads import ApplicationsReader
 from app_compliance import AppComplianceReader
+from provisioning_status import ProvisioningStatusChecker
 from auth import (
     authenticate,
     require_read,
@@ -105,6 +106,7 @@ app.add_middleware(
 
 # Compliance checker (reads Gatekeeper state from the Kubernetes API).
 compliance_checker = ComplianceChecker()
+provisioning_status_checker = ProvisioningStatusChecker()
 
 # Applications reader (lists Rollouts/Deployments in each team's namespace).
 # Promotion/rollout management is handled by the Argo Rollouts dashboard, so the
@@ -359,6 +361,21 @@ class ComplianceSummary(BaseModel):
 
 class ComplianceDetail(ComplianceSummary):
     policies: List[PolicyResult] = []
+
+class NamespaceCondition(BaseModel):
+    type: str                        # RBAC | ImagePullAccess | ResourceQuota | LimitRange | NetworkPolicy | OpenBaoAccess
+    status: str                      # "True" | "False", Kubernetes-condition-style (string, not bool)
+    reason: str
+    lastTransitionTime: str
+    lastCheckedTime: str
+
+class NamespaceProvisioningStatus(BaseModel):
+    team_id: str
+    team_name: str
+    namespace: str
+    status: str                      # ready | degraded | unknown
+    reason: Optional[str] = None
+    conditions: List[NamespaceCondition] = []
 
 class RolloutStatus(BaseModel):
     strategy: str                    # BlueGreen | Canary | Unknown
@@ -698,6 +715,15 @@ def get_all_compliance(request: Request):
 def get_team_compliance(request: Request, team_id: str):
     """Detailed per-policy compliance breakdown for a single team (in scope)."""
     return compliance_checker.evaluate_team(authz.require_visible_team(request, team_id))
+
+@app.get("/namespace-status", response_model=List[NamespaceProvisioningStatus])
+def get_all_namespace_status(request: Request):
+    """Per-namespace provisioning status (badge data) for the caller's
+    visible teams — one entry per namespace, reflecting teams-operator's
+    last reconcile attempt for each concern it manages (RBAC, image pull,
+    quotas, limits, network policy, OpenBao access). A snapshot, not a live
+    probe — see provisioning_status.py."""
+    return provisioning_status_checker.summarize_all(authz.scoped_teams(request))
 
 def _attach_compliance(team_apps: dict) -> dict:
     """Attach per-app compliance (supply-chain + Gatekeeper) to each app, using

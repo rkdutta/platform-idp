@@ -99,6 +99,17 @@
                 <code class="ns-name">{{ ns }}</code>
                 <span class="dash-link">↗</span>
               </a>
+              <!-- What the platform auto-provisioned for this namespace last
+                   reconciled OK (RBAC, image pull, quotas, limits, network
+                   policy, OpenBao access) — a snapshot, not a live probe. If
+                   something's actually broken, the fix is a fresh namespace,
+                   not a repair action here. -->
+              <span
+                class="badge badge-sm"
+                [ngClass]="'badge-' + nsStatusOf(team.id, ns)"
+                [title]="nsStatusReason(team.id, ns)"
+                >{{ nsStatusLabel(team.id, ns) }}</span
+              >
               <!-- The caller's own role here, so it's obvious what they may do. -->
               <span class="ns-role" *ngIf="authService.roleIn(ns) as role">{{ role }}</span>
               <span

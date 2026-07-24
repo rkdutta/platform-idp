@@ -85,6 +85,25 @@ export interface ComplianceDetail extends ComplianceSummary {
   policies: PolicyResult[];
 }
 
+export type ProvisioningStatus = 'ready' | 'degraded' | 'unknown';
+
+export interface NamespaceCondition {
+  type: string;   // RBAC | ImagePullAccess | ResourceQuota | LimitRange | NetworkPolicy | OpenBaoAccess
+  status: string; // "True" | "False"
+  reason: string;
+  lastTransitionTime: string;
+  lastCheckedTime: string;
+}
+
+export interface NamespaceProvisioningStatus {
+  team_id: string;
+  team_name: string;
+  namespace: string;
+  status: ProvisioningStatus;
+  reason?: string | null;
+  conditions: NamespaceCondition[];
+}
+
 export interface RolloutStatus {
   strategy: string; // BlueGreen | Canary | Unknown
   phase: string; // Healthy | Paused | Progressing | Degraded ...

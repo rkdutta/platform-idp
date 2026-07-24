@@ -2,7 +2,7 @@ import { Injectable } from '@angular/core';
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { Observable, throwError } from 'rxjs';
 import { catchError } from 'rxjs/operators';
-import { Team, TeamCreate, ComplianceSummary, ComplianceDetail, TeamApplications, UserRef, NamespaceAccess, NamespaceRole, OwnerRef, Me } from '../models/team.model';
+import { Team, TeamCreate, ComplianceSummary, ComplianceDetail, NamespaceProvisioningStatus, TeamApplications, UserRef, NamespaceAccess, NamespaceRole, OwnerRef, Me } from '../models/team.model';
 import { environment } from '../../environments/environment';
 import { AuthService } from './auth.service';
 
@@ -51,6 +51,12 @@ export class TeamsService {
   getTeamCompliance(teamId: string): Observable<ComplianceDetail> {
     const url = `${this.apiUrl}/teams/${teamId}/compliance`;
     return this.http.get<ComplianceDetail>(url)
+      .pipe(catchError(this.handleError));
+  }
+
+  getNamespaceStatuses(): Observable<NamespaceProvisioningStatus[]> {
+    const url = `${this.apiUrl}/namespace-status`;
+    return this.http.get<NamespaceProvisioningStatus[]>(url)
       .pipe(catchError(this.handleError));
   }
 
