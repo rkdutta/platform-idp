@@ -113,6 +113,12 @@ export interface TeamEvent {
   last_timestamp: string | null;
 }
 
+export interface PriorityTier {
+  name: string;   // tenant-critical | tenant-standard | tenant-besteffort
+  value: number;  // PriorityClass.value - higher preempts lower
+  description: string;
+}
+
 export interface RolloutStatus {
   strategy: string; // BlueGreen | Canary | Unknown
   phase: string; // Healthy | Paused | Progressing | Degraded ...

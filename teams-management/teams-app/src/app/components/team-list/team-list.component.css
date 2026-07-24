@@ -706,6 +706,84 @@
   color: var(--text);
 }
 
+/* Info popover next to the app card's "Tier" label, listing every tenant
+   priority tier that actually exists in the cluster. Same hover-popover
+   mechanics as .ns-status-popover, plus :focus (not just :hover) so it's
+   reachable by keyboard, since this one's triggered by a dedicated (?)
+   icon rather than wrapping the whole badge. */
+.info-wrap {
+  position: relative;
+  display: inline-flex;
+  margin-left: 4px;
+}
+
+.info-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--neutral-soft);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: help;
+}
+
+.info-popover {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 20;
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  min-width: 260px;
+  list-style: none;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-sm);
+  font-size: 12px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  white-space: normal;
+}
+
+.info-wrap:hover .info-popover,
+.info-wrap:focus-within .info-popover {
+  display: block;
+}
+
+.info-popover li {
+  padding: 4px 0;
+}
+
+.info-popover li + li {
+  border-top: 1px solid var(--border);
+}
+
+.info-popover .tier-name {
+  display: block;
+  font-weight: 700;
+  color: var(--text);
+  font-family: "Courier New", monospace;
+}
+
+.info-popover .tier-value {
+  display: block;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.info-popover .tier-desc {
+  display: block;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
 .policy-count {
   flex: 1;
   color: var(--text-muted);

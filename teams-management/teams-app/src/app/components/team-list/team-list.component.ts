@@ -11,6 +11,7 @@ import {
   NamespaceProvisioningStatus,
   NamespaceCondition,
   TeamEvent,
+  PriorityTier,
   Application,
   ApplicationGroup,
 } from "../../models/team.model";
@@ -78,8 +79,18 @@ export class TeamListComponent implements OnInit, OnDestroy {
     public authService: AuthService,
   ) {}
 
+  // Which tenant priority tiers exist, for the info popover next to an
+  // application card's Tier field. Not per-team (every team shares the
+  // same tier catalog) - loaded once, not reloaded on every loadTeams().
+  priorityTiers: PriorityTier[] = [];
+
   ngOnInit() {
     this.loadTeams();
+    this.teamsService.getPriorityClasses().subscribe({
+      next: (tiers) => (this.priorityTiers = tiers),
+      // Supplementary info popover; a failure here must not blank the team list.
+      error: (error) => console.error("Failed to load priority tiers:", error),
+    });
   }
 
   loadTeams() {

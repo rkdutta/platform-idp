@@ -257,7 +257,25 @@
                              every tenant workload gets one via a Gatekeeper
                              mutation, so this is never missing in practice. -->
                         <div class="meta-row">
-                          <dt>Tier</dt>
+                          <dt>
+                            Tier
+                            <!-- Which tiers exist to choose from - separate
+                                 question from "which one is this app on"
+                                 above. Live from the cluster (see
+                                 priority-classes.ts's PriorityTier), not a
+                                 hardcoded list, so a renamed/added/removed
+                                 tier shows up here with no frontend change. -->
+                            <span class="info-wrap" *ngIf="priorityTiers.length > 0">
+                              <span class="info-icon" tabindex="0" aria-label="Available tiers">?</span>
+                              <ul class="info-popover">
+                                <li *ngFor="let t of priorityTiers">
+                                  <span class="tier-name">{{ t.name }}</span>
+                                  <span class="tier-value">priority {{ t.value }}</span>
+                                  <span class="tier-desc">{{ t.description }}</span>
+                                </li>
+                              </ul>
+                            </span>
+                          </dt>
                           <dd>{{ app.priority_class || "Unassigned" }}</dd>
                         </div>
                       </dl>

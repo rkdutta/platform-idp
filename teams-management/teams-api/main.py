@@ -19,6 +19,7 @@ from workloads import ApplicationsReader
 from app_compliance import AppComplianceReader
 from provisioning_status import ProvisioningStatusChecker
 from events_reader import TeamEventsReader
+from priority_classes import PriorityClassCatalog
 from auth import (
     authenticate,
     require_read,
@@ -109,6 +110,7 @@ app.add_middleware(
 compliance_checker = ComplianceChecker()
 provisioning_status_checker = ProvisioningStatusChecker()
 team_events_reader = TeamEventsReader()
+priority_class_catalog = PriorityClassCatalog()
 
 # Applications reader (lists Rollouts/Deployments in each team's namespace).
 # Promotion/rollout management is handled by the Argo Rollouts dashboard, so the
@@ -386,6 +388,11 @@ class TeamEvent(BaseModel):
     message: str
     count: int
     last_timestamp: Optional[str] = None
+
+class PriorityTier(BaseModel):
+    name: str                        # tenant-critical | tenant-standard | tenant-besteffort
+    value: int                       # PriorityClass.value - higher preempts lower
+    description: str
 
 class RolloutStatus(BaseModel):
     strategy: str                    # BlueGreen | Canary | Unknown
@@ -744,6 +751,14 @@ def get_team_events(request: Request, team_id: str):
     polled — see events_reader.py for why this is team-scoped and
     source-filtered."""
     return team_events_reader.events_for_team(authz.require_visible_team(request, team_id))
+
+@app.get("/priority-classes", response_model=List[PriorityTier])
+def get_priority_classes():
+    """The tenant workload priority tiers that actually exist in the
+    cluster right now (see priority_classes.py) - powers the "which tiers
+    are available" info popover next to an application card's Tier field.
+    Not team-scoped: every team shares the same tier catalog."""
+    return priority_class_catalog.list_tenant_tiers()
 
 def _attach_compliance(team_apps: dict) -> dict:
     """Attach per-app compliance (supply-chain + Gatekeeper) to each app, using
