@@ -135,6 +135,27 @@
   background-color: var(--solid-neutral-hover);
 }
 
+/* --- Kubeconfig download --- */
+.kubeconfig-download {
+  position: relative;
+}
+
+.kubeconfig-error {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  width: 220px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 /* --- Developer CLI dropdown --- */
 .cli-menu {
   position: relative;

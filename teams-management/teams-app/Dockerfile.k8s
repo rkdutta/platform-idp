@@ -15,6 +15,8 @@ ARG API_URL=/api
 ARG KEYCLOAK_URL=https://platform-auth.127.0.0.1.sslip.io:8443/auth
 # Base URL of the Argo Rollouts dashboard (app cards deep-link to it).
 ARG ROLLOUTS_URL=http://rollouts.127.0.0.1.sslip.io:8080
+# Base URL of the Argo CD UI, linked from the header.
+ARG ARGOCD_URL=http://argocd.127.0.0.1.sslip.io:8080
 
 COPY package*.json ./
 # Full install — Angular CLI lives in devDependencies and is needed to build.
@@ -31,6 +33,7 @@ RUN for f in src/environments/environment.ts src/environments/environment.prod.t
         "  production: true," \
         "  apiUrl: '${API_URL}'," \
         "  rolloutsDashboardUrl: '${ROLLOUTS_URL}'," \
+        "  argocdUrl: '${ARGOCD_URL}'," \
         "  keycloak: { url: '${KEYCLOAK_URL}', realm: 'teams', clientId: 'teams-ui' }," \
         "};" > "$f"; \
     done \

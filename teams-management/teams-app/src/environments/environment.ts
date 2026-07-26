@@ -5,6 +5,10 @@ export const environment = {
   // Base URL of the Argo Rollouts dashboard; app cards deep-link to
   // <rolloutsDashboardUrl>/rollouts/<namespace>/<name>.
   rolloutsDashboardUrl: "http://rollouts.127.0.0.1.sslip.io:8080",
+  // Base URL of the Argo CD UI - linked from the header so a project-manager
+  // or maintainer can create/manage Applications directly (Argo CD's own
+  // RBAC, synced from here, decides what they can actually do there).
+  argocdUrl: "http://argocd.127.0.0.1.sslip.io:8080",
   keycloak: {
     // same as above, but with keycloak forward port
     url: "http://platform-auth.127.0.0.1.sslip.io",

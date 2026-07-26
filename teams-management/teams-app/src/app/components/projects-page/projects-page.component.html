@@ -1,22 +1,4 @@
 <main class="main-content" [class.read-only]="!authService.isAdmin() && !authService.isProjectManager()">
-  <!-- Any logged-in user can fetch a kubeconfig — it carries no per-user
-       secret, just cluster info + an exec plugin (kubectl oidc-login) that
-       does its own PKCE login against Keycloak at kubectl invocation time. -->
-  <div class="kubeconfig-section">
-    <button
-      class="btn btn-secondary btn-sm"
-      (click)="downloadKubeconfig()"
-      [disabled]="downloadingKubeconfig"
-    >
-      {{ downloadingKubeconfig ? "Downloading…" : "⬇ Download kubeconfig" }}
-    </button>
-    <span class="kubeconfig-note">
-      Requires the <code>kubectl oidc-login</code> plugin
-      (<code>brew install int128/kubelogin/kubelogin</code>) installed locally.
-    </span>
-    <p class="error-message" *ngIf="kubeconfigError">{{ kubeconfigError }}</p>
-  </div>
-
   <!-- Creating a project is admin-only, or self-service for a user holding the
        project-manager realm role. Owners and plain users don't see it. -->
   <div class="form-section" *ngIf="authService.isAdmin() || authService.isProjectManager()">

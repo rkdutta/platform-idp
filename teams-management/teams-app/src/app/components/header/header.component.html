@@ -12,6 +12,12 @@
         <a routerLink="/users" routerLinkActive="active" *ngIf="authService.canManage()">
           Users
         </a>
+        <!-- Argo CD's own RBAC (synced from ownership/grants here) decides
+             what each user actually sees/can do there - open to everyone
+             logged in, same as this app doesn't gate the link itself. -->
+        <a [href]="argocdUrl" target="_blank" rel="noopener" title="Create or manage applications in Argo CD">
+          New App ↗
+        </a>
       </nav>
     </div>
 
@@ -27,6 +33,23 @@
       </button>
 
       <ng-container *ngIf="isLoggedIn">
+        <!-- Kubeconfig download - carries no per-user secret, just cluster
+             info + an exec plugin that does its own PKCE login at kubectl
+             invocation time, so it's open to anyone logged in. -->
+        <div class="kubeconfig-download">
+          <button
+            type="button"
+            class="cli-trigger"
+            (click)="downloadKubeconfig()"
+            [disabled]="downloadingKubeconfig"
+            title="Requires the kubectl oidc-login plugin (brew install int128/kubelogin/kubelogin)"
+          >
+            <span class="cli-trigger-icon">⬇</span>
+            <span class="cli-trigger-label">{{ downloadingKubeconfig ? "Downloading…" : "Kubeconfig" }}</span>
+          </button>
+          <span class="kubeconfig-error" *ngIf="kubeconfigError">{{ kubeconfigError }}</span>
+        </div>
+
         <!-- Developer CLI download (built + signed by the platform-idp release
              workflow; links resolve to the latest GitHub Release assets). -->
         <div class="cli-menu">
