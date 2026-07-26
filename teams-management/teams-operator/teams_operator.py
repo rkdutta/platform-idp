@@ -100,7 +100,7 @@ class TeamsOperator:
         # ensure_network_policies.
         self.NETWORKPOLICY_TEMPLATES_DIR = os.getenv("NETWORKPOLICY_TEMPLATES_DIR", "/app/networkpolicy-templates")
 
-        # SPIFFE-authenticated OpenBao access: every team-* pod gets a JWT-SVID
+        # SPIFFE-authenticated OpenBao access: every project-* pod gets a JWT-SVID
         # + an openbao-agent sidecar (see apps/security/tenant-guardrails's
         # openbao-spiffe-volume-*.yaml / openbao-sidecar-*.yaml mutations) that
         # logs into a per-namespace JWT auth role scoped to that namespace's
@@ -410,8 +410,8 @@ class TeamsOperator:
             f"p, role:{p}-maintainer, applicationsets, *, {p}/*, allow\n"
             f"p, role:{p}-maintainer, logs, get, {p}/*, allow\n"
             f"p, role:{p}-maintainer, projects, get, {p}, allow\n"
-            f"g, argocd-{p}-viewer, role:{p}-viewer\n"
-            f"g, argocd-{p}-maintainer, role:{p}-maintainer\n"
+            f"g, project-{p}-viewer, role:{p}-viewer\n"
+            f"g, project-{p}-maintainer, role:{p}-maintainer\n"
             f"# END project {p}\n"
         )
 
@@ -861,11 +861,11 @@ class TeamsOperator:
         except OSError as e:
             logger.error(f"❌ Could not read OpenBao policy template: {e}")
             return False
-        resp = self._openbao_request("PUT", f"sys/policies/acl/team-{namespace}-policy", {"policy": policy_hcl})
+        resp = self._openbao_request("PUT", f"sys/policies/acl/{namespace}-policy", {"policy": policy_hcl})
         if resp is None:
             return False  # already logged; nothing else in this method can succeed without OpenBao access
         if resp.ok:
-            logger.info(f"✅ Ensured OpenBao policy 'team-{namespace}-policy'")
+            logger.info(f"✅ Ensured OpenBao policy '{namespace}-policy'")
         else:
             logger.error(f"❌ Failed to write OpenBao policy for '{namespace}': HTTP {resp.status_code} {resp.text}")
             ok = False
@@ -876,9 +876,9 @@ class TeamsOperator:
         except (OSError, json.JSONDecodeError) as e:
             logger.error(f"❌ Could not read/parse OpenBao role template: {e}")
             return False
-        resp = self._openbao_request("PUT", f"auth/jwt/role/team-{namespace}", role_body)
+        resp = self._openbao_request("PUT", f"auth/jwt/role/{namespace}", role_body)
         if resp is not None and resp.ok:
-            logger.info(f"✅ Ensured OpenBao jwt auth role 'team-{namespace}'")
+            logger.info(f"✅ Ensured OpenBao jwt auth role '{namespace}'")
         else:
             if resp is not None:
                 logger.error(f"❌ Failed to write OpenBao role for '{namespace}': HTTP {resp.status_code} {resp.text}")

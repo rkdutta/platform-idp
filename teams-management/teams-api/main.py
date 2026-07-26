@@ -72,20 +72,20 @@ def _sanitize(value: str) -> str:
 
 
 def default_namespace(project_name: str) -> str:
-    """The namespace a project gets by default: team-<sanitized-name>-default.
+    """The namespace a project gets by default: project-<sanitized-name>-default.
 
-    Re-truncates after _sanitize (which budgets for a bare "team-" prefix) so
+    Re-truncates after _sanitize (which budgets for a bare "project-" prefix) so
     the added "-default" suffix still fits Kubernetes' 63-char namespace limit.
     """
     suffix = "-default"
-    max_name_len = 63 - len("team-") - len(suffix)
+    max_name_len = 63 - len("project-") - len(suffix)
     name = _sanitize(project_name)[:max_name_len].strip("-")
-    return f"team-{name}{suffix}"
+    return f"project-{name}{suffix}"
 
 
 def ordered_namespace(project_name: str, label: str) -> str:
-    """A self-service ordered namespace: team-<name>-<label>."""
-    return f"team-{_sanitize(project_name)}-{_sanitize(label)}"
+    """A self-service ordered namespace: project-<name>-<label>."""
+    return f"project-{_sanitize(project_name)}-{_sanitize(label)}"
 
 
 def argocd_project_name(project_name: str) -> str:
@@ -649,7 +649,7 @@ async def delete_project(request: Request, project_id: str):
     if keycloak.enabled:
         for suffix in ("viewer", "maintainer"):
             try:
-                keycloak.delete_group(f"argocd-{slug}-{suffix}")
+                keycloak.delete_group(f"project-{slug}-{suffix}")
             except KeycloakAdminError as e:
                 logger.error("Could not delete Argo CD %s group for project %s: %s", suffix, project["name"], e)
     return {"message": f"Project '{project['name']}' deleted successfully"}
@@ -1044,10 +1044,14 @@ def internal_ensure_project_groups(project_id: str):
     done directly by the operator) so the Keycloak Admin API credential stays
     confined to teams-api, the one place that already safely holds it.
 
-    Named `argocd-<project>-viewer`/`-maintainer`, distinct from the
-    per-namespace `{namespace}-viewer`/`-maintainer` k8s RBAC groups
-    teams-operator manages elsewhere (sync_namespace_rbac) — these are a
-    different axis (Argo CD project access, not in-cluster namespace RBAC).
+    Named `project-<project>-viewer`/`-maintainer` (e.g. `project-demo-go-
+    viewer`) — distinct from the per-namespace `{namespace}-viewer`/
+    `-maintainer` k8s RBAC groups teams-operator manages elsewhere
+    (sync_namespace_rbac): those are namespace-shaped (they always carry a
+    trailing `-default`/`-<label>` segment), these are project-shaped (bare
+    slug, no such suffix), so the two naming schemes never collide even
+    though both now share the `project-` prefix. Different axis regardless
+    (Argo CD project access vs. in-cluster namespace RBAC).
     """
     project = store.get_project(project_id)
     if not project:
@@ -1055,8 +1059,8 @@ def internal_ensure_project_groups(project_id: str):
     if not keycloak.enabled:
         raise HTTPException(status_code=503, detail="Keycloak unavailable")
     slug = argocd_project_name(project["name"])
-    viewer_group = f"argocd-{slug}-viewer"
-    maintainer_group = f"argocd-{slug}-maintainer"
+    viewer_group = f"project-{slug}-viewer"
+    maintainer_group = f"project-{slug}-maintainer"
     try:
         keycloak.ensure_group(viewer_group)
         keycloak.ensure_group(maintainer_group)
