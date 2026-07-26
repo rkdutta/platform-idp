@@ -1,12 +1,12 @@
-<!-- src/app/components/team-list/team-list.component.html -->
-<div class="team-list">
+<!-- src/app/components/project-list/project-list.component.html -->
+<div class="project-list">
   <div class="loading" *ngIf="isLoading">
-    Loading teams...
+    Loading projects...
   </div>
 
   <div class="error-message" *ngIf="errorMessage && !isLoading">
     {{ errorMessage }}
-    <button class="btn btn-secondary" (click)="loadTeams()">Retry</button>
+    <button class="btn btn-secondary" (click)="loadProjects()">Retry</button>
   </div>
 
   <div class="error-message access-error" *ngIf="actionError">
@@ -14,70 +14,70 @@
     <button class="btn btn-secondary btn-sm" (click)="actionError = ''">Dismiss</button>
   </div>
 
-  <div class="empty-state" *ngIf="!isLoading && !errorMessage && teams.length === 0">
-    <p>No teams created yet. Create your first team above!</p>
+  <div class="empty-state" *ngIf="!isLoading && !errorMessage && projects.length === 0">
+    <p>No projects created yet. Create your first project above!</p>
   </div>
 
-  <div class="teams-grid" *ngIf="!isLoading && !errorMessage && teams.length > 0">
-    <div class="team-card" [class.collapsed]="isCollapsed(team.id)" *ngFor="let team of teams">
-      <div class="team-header">
+  <div class="projects-grid" *ngIf="!isLoading && !errorMessage && projects.length > 0">
+    <div class="project-card" [class.collapsed]="isCollapsed(project.id)" *ngFor="let project of projects">
+      <div class="project-header">
         <button
           class="collapse-toggle"
-          (click)="toggleCollapse(team.id)"
-          [attr.aria-expanded]="!isCollapsed(team.id)"
-          [title]="isCollapsed(team.id) ? 'Expand ' + team.name : 'Collapse ' + team.name"
+          (click)="toggleCollapse(project.id)"
+          [attr.aria-expanded]="!isCollapsed(project.id)"
+          [title]="isCollapsed(project.id) ? 'Expand ' + project.name : 'Collapse ' + project.name"
         >
-          <span class="collapse-chevron">{{ isCollapsed(team.id) ? "▸" : "▾" }}</span>
+          <span class="collapse-chevron">{{ isCollapsed(project.id) ? "▸" : "▾" }}</span>
         </button>
-        <h3 class="team-name">
+        <h3 class="project-name">
           <a
-            *ngIf="teamDashboardUrl(team.id) as url; else plainName"
-            class="team-name-link"
+            *ngIf="projectDashboardUrl(project.id) as url; else plainName"
+            class="project-name-link"
             [href]="url"
             target="_blank"
             rel="noopener noreferrer"
-            [title]="'View ' + team.name + ' rollouts in the Argo Rollouts dashboard'"
-            >{{ team.name }} <span class="dash-link">↗</span></a
+            [title]="'View ' + project.name + ' rollouts in the Argo Rollouts dashboard'"
+            >{{ project.name }} <span class="dash-link">↗</span></a
           >
-          <ng-template #plainName>{{ team.name }}</ng-template>
+          <ng-template #plainName>{{ project.name }}</ng-template>
         </h3>
-        <!-- Collapsed cards still surface the team's compliance at a glance. -->
+        <!-- Collapsed cards still surface the project's compliance at a glance. -->
         <span
-          class="badge team-header-badge"
-          *ngIf="isCollapsed(team.id)"
-          [ngClass]="'badge-' + statusOf(team.id)"
-          [title]="complianceReason(team.id)"
+          class="badge project-header-badge"
+          *ngIf="isCollapsed(project.id)"
+          [ngClass]="'badge-' + statusOf(project.id)"
+          [title]="complianceReason(project.id)"
         >
-          {{ statusLabel(team.id) }}
+          {{ statusLabel(project.id) }}
         </span>
-        <span class="team-header-spacer"></span>
+        <span class="project-header-spacer"></span>
         <button
           *ngIf="authService.isAdmin()"
           class="btn btn-danger btn-sm btn-icon"
-          (click)="deleteTeam(team.id, team.name)"
-          title="Delete team"
-          aria-label="Delete team"
+          (click)="deleteProject(project.id, project.name)"
+          title="Delete project"
+          aria-label="Delete project"
         >
           ✕
         </button>
       </div>
 
       <!-- Collapsible body: hidden when the card is collapsed. -->
-      <div class="team-body" *ngIf="!isCollapsed(team.id)">
-      <div class="team-details">
-        <p class="team-id">ID: {{ team.id }}</p>
-        <p class="team-created">Created: {{ formatDate(team.created_at) }}</p>
+      <div class="project-body" *ngIf="!isCollapsed(project.id)">
+      <div class="project-details">
+        <p class="project-id">ID: {{ project.id }}</p>
+        <p class="project-created">Created: {{ formatDate(project.created_at) }}</p>
       </div>
 
-      <!-- Owners run the team: they order/delete its namespaces and decide who
+      <!-- Owners run the project: they order/delete its namespaces and decide who
            may access them. Read-only here — managed from the Users page. -->
       <div class="owners">
         <p class="owners-label">Owners</p>
         <div class="owner-list">
-          <span class="owner-chip" *ngFor="let o of team.owners">
+          <span class="owner-chip" *ngFor="let o of project.owners">
             {{ o.username || o.user_id }}
           </span>
-          <span class="owner-empty" *ngIf="!team.owners?.length">
+          <span class="owner-empty" *ngIf="!project.owners?.length">
             No owners yet — assign one from the <a routerLink="/users">Users</a> page.
           </span>
         </div>
@@ -87,7 +87,7 @@
       <div class="namespaces">
         <p class="namespaces-label">Namespaces</p>
         <div class="ns-list">
-          <div class="ns-item" *ngFor="let ns of team.namespaces">
+          <div class="ns-item" *ngFor="let ns of project.namespaces">
             <div class="ns-head">
               <a
                 *ngIf="nsDashboardUrl(ns) as url"
@@ -112,19 +112,19 @@
                    color carries the status, the popover carries the detail. -->
               <span
                 class="ns-status-wrap"
-                [title]="nsConditions(team.id, ns).length === 0 ? nsStatusReason(team.id, ns) : null"
+                [title]="nsConditions(project.id, ns).length === 0 ? nsStatusReason(project.id, ns) : null"
               >
                 <span
                   class="ns-tick"
-                  [ngClass]="'ns-tick-' + nsStatusOf(team.id, ns)"
-                  [attr.aria-label]="nsStatusLabel(team.id, ns)"
-                  >{{ nsStatusIcon(team.id, ns) }}</span
+                  [ngClass]="'ns-tick-' + nsStatusOf(project.id, ns)"
+                  [attr.aria-label]="nsStatusLabel(project.id, ns)"
+                  >{{ nsStatusIcon(project.id, ns) }}</span
                 >
                 <ul
                   class="ns-status-popover"
-                  *ngIf="nsConditions(team.id, ns).length > 0"
+                  *ngIf="nsConditions(project.id, ns).length > 0"
                 >
-                  <li *ngFor="let c of nsConditions(team.id, ns)" [class.cond-fail]="c.status !== 'True'">
+                  <li *ngFor="let c of nsConditions(project.id, ns)" [class.cond-fail]="c.status !== 'True'">
                     <span class="cond-icon">{{ c.status === "True" ? "✓" : "✗" }}</span>
                     <span class="cond-label">{{ conditionLabel(c.type) }}</span>
                   </li>
@@ -133,9 +133,9 @@
               <!-- The caller's own role here, so it's obvious what they may do. -->
               <span class="ns-role" *ngIf="authService.roleIn(ns) as role">{{ role }}</span>
               <button
-                *ngIf="canManageTeam(team)"
+                *ngIf="canManageProject(project)"
                 class="btn btn-danger btn-sm btn-icon ns-delete"
-                (click)="deleteNamespace(team, ns)"
+                (click)="deleteNamespace(project, ns)"
                 [title]="'Delete namespace ' + ns"
                 [attr.aria-label]="'Delete namespace ' + ns"
               >
@@ -147,25 +147,25 @@
             <div class="ns-apps">
               <div
                 class="app-groups"
-                *ngIf="appGroupsFor(team.id, ns).length > 0; else nsNoApps"
+                *ngIf="appGroupsFor(project.id, ns).length > 0; else nsNoApps"
               >
                 <div
                   class="app-group"
-                  [class.collapsed]="isAppGroupCollapsed(team.id, ns, group)"
-                  *ngFor="let group of appGroupsFor(team.id, ns)"
+                  [class.collapsed]="isAppGroupCollapsed(project.id, ns, group)"
+                  *ngFor="let group of appGroupsFor(project.id, ns)"
                 >
                   <button
                     class="app-group-header"
-                    (click)="toggleAppGroup(team.id, ns, group)"
-                    [attr.aria-expanded]="!isAppGroupCollapsed(team.id, ns, group)"
+                    (click)="toggleAppGroup(project.id, ns, group)"
+                    [attr.aria-expanded]="!isAppGroupCollapsed(project.id, ns, group)"
                     [title]="
-                      (isAppGroupCollapsed(team.id, ns, group)
+                      (isAppGroupCollapsed(project.id, ns, group)
                         ? 'Expand '
                         : 'Collapse ') + group.name
                     "
                   >
                     <span class="collapse-chevron">{{
-                      isAppGroupCollapsed(team.id, ns, group) ? "▸" : "▾"
+                      isAppGroupCollapsed(project.id, ns, group) ? "▸" : "▾"
                     }}</span>
                     <span class="app-group-name">{{ group.name }}</span>
                     <span class="app-group-count"
@@ -189,7 +189,7 @@
 
                   <div
                     class="component-list"
-                    *ngIf="!isAppGroupCollapsed(team.id, ns, group)"
+                    *ngIf="!isAppGroupCollapsed(project.id, ns, group)"
                   >
                     <div class="component-card" *ngFor="let app of group.apps">
                       <div class="component-head">
@@ -284,8 +284,8 @@
                       <div class="app-compliance" *ngIf="app.compliance">
                         <button
                           class="app-compliance-toggle"
-                          (click)="toggleAppCompliance(team.id, app)"
-                          [attr.aria-expanded]="isAppComplianceExpanded(team.id, app)"
+                          (click)="toggleAppCompliance(project.id, app)"
+                          [attr.aria-expanded]="isAppComplianceExpanded(project.id, app)"
                           [disabled]="!app.compliance.policies.length"
                         >
                           <span
@@ -317,7 +317,7 @@
                             class="chevron"
                             *ngIf="app.compliance.policies.length"
                             >{{
-                              isAppComplianceExpanded(team.id, app) ? "▲" : "▼"
+                              isAppComplianceExpanded(project.id, app) ? "▲" : "▼"
                             }}</span
                           >
                         </button>
@@ -325,7 +325,7 @@
                         <ul
                           class="policy-list"
                           *ngIf="
-                            isAppComplianceExpanded(team.id, app) &&
+                            isAppComplianceExpanded(project.id, app) &&
                             app.compliance.policies.length
                           "
                         >
@@ -397,19 +397,19 @@
           </div>
         </div>
 
-        <!-- Order a new namespace (team owner / admin) -->
-        <div class="order-ns" *ngIf="canManageTeam(team)">
+        <!-- Order a new namespace (project owner / admin) -->
+        <div class="order-ns" *ngIf="canManageProject(project)">
           <input
             type="text"
             class="order-input"
-            [(ngModel)]="orderLabel[team.id]"
+            [(ngModel)]="orderLabel[project.id]"
             placeholder="new namespace label (e.g. staging)"
-            (keyup.enter)="orderNamespace(team)"
+            (keyup.enter)="orderNamespace(project)"
           />
           <button
             class="btn btn-sm"
-            (click)="orderNamespace(team)"
-            [disabled]="!orderLabel[team.id]"
+            (click)="orderNamespace(project)"
+            [disabled]="!orderLabel[project.id]"
           >
             + Order namespace
           </button>
@@ -421,15 +421,15 @@
         <p class="compliance-label">Namespace policy compliance</p>
         <button
           class="compliance-toggle"
-          (click)="toggleDetail(team.id)"
-          [attr.aria-expanded]="expanded[team.id]"
+          (click)="toggleDetail(project.id)"
+          [attr.aria-expanded]="expanded[project.id]"
         >
-          <span class="badge" [ngClass]="'badge-' + statusOf(team.id)">
-            {{ statusLabel(team.id) }}
+          <span class="badge" [ngClass]="'badge-' + statusOf(project.id)">
+            {{ statusLabel(project.id) }}
           </span>
           <span
             class="policy-count"
-            *ngIf="compliance[team.id] as c"
+            *ngIf="compliance[project.id] as c"
             [title]="c.reason || ''"
           >
             <ng-container *ngIf="c.status === 'non_compliant'">
@@ -442,21 +442,21 @@
               {{ c.reason || "Status unavailable" }}
             </ng-container>
           </span>
-          <span class="chevron">{{ expanded[team.id] ? "▲" : "▼" }}</span>
+          <span class="chevron">{{ expanded[project.id] ? "▲" : "▼" }}</span>
         </button>
 
         <p class="compliance-note">
-          Reflects platform (Gatekeeper) policies enforced on the team's
-          <code>{{ teamNamespace[team.id] || "namespace" }}</code> namespace — not
+          Reflects platform (Gatekeeper) policies enforced on the project's
+          <code>{{ projectNamespace[project.id] || "namespace" }}</code> namespace — not
           application-level checks such as CVEs or image signing.
         </p>
 
-        <div class="compliance-detail" *ngIf="expanded[team.id]">
-          <div class="detail-loading" *ngIf="loadingDetail[team.id]">
+        <div class="compliance-detail" *ngIf="expanded[project.id]">
+          <div class="detail-loading" *ngIf="loadingDetail[project.id]">
             Checking policies…
           </div>
 
-          <ng-container *ngIf="complianceDetail[team.id] as detail">
+          <ng-container *ngIf="complianceDetail[project.id] as detail">
             <p class="detail-empty" *ngIf="detail.policies.length === 0">
               {{
                 detail.reason ||
@@ -489,9 +489,67 @@
         </div>
       </div>
 
-      <!-- Team activity feed: teams-operator's own Events (namespace
+      <!-- Source repos: Argo CD AppProject.spec.sourceRepos entries teams-operator
+           reconciles onto the cluster. Any caller in scope of the project may
+           view them; only the owner/admin may add or remove one (same gate as
+           namespace ordering). Collapsed by default, lazy-loaded on first expand. -->
+      <div class="events-section">
+        <button
+          class="compliance-toggle"
+          (click)="toggleSourceRepos(project.id)"
+          [attr.aria-expanded]="sourceReposExpanded[project.id]"
+        >
+          <span class="compliance-label">Source repos</span>
+          <span class="chevron">{{ sourceReposExpanded[project.id] ? "▲" : "▼" }}</span>
+        </button>
+
+        <div class="events-detail" *ngIf="sourceReposExpanded[project.id]">
+          <div class="detail-loading" *ngIf="loadingSourceRepos[project.id] && !sourceRepos[project.id]">
+            Loading source repos…
+          </div>
+
+          <ng-container *ngIf="sourceRepos[project.id] as repos">
+            <p class="detail-empty" *ngIf="repos.length === 0">
+              No source repos configured yet.
+            </p>
+            <ul class="repo-list" *ngIf="repos.length > 0">
+              <li class="repo-item" *ngFor="let repo of repos">
+                <code class="repo-url">{{ repo }}</code>
+                <button
+                  *ngIf="canManageProject(project)"
+                  class="btn btn-danger btn-sm btn-icon"
+                  (click)="removeSourceRepo(project, repo)"
+                  [title]="'Remove ' + repo"
+                  [attr.aria-label]="'Remove ' + repo"
+                >
+                  ✕
+                </button>
+              </li>
+            </ul>
+          </ng-container>
+
+          <div class="order-ns" *ngIf="canManageProject(project)">
+            <input
+              type="text"
+              class="order-input"
+              [(ngModel)]="newRepoUrl[project.id]"
+              placeholder="https://github.com/org/repo.git"
+              (keyup.enter)="addSourceRepo(project)"
+            />
+            <button
+              class="btn btn-sm"
+              (click)="addSourceRepo(project)"
+              [disabled]="!newRepoUrl[project.id]"
+            >
+              + Add repo
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Project activity feed: teams-operator's own Events (namespace
            provisioning + per-concern condition transitions), aggregated
-           across every namespace of this TEAM — not per-namespace, and not
+           across every namespace of this PROJECT — not per-namespace, and not
            a live probe (see docs/openbao-spiffe-access.md's reasoning on
            why this platform doesn't watch namespaces after provisioning
            them). Collapsed by default; lazy-loaded and auto-refreshed only
@@ -499,19 +557,19 @@
       <div class="events-section">
         <button
           class="compliance-toggle"
-          (click)="toggleEvents(team.id)"
-          [attr.aria-expanded]="eventsExpanded[team.id]"
+          (click)="toggleEvents(project.id)"
+          [attr.aria-expanded]="eventsExpanded[project.id]"
         >
           <span class="compliance-label">Recent activity</span>
-          <span class="chevron">{{ eventsExpanded[team.id] ? "▲" : "▼" }}</span>
+          <span class="chevron">{{ eventsExpanded[project.id] ? "▲" : "▼" }}</span>
         </button>
 
-        <div class="events-detail" *ngIf="eventsExpanded[team.id]">
-          <div class="detail-loading" *ngIf="loadingEvents[team.id] && !teamEvents[team.id]">
+        <div class="events-detail" *ngIf="eventsExpanded[project.id]">
+          <div class="detail-loading" *ngIf="loadingEvents[project.id] && !projectEvents[project.id]">
             Loading activity…
           </div>
 
-          <ng-container *ngIf="teamEvents[team.id] as events">
+          <ng-container *ngIf="projectEvents[project.id] as events">
             <p class="detail-empty" *ngIf="events.length === 0">
               No recent activity — nothing provisioned or changed yet.
             </p>
@@ -534,11 +592,11 @@
         </div>
       </div>
       </div>
-      <!-- /team-body -->
+      <!-- /project-body -->
     </div>
   </div>
 
-  <div class="teams-count" *ngIf="!isLoading && teams.length > 0">
-    Total teams: {{ teams.length }}
+  <div class="projects-count" *ngIf="!isLoading && projects.length > 0">
+    Total projects: {{ projects.length }}
   </div>
 </div>

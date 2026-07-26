@@ -54,19 +54,19 @@ class ProvisioningStatusChecker:
         except Exception as e:  # noqa: BLE001 - degrade gracefully, never crash the API
             logger.error(f"Kubernetes client unavailable, provisioning status will report 'unknown': {e}")
 
-    def summarize_all(self, teams: List[dict]) -> List[dict]:
-        """One status entry per (team, namespace) pair, across every given
-        team — mirrors compliance.py's summarize_all/applications_for_all
+    def summarize_all(self, projects: List[dict]) -> List[dict]:
+        """One status entry per (project, namespace) pair, across every given
+        project — mirrors compliance.py's summarize_all/applications_for_all
         bulk-fetch shape, so the portal can load every namespace's badge in
         one call instead of one round trip per namespace."""
         entries = []
-        for team in teams:
-            for namespace in team.get("namespaces") or []:
-                entries.append(self._namespace_status(team["id"], team["name"], namespace))
+        for project in projects:
+            for namespace in project.get("namespaces") or []:
+                entries.append(self._namespace_status(project["id"], project["name"], namespace))
         return entries
 
-    def _namespace_status(self, team_id: str, team_name: str, namespace: str) -> dict:
-        base = {"team_id": team_id, "team_name": team_name, "namespace": namespace}
+    def _namespace_status(self, project_id: str, project_name: str, namespace: str) -> dict:
+        base = {"project_id": project_id, "project_name": project_name, "namespace": namespace}
 
         if not self._k8s_ready:
             return {**base, "status": STATUS_UNKNOWN,

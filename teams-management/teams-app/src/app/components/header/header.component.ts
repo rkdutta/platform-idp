@@ -56,7 +56,7 @@
 //     }
 //   }
 //
-//   get canManageTeams(): boolean {
+//   get canManageProjects(): boolean {
 //     return this.authService.hasRole('team-leader') || this.authService.hasRole('admin');
 //   }
 // }
@@ -173,7 +173,7 @@ export class HeaderComponent implements OnInit {
     }
   }
 
-  get canManageTeams(): boolean {
+  get canManageProjects(): boolean {
     return (
       this.authService.hasRole("team-leader") ||
       this.authService.hasRole("admin")

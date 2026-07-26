@@ -1,7 +1,7 @@
-"""SQLite persistence for teams, ownership and per-namespace access grants.
+"""SQLite persistence for projects, ownership and per-namespace access grants.
 
 This module is the **system of record for authorization**. Keycloak remains the
-identity provider (who exists, who can log in), but who owns which team and who
+identity provider (who exists, who can log in), but who owns which project and who
 holds which role in which namespace lives here. Reading authority from a live
 database rather than from the JWT means a change takes effect on the caller's
 very next request — no token refresh, which is what the `groups`-claim model
@@ -33,32 +33,32 @@ log = logging.getLogger("teams-api.store")
 DATA_DIR = os.getenv("DATA_DIR", "/data")
 DB_FILE = Path(DATA_DIR) / "teams.db"
 
-# The two roles a user can hold *in a namespace*. Ownership of the team confers
+# The two roles a user can hold *in a namespace*. Ownership of the project confers
 # `maintainer` implicitly (see authz.namespace_role) and is not stored per-namespace.
 ROLES = ("viewer", "maintainer")
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS teams (
+CREATE TABLE IF NOT EXISTS projects (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL UNIQUE COLLATE NOCASE,
     created_at  TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS team_namespaces (
+CREATE TABLE IF NOT EXISTS project_namespaces (
     namespace   TEXT PRIMARY KEY,
-    team_id     TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     is_default  INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE TABLE IF NOT EXISTS team_owners (
-    team_id     TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS project_owners (
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     user_id     TEXT NOT NULL,
     username    TEXT NOT NULL DEFAULT '',
-    PRIMARY KEY (team_id, user_id)
+    PRIMARY KEY (project_id, user_id)
 );
 
 CREATE TABLE IF NOT EXISTS namespace_grants (
-    namespace   TEXT NOT NULL REFERENCES team_namespaces(namespace) ON DELETE CASCADE,
+    namespace   TEXT NOT NULL REFERENCES project_namespaces(namespace) ON DELETE CASCADE,
     user_id     TEXT NOT NULL,
     username    TEXT NOT NULL DEFAULT '',
     role        TEXT NOT NULL CHECK (role IN ('viewer', 'maintainer')),
@@ -74,9 +74,21 @@ CREATE TABLE IF NOT EXISTS audit (
     detail  TEXT NOT NULL DEFAULT ''
 );
 
-CREATE INDEX IF NOT EXISTS idx_ns_team   ON team_namespaces(team_id);
-CREATE INDEX IF NOT EXISTS idx_owner_uid ON team_owners(user_id);
-CREATE INDEX IF NOT EXISTS idx_grant_uid ON namespace_grants(user_id);
+-- Source repos a project's Argo CD AppProject should allow (self-service:
+-- an admin or that project's manager/owner adds these; teams-operator
+-- reconciles them into the AppProject's sourceRepos - see
+-- ensure_argocd_appproject in teams_operator.py). Deliberately its own table
+-- rather than a column on `projects`: a project can have any number of repos.
+CREATE TABLE IF NOT EXISTS project_source_repos (
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    repo_url    TEXT NOT NULL,
+    PRIMARY KEY (project_id, repo_url)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ns_project ON project_namespaces(project_id);
+CREATE INDEX IF NOT EXISTS idx_owner_uid  ON project_owners(user_id);
+CREATE INDEX IF NOT EXISTS idx_grant_uid  ON namespace_grants(user_id);
+CREATE INDEX IF NOT EXISTS idx_repo_project ON project_source_repos(project_id);
 """
 
 _conn: Optional[sqlite3.Connection] = None
@@ -140,13 +152,13 @@ def audit_tail(limit: int = 100) -> List[dict]:
 
 
 # --------------------------------------------------------------------------- #
-# Teams
+# Projects
 # --------------------------------------------------------------------------- #
-def _team_row_to_dict(row: sqlite3.Row) -> dict:
-    """Shape a team the way the rest of the API expects.
+def _project_row_to_dict(row: sqlite3.Row) -> dict:
+    """Shape a project the way the rest of the API expects.
 
     `namespaces` as a plain list keeps workloads.py / compliance.py working
-    unchanged — they consume `team["namespaces"]`.
+    unchanged — they consume `project["namespaces"]`.
     """
     return {
         "id": row["id"],
@@ -156,98 +168,98 @@ def _team_row_to_dict(row: sqlite3.Row) -> dict:
     }
 
 
-def list_teams() -> List[dict]:
-    rows = _db().execute("SELECT * FROM teams ORDER BY name").fetchall()
-    return [_team_row_to_dict(r) for r in rows]
+def list_projects() -> List[dict]:
+    rows = _db().execute("SELECT * FROM projects ORDER BY name").fetchall()
+    return [_project_row_to_dict(r) for r in rows]
 
 
-def get_team(team_id: str) -> Optional[dict]:
-    row = _db().execute("SELECT * FROM teams WHERE id = ?", (team_id,)).fetchone()
-    return _team_row_to_dict(row) if row else None
+def get_project(project_id: str) -> Optional[dict]:
+    row = _db().execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+    return _project_row_to_dict(row) if row else None
 
 
-def team_name_exists(name: str) -> bool:
+def project_name_exists(name: str) -> bool:
     row = _db().execute(
-        "SELECT 1 FROM teams WHERE name = ? COLLATE NOCASE", (name,)
+        "SELECT 1 FROM projects WHERE name = ? COLLATE NOCASE", (name,)
     ).fetchone()
     return row is not None
 
 
-def create_team(team_id: str, name: str, namespace: str, created_at: str = "") -> dict:
+def create_project(project_id: str, name: str, namespace: str, created_at: str = "") -> dict:
     with _lock:
         _db().execute(
-            "INSERT INTO teams (id, name, created_at) VALUES (?,?,?)",
-            (team_id, name, created_at or datetime.now().isoformat()),
+            "INSERT INTO projects (id, name, created_at) VALUES (?,?,?)",
+            (project_id, name, created_at or datetime.now().isoformat()),
         )
         _db().execute(
-            "INSERT INTO team_namespaces (namespace, team_id, is_default) VALUES (?,?,1)",
-            (namespace, team_id),
+            "INSERT INTO project_namespaces (namespace, project_id, is_default) VALUES (?,?,1)",
+            (namespace, project_id),
         )
         _db().commit()
-    return get_team(team_id)  # type: ignore[return-value]
+    return get_project(project_id)  # type: ignore[return-value]
 
 
-def delete_team(team_id: str) -> None:
-    """Delete a team. Namespaces, owners and grants cascade (see FKs)."""
+def delete_project(project_id: str) -> None:
+    """Delete a project. Namespaces, owners and grants cascade (see FKs)."""
     with _lock:
-        _db().execute("DELETE FROM teams WHERE id = ?", (team_id,))
+        _db().execute("DELETE FROM projects WHERE id = ?", (project_id,))
         _db().commit()
 
 
 # --------------------------------------------------------------------------- #
 # Namespaces
 # --------------------------------------------------------------------------- #
-def namespaces_of(team_id: str) -> List[str]:
+def namespaces_of(project_id: str) -> List[str]:
     rows = _db().execute(
-        "SELECT namespace FROM team_namespaces WHERE team_id = ? "
+        "SELECT namespace FROM project_namespaces WHERE project_id = ? "
         "ORDER BY is_default DESC, namespace",
-        (team_id,),
+        (project_id,),
     ).fetchall()
     return [r["namespace"] for r in rows]
 
 
 def all_namespaces() -> Set[str]:
-    rows = _db().execute("SELECT namespace FROM team_namespaces").fetchall()
+    rows = _db().execute("SELECT namespace FROM project_namespaces").fetchall()
     return {r["namespace"] for r in rows}
 
 
-def team_for_namespace(namespace: str) -> Optional[dict]:
+def project_for_namespace(namespace: str) -> Optional[dict]:
     row = _db().execute(
-        "SELECT team_id FROM team_namespaces WHERE namespace = ?", (namespace,)
+        "SELECT project_id FROM project_namespaces WHERE namespace = ?", (namespace,)
     ).fetchone()
-    return get_team(row["team_id"]) if row else None
+    return get_project(row["project_id"]) if row else None
 
 
 def namespace_exists(namespace: str) -> bool:
     row = _db().execute(
-        "SELECT 1 FROM team_namespaces WHERE namespace = ?", (namespace,)
+        "SELECT 1 FROM project_namespaces WHERE namespace = ?", (namespace,)
     ).fetchone()
     return row is not None
 
 
 def is_default_namespace(namespace: str) -> bool:
     row = _db().execute(
-        "SELECT is_default FROM team_namespaces WHERE namespace = ?", (namespace,)
+        "SELECT is_default FROM project_namespaces WHERE namespace = ?", (namespace,)
     ).fetchone()
     return bool(row and row["is_default"])
 
 
-def default_namespace_of(team_id: str) -> Optional[str]:
-    """The team's default namespace, or None once it's been deleted (the
+def default_namespace_of(project_id: str) -> Optional[str]:
+    """The project's default namespace, or None once it's been deleted (the
     default namespace is no longer protected from deletion — see main.py's
     delete_namespace)."""
     row = _db().execute(
-        "SELECT namespace FROM team_namespaces WHERE team_id = ? AND is_default = 1",
-        (team_id,),
+        "SELECT namespace FROM project_namespaces WHERE project_id = ? AND is_default = 1",
+        (project_id,),
     ).fetchone()
     return row["namespace"] if row else None
 
 
-def add_namespace(team_id: str, namespace: str, is_default: bool = False) -> None:
+def add_namespace(project_id: str, namespace: str, is_default: bool = False) -> None:
     with _lock:
         _db().execute(
-            "INSERT INTO team_namespaces (namespace, team_id, is_default) VALUES (?,?,?)",
-            (namespace, team_id, 1 if is_default else 0),
+            "INSERT INTO project_namespaces (namespace, project_id, is_default) VALUES (?,?,?)",
+            (namespace, project_id, 1 if is_default else 0),
         )
         _db().commit()
 
@@ -255,55 +267,84 @@ def add_namespace(team_id: str, namespace: str, is_default: bool = False) -> Non
 def remove_namespace(namespace: str) -> None:
     """Remove a namespace. Its grants cascade away."""
     with _lock:
-        _db().execute("DELETE FROM team_namespaces WHERE namespace = ?", (namespace,))
+        _db().execute("DELETE FROM project_namespaces WHERE namespace = ?", (namespace,))
         _db().commit()
 
 
 # --------------------------------------------------------------------------- #
 # Ownership
 # --------------------------------------------------------------------------- #
-def owners_of(team_id: str) -> List[dict]:
+def owners_of(project_id: str) -> List[dict]:
     rows = _db().execute(
-        "SELECT user_id, username FROM team_owners WHERE team_id = ? ORDER BY username",
-        (team_id,),
+        "SELECT user_id, username FROM project_owners WHERE project_id = ? ORDER BY username",
+        (project_id,),
     ).fetchall()
     return [dict(r) for r in rows]
 
 
-def owned_team_ids(user_id: str) -> Set[str]:
+def owned_project_ids(user_id: str) -> Set[str]:
     if not user_id:
         return set()
     rows = _db().execute(
-        "SELECT team_id FROM team_owners WHERE user_id = ?", (user_id,)
+        "SELECT project_id FROM project_owners WHERE user_id = ?", (user_id,)
     ).fetchall()
-    return {r["team_id"] for r in rows}
+    return {r["project_id"] for r in rows}
 
 
-def is_owner(user_id: str, team_id: str) -> bool:
+def is_owner(user_id: str, project_id: str) -> bool:
     if not user_id:
         return False
     row = _db().execute(
-        "SELECT 1 FROM team_owners WHERE team_id = ? AND user_id = ?",
-        (team_id, user_id),
+        "SELECT 1 FROM project_owners WHERE project_id = ? AND user_id = ?",
+        (project_id, user_id),
     ).fetchone()
     return row is not None
 
 
-def add_owner(team_id: str, user_id: str, username: str = "") -> None:
+def add_owner(project_id: str, user_id: str, username: str = "") -> None:
     with _lock:
         _db().execute(
-            "INSERT INTO team_owners (team_id, user_id, username) VALUES (?,?,?) "
-            "ON CONFLICT(team_id, user_id) DO UPDATE SET username = excluded.username",
-            (team_id, user_id, username),
+            "INSERT INTO project_owners (project_id, user_id, username) VALUES (?,?,?) "
+            "ON CONFLICT(project_id, user_id) DO UPDATE SET username = excluded.username",
+            (project_id, user_id, username),
         )
         _db().commit()
 
 
-def remove_owner(team_id: str, user_id: str) -> None:
+def remove_owner(project_id: str, user_id: str) -> None:
     with _lock:
         _db().execute(
-            "DELETE FROM team_owners WHERE team_id = ? AND user_id = ?",
-            (team_id, user_id),
+            "DELETE FROM project_owners WHERE project_id = ? AND user_id = ?",
+            (project_id, user_id),
+        )
+        _db().commit()
+
+
+# --------------------------------------------------------------------------- #
+# Source repos (self-service Argo CD AppProject.sourceRepos management)
+# --------------------------------------------------------------------------- #
+def source_repos_of(project_id: str) -> List[str]:
+    rows = _db().execute(
+        "SELECT repo_url FROM project_source_repos WHERE project_id = ? ORDER BY repo_url",
+        (project_id,),
+    ).fetchall()
+    return [r["repo_url"] for r in rows]
+
+
+def add_source_repo(project_id: str, repo_url: str) -> None:
+    with _lock:
+        _db().execute(
+            "INSERT OR IGNORE INTO project_source_repos (project_id, repo_url) VALUES (?,?)",
+            (project_id, repo_url),
+        )
+        _db().commit()
+
+
+def remove_source_repo(project_id: str, repo_url: str) -> None:
+    with _lock:
+        _db().execute(
+            "DELETE FROM project_source_repos WHERE project_id = ? AND repo_url = ?",
+            (project_id, repo_url),
         )
         _db().commit()
 
@@ -371,7 +412,7 @@ def refresh_usernames(users_by_id: Dict[str, str]) -> None:
     with _lock:
         for uid, uname in users_by_id.items():
             _db().execute(
-                "UPDATE team_owners SET username = ? WHERE user_id = ? AND username != ?",
+                "UPDATE project_owners SET username = ? WHERE user_id = ? AND username != ?",
                 (uname, uid, uname),
             )
             _db().execute(
@@ -393,20 +434,20 @@ def migrate_from_legacy_json(
 ) -> dict:
     """Seed the database from `teams.json` + current Keycloak group membership.
 
-    Runs only when the database has no teams, so re-running is a no-op. This is
+    Runs only when the database has no projects, so re-running is a no-op. This is
     what preserves everyone's existing access across the cutover: each namespace's
     Keycloak group members become grants, and members holding the legacy
-    `team-leader` realm role become **owners** of the team.
+    `team-leader` realm role become **owners** of the project.
 
     `members_of(ns) -> [username]`, `users_by_name` maps username -> Keycloak user
     (needs `id`), `leaders` is the set of usernames holding `team-leader`, and
-    `default_namespace_of(team_name) -> str` identifies the non-deletable namespace.
+    `default_namespace_of(project_name) -> str` identifies the non-deletable namespace.
 
     Returns a summary dict for logging. The JSON file is left untouched as a backup.
     """
     summary = {"teams": 0, "namespaces": 0, "owners": 0, "grants": 0, "skipped": []}
 
-    if _db().execute("SELECT 1 FROM teams LIMIT 1").fetchone():
+    if _db().execute("SELECT 1 FROM projects LIMIT 1").fetchone():
         return {**summary, "status": "already-migrated"}
     if not Path(json_path).exists():
         return {**summary, "status": "no-legacy-data"}
@@ -418,23 +459,23 @@ def migrate_from_legacy_json(
         log.error("Could not read legacy store %s: %s", json_path, e)
         return {**summary, "status": "unreadable"}
 
-    for team in legacy:
-        team_id, name = team.get("id"), team.get("name")
-        if not team_id or not name:
+    for project in legacy:
+        project_id, name = project.get("id"), project.get("name")
+        if not project_id or not name:
             continue
-        nss = team.get("namespaces") or [default_namespace_of(name)]
+        nss = project.get("namespaces") or [default_namespace_of(name)]
         default_ns = default_namespace_of(name)
 
         with _lock:
             _db().execute(
-                "INSERT OR IGNORE INTO teams (id, name, created_at) VALUES (?,?,?)",
-                (team_id, name, team.get("created_at") or datetime.now().isoformat()),
+                "INSERT OR IGNORE INTO projects (id, name, created_at) VALUES (?,?,?)",
+                (project_id, name, project.get("created_at") or datetime.now().isoformat()),
             )
             for ns in nss:
                 _db().execute(
-                    "INSERT OR IGNORE INTO team_namespaces (namespace, team_id, is_default) "
+                    "INSERT OR IGNORE INTO project_namespaces (namespace, project_id, is_default) "
                     "VALUES (?,?,?)",
-                    (ns, team_id, 1 if ns == default_ns else 0),
+                    (ns, project_id, 1 if ns == default_ns else 0),
                 )
             _db().commit()
         summary["teams"] += 1
@@ -455,7 +496,7 @@ def migrate_from_legacy_json(
                     continue
                 uid = user["id"]
                 if uname in leaders:
-                    add_owner(team_id, uid, uname)
+                    add_owner(project_id, uid, uname)
                     summary["owners"] += 1
                 else:
                     set_grant(ns, uid, uname, "viewer")

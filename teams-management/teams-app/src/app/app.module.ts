@@ -6,10 +6,10 @@ import { KeycloakAngularModule, KeycloakService } from 'keycloak-angular';
 
 import { AppRoutingModule } from './app-routing.module';
 import { AppComponent } from './app.component';
-import { TeamFormComponent } from './components/team-form/team-form.component';
-import { TeamListComponent } from './components/team-list/team-list.component';
+import { ProjectFormComponent } from './components/project-form/project-form.component';
+import { ProjectListComponent } from './components/project-list/project-list.component';
 import { HeaderComponent } from './components/header/header.component';
-import { TeamsPageComponent } from './components/teams-page/teams-page.component';
+import { ProjectsPageComponent } from './components/projects-page/projects-page.component';
 import { UsersPageComponent } from './components/users-page/users-page.component';
 
 import { AuthInterceptor } from './interceptors/auth.interceptor';
@@ -47,10 +47,10 @@ function initializeKeycloak(keycloak: KeycloakService) {
 @NgModule({
   declarations: [
     AppComponent,
-    TeamFormComponent,
-    TeamListComponent,
+    ProjectFormComponent,
+    ProjectListComponent,
     HeaderComponent,
-    TeamsPageComponent,
+    ProjectsPageComponent,
     UsersPageComponent
   ],
   imports: [

@@ -5,7 +5,7 @@ signature, issuer, and expiry. Used as an app-level FastAPI dependency so every
 route is protected except the public ones (health/root/docs).
 
 This module answers only "who is calling?". *What they may do* is resolved in
-authz.py from the database (team ownership + per-namespace roles) — the single
+authz.py from the database (project ownership + per-namespace roles) — the single
 exception being the `admin` realm role, which stays in the token because it is
 the bootstrap authority that grants everything else.
 
@@ -50,6 +50,11 @@ OIDC_JWKS_URL = os.getenv(
 )
 OIDC_TLS_VERIFY = _flag("OIDC_TLS_VERIFY", "true")
 JWKS_CACHE_TTL = int(os.getenv("OIDC_JWKS_CACHE_TTL", "3600"))
+
+# The confidential client teams-operator authenticates as (client-credentials
+# grant) to call this API's /internal/* control-plane endpoints - see
+# require_operator. Replaces the previous fully-open /internal/* design.
+OPERATOR_CLIENT_ID = os.getenv("OPERATOR_CLIENT_ID", "teams-operator-sa")
 
 # Paths served without authentication (probes, root, API docs).
 PUBLIC_PATHS = {"/", "/health", "/docs", "/redoc", "/openapi.json"}
@@ -97,15 +102,21 @@ def _roles(claims: dict) -> list[str]:
 
 
 # `admin` is the only realm role this API still reads. The legacy `team-leader`
-# and `viewer` realm roles are superseded by DB-held team ownership and
+# and `viewer` realm roles are superseded by DB-held project ownership and
 # per-namespace grants (see store.py / authz.py); they remain defined in the realm
 # but no longer carry any authority here.
 
 
 def _is_public(request: Request) -> bool:
-    """Paths served without auth: probes, root, docs, CORS preflight, and the
-    /internal/* control-plane endpoints (consumed in-cluster by the teams-operator,
-    which has no user token — restrict via NetworkPolicy)."""
+    """Paths served without auth: probes, root, docs, CORS preflight.
+
+    /internal/* is deliberately NOT here — those control-plane endpoints
+    return unscoped, cluster-wide data (every project, all namespace grants),
+    so they require a real bearer token same as any other route; see
+    require_operator for the additional check that it specifically belongs
+    to teams-operator's own teams-operator-sa client, not just any
+    authenticated realm user.
+    """
     if request.method == "OPTIONS":  # preflight carries no Authorization
         return True
     path = request.url.path
@@ -113,7 +124,6 @@ def _is_public(request: Request) -> bool:
         path in PUBLIC_PATHS
         or path.startswith("/docs")
         or path.startswith("/openapi")
-        or path.startswith("/internal/")
     )
 
 
@@ -148,7 +158,7 @@ def require_read(request: Request) -> None:
     realm user.
 
     Authorization proper is no longer a realm role — it lives in the database
-    (team ownership + per-namespace viewer/maintainer grants, see authz.py). A
+    (project ownership + per-namespace viewer/maintainer grants, see authz.py). A
     user with no grants authenticates fine and simply sees nothing, so there is
     nothing left for a coarse read-role gate to add.
     """
@@ -159,7 +169,7 @@ def require_read(request: Request) -> None:
 
 
 def require_admin(request: Request) -> None:
-    """Route dependency for platform administration (team lifecycle, ownership).
+    """Route dependency for platform administration (project lifecycle, ownership).
 
     `admin` stays a REALM role deliberately: it is the bootstrap authority that
     hands out every DB-held permission, so it must not itself be DB-held —
@@ -181,6 +191,54 @@ def is_admin(request: Request) -> bool:
         return True
     claims = getattr(request.state, "claims", None) or {}
     return "admin" in _roles(claims)
+
+
+def is_project_manager(request: Request) -> bool:
+    """True if the caller holds the `project-manager` realm role (or auth disabled).
+
+    A global capability - "may create a project" - not scoped to any one
+    project, unlike DB-held ownership of a specific project (store.is_owner),
+    which is what lets them manage the ones they hold after creation. Kept as
+    a realm role (like `admin`) rather than a DB row for the same reason
+    require_admin's docstring gives for `admin`: bootstrap authority for a
+    capability shouldn't itself live in the store it grants access to.
+    """
+    if not AUTH_ENABLED:
+        return True
+    claims = getattr(request.state, "claims", None) or {}
+    return "project-manager" in _roles(claims)
+
+
+def require_admin_or_project_manager(request: Request) -> None:
+    """Route dependency for self-service project creation: admins and anyone
+    holding the `project-manager` realm role (see is_project_manager)."""
+    if not AUTH_ENABLED:
+        return
+    claims = getattr(request.state, "claims", None) or {}
+    if "admin" not in _roles(claims) and "project-manager" not in _roles(claims):
+        raise HTTPException(
+            status_code=403,
+            detail="Requires the 'admin' or 'project-manager' realm role",
+        )
+
+
+def require_operator(request: Request) -> None:
+    """Route dependency for the /internal/* control-plane endpoints:
+    requires a valid bearer token whose `azp` (authorized party) is
+    teams-operator's own confidential client (client-credentials grant, no
+    user behind it) - not just any authenticated realm user, since these
+    endpoints return unscoped, cluster-wide data. `authenticate` (the global
+    app dependency) already validated the token and populated
+    request.state.claims by the time this runs.
+    """
+    if not AUTH_ENABLED:
+        return
+    claims = getattr(request.state, "claims", None) or {}
+    if claims.get("azp") != OPERATOR_CLIENT_ID:
+        raise HTTPException(
+            status_code=403,
+            detail="Requires the teams-operator service identity",
+        )
 
 
 def caller_id(request: Request) -> str:

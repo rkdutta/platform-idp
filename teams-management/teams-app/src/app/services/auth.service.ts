@@ -86,7 +86,7 @@
 import { Injectable } from "@angular/core";
 import { KeycloakService } from "keycloak-angular";
 import { KeycloakProfile } from "keycloak-js";
-import { Me, NamespaceRole } from "../models/team.model";
+import { Me, NamespaceRole } from "../models/project.model";
 
 @Injectable({
   providedIn: "root",
@@ -98,7 +98,7 @@ export class AuthService {
   /**
    * The caller's effective permissions, from GET /me.
    *
-   * Authorization is database state in the API (team ownership + per-namespace
+   * Authorization is database state in the API (project ownership + per-namespace
    * roles), so it CANNOT be derived from the token's realm roles any more — the
    * UI has to ask. AppComponent loads this once after login and calls setMe();
    * AuthService can't fetch it itself because AuthInterceptor injects AuthService,
@@ -269,14 +269,19 @@ export class AuthService {
     return this._me;
   }
 
-  /** Platform admin: create/delete teams, assign owners. */
+  /** Platform admin: create/delete projects, assign owners. */
   public isAdmin(): boolean {
     return !!this._me?.is_admin;
   }
 
-  /** Owns at least one team, so has something to manage (or is an admin). */
+  /** Owns at least one project, so has something to manage (or is an admin). */
   public canManage(): boolean {
-    return this.isAdmin() || (this._me?.owned_team_ids?.length ?? 0) > 0;
+    return this.isAdmin() || (this._me?.owned_project_ids?.length ?? 0) > 0;
+  }
+
+  /** Self-service project creation: holds the `project-manager` realm role. */
+  public isProjectManager(): boolean {
+    return !!this._me?.is_project_manager;
   }
 
   /** Every authenticated realm user may open the portal; what they actually see

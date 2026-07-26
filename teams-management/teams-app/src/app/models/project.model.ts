@@ -1,6 +1,6 @@
-// src/app/models/team.model.ts
+// src/app/models/project.model.ts
 
-/** A user's role *within a single namespace*. Ownership of the team implies
+/** A user's role *within a single namespace*. Ownership of the project implies
  *  `maintainer` on all of its namespaces (the API derives that). */
 export type NamespaceRole = 'viewer' | 'maintainer';
 
@@ -9,7 +9,7 @@ export interface OwnerRef {
   username: string;
 }
 
-export interface Team {
+export interface Project {
   id: string;
   name: string;
   created_at: string;
@@ -18,7 +18,7 @@ export interface Team {
   default_namespace: string | null;
 }
 
-export interface TeamCreate {
+export interface ProjectCreate {
   name: string;
 }
 
@@ -36,14 +36,14 @@ export interface AccessUser {
   user_id: string;
   username: string;
   role: NamespaceRole;
-  via: 'owner' | 'grant'; // implicit (team ownership) vs an explicit per-namespace grant
+  via: 'owner' | 'grant'; // implicit (project ownership) vs an explicit per-namespace grant
 }
 
-/** Which users hold which role in a namespace (scoped to teams the caller owns). */
+/** Which users hold which role in a namespace (scoped to projects the caller owns). */
 export interface NamespaceAccess {
   namespace: string;
-  team_id: string;
-  team_name: string;
+  project_id: string;
+  project_name: string;
   users: AccessUser[];
 }
 
@@ -55,7 +55,8 @@ export interface Me {
   user_id: string;
   username: string;
   is_admin: boolean;
-  owned_team_ids: string[];
+  is_project_manager: boolean;
+  owned_project_ids: string[];
   namespaces: { namespace: string; role: NamespaceRole }[];
 }
 
@@ -71,8 +72,8 @@ export interface PolicyResult {
 }
 
 export interface ComplianceSummary {
-  team_id: string;
-  team_name: string;
+  project_id: string;
+  project_name: string;
   namespace: string | null;
   status: ComplianceStatus;
   reason?: string | null;
@@ -96,15 +97,15 @@ export interface NamespaceCondition {
 }
 
 export interface NamespaceProvisioningStatus {
-  team_id: string;
-  team_name: string;
+  project_id: string;
+  project_name: string;
   namespace: string;
   status: ProvisioningStatus;
   reason?: string | null;
   conditions: NamespaceCondition[];
 }
 
-export interface TeamEvent {
+export interface ProjectEvent {
   namespace: string;
   type: string;   // "Normal" | "Warning"
   reason: string;
@@ -151,7 +152,7 @@ export interface AppCompliance {
 
 export interface Application {
   name: string;
-  namespace?: string | null; // which team namespace this app runs in
+  namespace?: string | null; // which project namespace this app runs in
   version: string;
   kind: string; // Rollout | Deployment
   image: string;
@@ -171,9 +172,9 @@ export interface ApplicationGroup {
   apps: Application[];
 }
 
-export interface TeamApplications {
-  team_id: string;
-  team_name: string;
+export interface ProjectApplications {
+  project_id: string;
+  project_name: string;
   namespace: string | null;
   namespaces?: string[];
   applications: Application[];

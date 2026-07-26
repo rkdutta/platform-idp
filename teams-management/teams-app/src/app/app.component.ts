@@ -1,6 +1,6 @@
 import { Component, OnInit } from '@angular/core';
 import { AuthService } from './services/auth.service';
-import { TeamsService } from './services/teams.service';
+import { ProjectsService } from './services/projects.service';
 
 @Component({
   selector: 'app-root',
@@ -14,7 +14,7 @@ export class AppComponent implements OnInit {
 
   constructor(
     public authService: AuthService,
-    private teamsService: TeamsService,
+    private projectsService: ProjectsService,
   ) {}
 
   async ngOnInit() {
@@ -43,7 +43,7 @@ export class AppComponent implements OnInit {
    */
   private async loadPermissions(): Promise<void> {
     try {
-      const me = await this.teamsService.getMe().toPromise();
+      const me = await this.projectsService.getMe().toPromise();
       this.authService.setMe(me ?? null);
     } catch (error) {
       // Degrade to read-only rather than blocking the portal; the user still gets

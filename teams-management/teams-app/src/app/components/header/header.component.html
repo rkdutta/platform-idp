@@ -6,9 +6,9 @@
 
       <nav class="main-nav" *ngIf="isLoggedIn">
         <a routerLink="/" routerLinkActive="active" [routerLinkActiveOptions]="{ exact: true }">
-          Teams
+          Projects
         </a>
-        <!-- Access management is only useful to someone who owns a team. -->
+        <!-- Access management is only useful to someone who owns a project. -->
         <a routerLink="/users" routerLinkActive="active" *ngIf="authService.canManage()">
           Users
         </a>
@@ -45,7 +45,7 @@
           <div class="cli-dropdown" *ngIf="cliMenuOpen">
             <p class="cli-dropdown-title">Developer CLI</p>
             <p class="cli-dropdown-desc">
-              Manage teams from your terminal. Download the signed
+              Manage projects from your terminal. Download the signed
               <code>teams-cli</code> binary:
             </p>
             <a

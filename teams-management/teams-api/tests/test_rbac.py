@@ -16,45 +16,45 @@ import store
 from conftest import make_request
 
 
-def _team(db, name="sss", team_id="t-sss"):
-    return db.create_team(team_id, name, f"team-{name}")
+def _project(db, name="sss", project_id="t-sss"):
+    return db.create_project(project_id, name, f"team-{name}")
 
 
 # --------------------------------------------------------------------------- #
 # Ownership
 # --------------------------------------------------------------------------- #
-def test_owner_manages_own_team_only(db, alice, bob):
-    _team(db, "sss", "t-sss")
-    _team(db, "mmm", "t-mmm")
+def test_owner_manages_own_project_only(db, alice, bob):
+    _project(db, "sss", "t-sss")
+    _project(db, "mmm", "t-mmm")
     db.add_owner("t-sss", "alice-id", "alice")
 
     assert authz.is_owner(alice, "t-sss")
     assert not authz.is_owner(alice, "t-mmm")
 
-    # A non-owner gets 404, not 403 — the endpoint must not confirm the team exists.
-    assert authz.require_team_owner(alice, "t-sss")["name"] == "sss"
+    # A non-owner gets 404, not 403 — the endpoint must not confirm the project exists.
+    assert authz.require_project_owner(alice, "t-sss")["name"] == "sss"
     with pytest.raises(HTTPException) as e:
-        authz.require_team_owner(alice, "t-mmm")
+        authz.require_project_owner(alice, "t-mmm")
     assert e.value.status_code == 404
 
     with pytest.raises(HTTPException):
-        authz.require_team_owner(bob, "t-sss")
+        authz.require_project_owner(bob, "t-sss")
 
 
-def test_owner_of_multiple_teams(db, alice):
-    _team(db, "sss", "t-sss")
-    _team(db, "mmm", "t-mmm")
+def test_owner_of_multiple_projects(db, alice):
+    _project(db, "sss", "t-sss")
+    _project(db, "mmm", "t-mmm")
     db.add_owner("t-sss", "alice-id", "alice")
     db.add_owner("t-mmm", "alice-id", "alice")
 
-    assert authz.owned_team_ids(alice) == {"t-sss", "t-mmm"}
-    assert {t["id"] for t in authz.scoped_teams(alice)} == {"t-sss", "t-mmm"}
+    assert authz.owned_project_ids(alice) == {"t-sss", "t-mmm"}
+    assert {p["id"] for p in authz.scoped_projects(alice)} == {"t-sss", "t-mmm"}
 
 
 def test_ownership_implies_maintainer_without_a_grant(db, alice):
-    """The derived-not-stored rule: an owner is maintainer everywhere in the team,
+    """The derived-not-stored rule: an owner is maintainer everywhere in the project,
     including namespaces added after they became owner."""
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     db.add_owner("t-sss", "alice-id", "alice")
 
     assert authz.namespace_role(alice, "team-sss") == "maintainer"
@@ -71,11 +71,11 @@ def test_list_access_includes_owners_not_just_grants(db, alice, bob):
     above) rather than stored as a grant row, so a listing built from
     store.grants_for_namespace() alone silently drops every owner — they'd show
     zero namespaces despite having full access. list_access must merge in each
-    team's owners."""
+    project's owners."""
     import main  # noqa: PLC0415 - imported here, not at module scope, to avoid
     # paying FastAPI app construction for the tests above that don't need it.
 
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     db.add_owner("t-sss", "alice-id", "alice")
     db.set_grant("team-sss", "bob-id", "bob", "viewer")
 
@@ -96,7 +96,7 @@ def test_list_access_owner_entry_wins_over_a_stale_grant_row(db, alice):
     with conflicting roles."""
     import main  # noqa: PLC0415
 
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     db.set_grant("team-sss", "alice-id", "alice", "viewer")
     db.add_owner("t-sss", "alice-id", "alice")
 
@@ -127,7 +127,7 @@ def test_internal_access_splits_viewer_and_maintainer_per_namespace(db, monkeypa
 
     monkeypatch.setattr(main, "keycloak", _FakeKeycloak(["admin"]))
 
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     db.add_owner("t-sss", "alice-id", "alice")
     db.set_grant("team-sss", "bob-id", "bob", "viewer")
     db.set_grant("team-sss", "carol-id", "carol", "maintainer")
@@ -146,7 +146,7 @@ def test_internal_access_owner_not_duplicated_as_a_stale_grant(db, monkeypatch):
 
     monkeypatch.setattr(main, "keycloak", _FakeKeycloak([]))
 
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     db.set_grant("team-sss", "alice-id", "alice", "viewer")
     db.add_owner("t-sss", "alice-id", "alice")
 
@@ -169,7 +169,7 @@ def test_internal_access_admins_null_when_keycloak_unreachable(db, monkeypatch):
             raise KeycloakAdminError("connection refused")
 
     monkeypatch.setattr(main, "keycloak", DownKeycloak())
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
 
     assert main.internal_access()["admins"] is None
 
@@ -222,7 +222,7 @@ def test_grant_access_syncs_k8s_group(db, admin, monkeypatch):
 
     fake_kc = _FakeKeycloakDirectory()
     monkeypatch.setattr(main, "keycloak", fake_kc)
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
 
     main.grant_access(admin, main.AccessGrant(namespace="team-sss", user_id="bob", role="viewer"))
 
@@ -237,7 +237,7 @@ def test_grant_access_role_change_moves_between_groups(db, admin, monkeypatch):
 
     fake_kc = _FakeKeycloakDirectory()
     monkeypatch.setattr(main, "keycloak", fake_kc)
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
 
     main.grant_access(admin, main.AccessGrant(namespace="team-sss", user_id="bob", role="viewer"))
     main.grant_access(admin, main.AccessGrant(namespace="team-sss", user_id="bob", role="maintainer"))
@@ -251,7 +251,7 @@ def test_revoke_access_removes_from_group(db, admin, monkeypatch):
 
     fake_kc = _FakeKeycloakDirectory()
     monkeypatch.setattr(main, "keycloak", fake_kc)
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     main.grant_access(admin, main.AccessGrant(namespace="team-sss", user_id="bob", role="viewer"))
 
     main.revoke_access(admin, main.AccessGrant(namespace="team-sss", user_id="bob", role="viewer"))
@@ -268,7 +268,7 @@ def test_grant_access_on_an_owner_has_no_group_effect(db, admin, monkeypatch):
 
     fake_kc = _FakeKeycloakDirectory()
     monkeypatch.setattr(main, "keycloak", fake_kc)
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     db.add_owner("t-sss", "alice-id", "alice")
     fake_kc.add_user_to_group("alice", "team-sss-maintainer")  # what add_owner would have done
 
@@ -283,7 +283,7 @@ def test_add_owner_syncs_maintainer_group_for_every_namespace(db, admin, monkeyp
 
     fake_kc = _FakeKeycloakDirectory()
     monkeypatch.setattr(main, "keycloak", fake_kc)
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     db.add_namespace("t-sss", "team-sss-prod")
 
     main.add_owner(admin, "t-sss", main.OwnerAdd(user_id="alice"))
@@ -300,7 +300,7 @@ def test_remove_owner_keeps_group_if_independent_grant_remains(db, admin, monkey
 
     fake_kc = _FakeKeycloakDirectory()
     monkeypatch.setattr(main, "keycloak", fake_kc)
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     db.add_namespace("t-sss", "team-sss-prod")
     main.add_owner(admin, "t-sss", main.OwnerAdd(user_id="alice"))
     main.grant_access(
@@ -318,7 +318,7 @@ def test_order_namespace_adds_existing_owners_to_new_namespace_group(db, admin, 
 
     fake_kc = _FakeKeycloakDirectory()
     monkeypatch.setattr(main, "keycloak", fake_kc)
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     db.add_owner("t-sss", "alice-id", "alice")
 
     asyncio.run(main.order_namespace(admin, "t-sss", main.NamespaceOrder(label="prod")))
@@ -331,7 +331,7 @@ def test_delete_namespace_cleans_up_k8s_groups(db, admin, monkeypatch):
 
     fake_kc = _FakeKeycloakDirectory()
     monkeypatch.setattr(main, "keycloak", fake_kc)
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     db.add_namespace("t-sss", "team-sss-prod")
     fake_kc.add_user_to_group("bob", "team-sss-prod-viewer")
 
@@ -341,17 +341,17 @@ def test_delete_namespace_cleans_up_k8s_groups(db, admin, monkeypatch):
     assert "team-sss-prod-maintainer" not in fake_kc.groups
 
 
-def test_delete_team_cleans_up_k8s_groups_for_every_namespace(db, admin, monkeypatch):
+def test_delete_project_cleans_up_k8s_groups_for_every_namespace(db, admin, monkeypatch):
     import main  # noqa: PLC0415
 
     fake_kc = _FakeKeycloakDirectory()
     monkeypatch.setattr(main, "keycloak", fake_kc)
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     db.add_namespace("t-sss", "team-sss-prod")
     fake_kc.add_user_to_group("bob", "team-sss-viewer")
     fake_kc.add_user_to_group("bob", "team-sss-prod-viewer")
 
-    asyncio.run(main.delete_team(admin, "t-sss"))
+    asyncio.run(main.delete_project(admin, "t-sss"))
 
     assert not fake_kc.groups.get("team-sss-viewer")
     assert not fake_kc.groups.get("team-sss-prod-viewer")
@@ -365,7 +365,7 @@ def test_group_reconciliation_corrects_drift(db, monkeypatch):
 
     fake_kc = _FakeKeycloakDirectory()
     monkeypatch.setattr(main, "keycloak", fake_kc)
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     db.add_owner("t-sss", "alice-id", "alice")
     db.set_grant("team-sss", "bob-id", "bob", "viewer")
     # Drift: bob/alice were never actually synced, and carol is a stale
@@ -387,7 +387,7 @@ def test_group_reconciliation_noop_when_keycloak_disabled(db, monkeypatch):
         enabled = False
 
     monkeypatch.setattr(main, "keycloak", DisabledKeycloak())
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
 
     main._reconcile_k8s_groups_once()  # must not raise
 
@@ -454,7 +454,7 @@ def test_kubeconfig_fails_loudly_when_only_keycloak_ca_missing(db, monkeypatch):
 
 
 def test_admin_is_unrestricted(db, admin):
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     assert authz.visible_namespaces(admin) is None
     assert authz.namespace_role(admin, "team-sss") == "maintainer"
     assert authz.is_owner(admin, "t-sss")
@@ -479,7 +479,7 @@ def test_default_namespace_naming_stays_within_63_chars():
 
 
 def test_default_namespace_of(db):
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     assert db.default_namespace_of("t-sss") == "team-sss"
 
     db.remove_namespace("team-sss")
@@ -488,34 +488,34 @@ def test_default_namespace_of(db):
 
 def test_owner_can_delete_the_default_namespace(db, alice):
     """The default namespace used to be permanently protected; it's now just a
-    namespace like any other, deletable by its team's owner."""
+    namespace like any other, deletable by its project's owner."""
     import main  # noqa: PLC0415
 
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     db.add_owner("t-sss", "alice-id", "alice")
 
-    team = asyncio.run(main.delete_namespace(alice, "t-sss", "team-sss"))
-    assert team.namespaces == []
+    project = asyncio.run(main.delete_namespace(alice, "t-sss", "team-sss"))
+    assert project.namespaces == []
 
 
-def test_owner_keeps_seeing_a_team_with_zero_namespaces(db, alice):
-    """Regression test: ownership must grant visibility of the team in its own
-    right. Before this fix, scoped_teams/require_visible_team narrowed a team to
-    its caller-visible *namespaces* — so an owner who deletes their team's only
-    namespace would lose the team from their own view entirely, including the
+def test_owner_keeps_seeing_a_project_with_zero_namespaces(db, alice):
+    """Regression test: ownership must grant visibility of the project in its own
+    right. Before this fix, scoped_projects/require_visible_project narrowed a project to
+    its caller-visible *namespaces* — so an owner who deletes their project's only
+    namespace would lose the project from their own view entirely, including the
     one place (order-namespace) they could recover from it."""
     import main  # noqa: PLC0415
 
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     db.add_owner("t-sss", "alice-id", "alice")
     asyncio.run(main.delete_namespace(alice, "t-sss", "team-sss"))
 
-    teams = authz.scoped_teams(alice)
-    assert len(teams) == 1
-    assert teams[0]["id"] == "t-sss"
-    assert teams[0]["namespaces"] == []
+    projects = authz.scoped_projects(alice)
+    assert len(projects) == 1
+    assert projects[0]["id"] == "t-sss"
+    assert projects[0]["namespaces"] == []
 
-    visible = authz.require_visible_team(alice, "t-sss")
+    visible = authz.require_visible_project(alice, "t-sss")
     assert visible["namespaces"] == []
 
 
@@ -524,7 +524,7 @@ def test_owner_keeps_seeing_a_team_with_zero_namespaces(db, alice):
 # --------------------------------------------------------------------------- #
 def test_different_roles_in_different_namespaces(db, bob):
     """The requirement that motivated the redesign: viewer here, maintainer there."""
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     db.add_namespace("t-sss", "team-sss-prod")
     db.set_grant("team-sss", "bob-id", "bob", "viewer")
     db.set_grant("team-sss-prod", "bob-id", "bob", "maintainer")
@@ -535,7 +535,7 @@ def test_different_roles_in_different_namespaces(db, bob):
 
 
 def test_grant_is_an_upsert_not_a_duplicate(db, bob):
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     db.set_grant("team-sss", "bob-id", "bob", "viewer")
     db.set_grant("team-sss", "bob-id", "bob", "maintainer")
 
@@ -547,7 +547,7 @@ def test_grant_is_an_upsert_not_a_duplicate(db, bob):
 def test_grantee_cannot_manage_access(db, bob):
     """A maintainer works *in* a namespace; managing who else gets in is the
     owner's job."""
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     db.set_grant("team-sss", "bob-id", "bob", "maintainer")
 
     assert not authz.can_manage_namespace(bob, "team-sss")
@@ -557,26 +557,26 @@ def test_grantee_cannot_manage_access(db, bob):
 
 
 def test_user_with_no_grants_sees_nothing(db, bob):
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     assert authz.visible_namespaces(bob) == set()
-    assert authz.scoped_teams(bob) == []
+    assert authz.scoped_projects(bob) == []
     assert authz.namespace_role(bob, "team-sss") is None
     with pytest.raises(HTTPException):
-        authz.require_visible_team(bob, "t-sss")
+        authz.require_visible_project(bob, "t-sss")
 
 
-def test_scoped_team_is_narrowed_to_granted_namespaces(db, bob):
-    _team(db, "sss", "t-sss")
+def test_scoped_project_is_narrowed_to_granted_namespaces(db, bob):
+    _project(db, "sss", "t-sss")
     db.add_namespace("t-sss", "team-sss-prod")
     db.set_grant("team-sss-prod", "bob-id", "bob", "viewer")
 
-    teams = authz.scoped_teams(bob)
-    assert len(teams) == 1
-    assert teams[0]["namespaces"] == ["team-sss-prod"]  # team-sss hidden
+    projects = authz.scoped_projects(bob)
+    assert len(projects) == 1
+    assert projects[0]["namespaces"] == ["team-sss-prod"]  # team-sss hidden
 
 
 def test_revoke_takes_effect_immediately(db, bob):
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     db.set_grant("team-sss", "bob-id", "bob", "viewer")
     assert authz.namespace_role(bob, "team-sss") == "viewer"
 
@@ -585,8 +585,8 @@ def test_revoke_takes_effect_immediately(db, bob):
     assert authz.namespace_role(bob, "team-sss") is None
 
 
-def test_grants_cascade_when_namespace_or_team_goes(db):
-    _team(db, "sss", "t-sss")
+def test_grants_cascade_when_namespace_or_project_goes(db):
+    _project(db, "sss", "t-sss")
     db.add_namespace("t-sss", "team-sss-prod")
     db.set_grant("team-sss-prod", "bob-id", "bob", "viewer")
     db.add_owner("t-sss", "alice-id", "alice")
@@ -594,13 +594,13 @@ def test_grants_cascade_when_namespace_or_team_goes(db):
     db.remove_namespace("team-sss-prod")
     assert db.grants_for_user("bob-id") == {}
 
-    db.delete_team("t-sss")
-    assert db.owned_team_ids("alice-id") == set()
-    assert db.list_teams() == []
+    db.delete_project("t-sss")
+    assert db.owned_project_ids("alice-id") == set()
+    assert db.list_projects() == []
 
 
 def test_invalid_role_rejected(db):
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     with pytest.raises(ValueError):
         db.set_grant("team-sss", "bob-id", "bob", "superuser")
 
@@ -649,7 +649,7 @@ def test_migration_seeds_owners_and_grants(db, legacy):
     assert summary["teams"] == 1
 
     # The legacy team-leader becomes an OWNER; everyone else becomes a viewer.
-    assert db.owned_team_ids("lead1-id") == {"t-sss"}
+    assert db.owned_project_ids("lead1-id") == {"t-sss"}
     assert db.grants_for_user("viewer1-id") == {"team-sss": "viewer"}
     assert db.grants_for_user("lead1-id") == {}  # ownership covers it
 
@@ -673,8 +673,8 @@ def test_migration_is_idempotent(db, legacy):
     _migrate(db, legacy)
     again = _migrate(db, legacy)
     assert again["status"] == "already-migrated"
-    assert len(db.list_teams()) == 1
-    assert db.owned_team_ids("lead1-id") == {"t-sss"}
+    assert len(db.list_projects()) == 1
+    assert db.owned_project_ids("lead1-id") == {"t-sss"}
 
 
 def test_migration_skips_users_missing_from_keycloak(db, tmp_path):
@@ -697,7 +697,7 @@ def test_startup_aborts_migration_when_keycloak_is_down(db, legacy, monkeypatch)
     """A Keycloak blip must not produce a permanently ownerless migration.
 
     Ownership and grants are derived from the directory, and the migration only
-    runs on an empty database — so importing the teams without it would lock
+    runs on an empty database — so importing the projects without it would lock
     everyone out for good. Startup must leave the database untouched instead.
     """
     import main
@@ -723,7 +723,7 @@ def test_startup_aborts_migration_when_keycloak_is_down(db, legacy, monkeypatch)
     asyncio.run(main._startup())
 
     # Nothing imported, so the next restart retries with a healthy directory.
-    assert db.list_teams() == []
+    assert db.list_projects() == []
 
 
 def test_migration_no_legacy_file(db, tmp_path):
@@ -741,7 +741,7 @@ def test_migration_no_legacy_file(db, tmp_path):
 # Audit + housekeeping
 # --------------------------------------------------------------------------- #
 def test_mutations_are_audited(db):
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     db.record("alice", "access.grant", "team-sss", "bob as viewer")
     tail = db.audit_tail()
     assert any(r["action"] == "access.grant" and r["actor"] == "alice" for r in tail)
@@ -749,7 +749,7 @@ def test_mutations_are_audited(db):
 
 def test_refresh_usernames_follows_a_rename(db):
     """Grants key on the sub, so a Keycloak rename must not orphan them."""
-    _team(db, "sss", "t-sss")
+    _project(db, "sss", "t-sss")
     db.set_grant("team-sss", "bob-id", "bob", "viewer")
     db.add_owner("t-sss", "bob-id", "bob")
 

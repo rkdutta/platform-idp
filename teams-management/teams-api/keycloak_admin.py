@@ -36,7 +36,7 @@ import requests
 log = logging.getLogger("teams-api.keycloak")
 
 # App realm roles surfaced next to each user in the assignment picker.
-APP_ROLES = ["admin", "team-leader", "viewer"]
+APP_ROLES = ["admin", "team-leader", "viewer", "project-manager"]
 
 
 class KeycloakAdminError(RuntimeError):
@@ -191,6 +191,38 @@ class KeycloakAdmin:
         if resp.status_code != 200:
             raise KeycloakAdminError(f"role users {resp.status_code}: {resp.text}")
         return [u["username"] for u in resp.json() if u.get("username")]
+
+    def _role_repr(self, role: str) -> Dict[str, str]:
+        """Realm-role role-mapping calls need the role's id, not just its name."""
+        resp = self._request("GET", f"/roles/{role}")
+        if resp.status_code != 200:
+            raise KeycloakAdminError(f"get role {resp.status_code}: {resp.text}")
+        body = resp.json()
+        return {"id": body["id"], "name": body["name"]}
+
+    def assign_realm_role(self, username: str, role: str) -> None:
+        """Grant a realm role to a user (idempotent). Used for `project-manager` -
+        the one realm role this API itself hands out (self-service delegation);
+        every other role stays admin-managed directly in Keycloak."""
+        uid = self.user_id(username)
+        if not uid:
+            raise KeycloakAdminError(f"user '{username}' not found")
+        resp = self._request(
+            "POST", f"/users/{uid}/role-mappings/realm", json=[self._role_repr(role)]
+        )
+        if resp.status_code not in (204, 200, 201):
+            raise KeycloakAdminError(f"assign role {resp.status_code}: {resp.text}")
+
+    def remove_realm_role(self, username: str, role: str) -> None:
+        """Revoke a realm role from a user (idempotent)."""
+        uid = self.user_id(username)
+        if not uid:
+            return
+        resp = self._request(
+            "DELETE", f"/users/{uid}/role-mappings/realm", json=[self._role_repr(role)]
+        )
+        if resp.status_code not in (204, 200):
+            raise KeycloakAdminError(f"remove role {resp.status_code}: {resp.text}")
 
     def list_users(self) -> List[dict]:
         """All realm users as {id, username, firstName, lastName, email, roles}.

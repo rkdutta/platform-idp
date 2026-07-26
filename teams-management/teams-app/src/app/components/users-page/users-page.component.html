@@ -3,7 +3,7 @@
     <div>
       <h2>User Access</h2>
       <p class="page-sub">
-        Manage team ownership and per-namespace roles. Changes take effect
+        Manage project ownership and per-namespace roles. Changes take effect
         immediately — no re-login needed.
       </p>
     </div>
@@ -17,12 +17,12 @@
   <p class="empty" *ngIf="loading">Loading users…</p>
 
   <ng-container *ngIf="!loading">
-    <p class="empty" *ngIf="!access.length && !teams.length">
-      You don't manage any teams or namespaces yet. Ask an admin to make you an
-      owner of a team.
+    <p class="empty" *ngIf="!access.length && !projects.length">
+      You don't manage any projects or namespaces yet. Ask an admin to make you an
+      owner of a project.
     </p>
 
-    <ng-container *ngIf="access.length || teams.length">
+    <ng-container *ngIf="access.length || projects.length">
       <div class="toolbar">
         <input
           class="filter-input"
@@ -47,8 +47,15 @@
           <span class="tag tag-admin" *ngIf="isPlatformAdmin(user)" title="Platform admin — unrestricted access">
             admin
           </span>
-          <span class="tag" [class.tag-none]="!ownedTeamsOf(user).length">
-            {{ ownedTeamsOf(user).length }} team(s) owned
+          <span
+            class="tag tag-admin"
+            *ngIf="isProjectManager(user)"
+            title="Project manager — can self-service create projects"
+          >
+            project manager
+          </span>
+          <span class="tag" [class.tag-none]="!ownedProjectsOf(user).length">
+            {{ ownedProjectsOf(user).length }} project(s) owned
           </span>
           <span class="tag" [class.tag-none]="!grantsOf(user).length">
             {{ grantsOf(user).length }} namespace(s)
@@ -57,41 +64,72 @@
 
         <div class="user-body" *ngIf="isExpanded(user)">
           <p class="none" *ngIf="isPlatformAdmin(user)">
-            Platform admins already have full access to every team and namespace.
+            Platform admins already have full access to every project and namespace.
             Ownership/grants below are redundant for this user.
           </p>
 
-          <!-- Team ownership: full control of a team's namespaces + who can
+          <!-- Project-manager: self-service project creation (POST /projects,
+               no longer admin-only). Grant/revoke is admin-only server-side —
+               same convention as ownership add/remove: everyone sees the badge
+               above, only admins see the toggle here. -->
+          <div class="project-manager-row" *ngIf="!isPlatformAdmin(user)">
+            <p class="section-label">Project manager</p>
+            <p class="none" *ngIf="!isProjectManager(user)">
+              Cannot create projects — self-service creation requires the
+              project-manager role.
+            </p>
+            <p class="none" *ngIf="isProjectManager(user)">
+              Can create projects (self-service).
+            </p>
+            <button
+              *ngIf="authService.isAdmin() && !isProjectManager(user)"
+              class="btn btn-secondary btn-sm"
+              (click)="grantProjectManager(user)"
+              [disabled]="saving === user.id"
+            >
+              Grant project manager
+            </button>
+            <button
+              *ngIf="authService.isAdmin() && isProjectManager(user)"
+              class="btn btn-danger btn-sm"
+              (click)="revokeProjectManager(user)"
+              [disabled]="saving === user.id"
+            >
+              Revoke project manager
+            </button>
+          </div>
+
+          <!-- Project ownership: full control of a project's namespaces + who can
                access them. Add/remove is admin-only server-side. -->
-          <div class="owned-teams">
-            <p class="section-label">Teams owned</p>
-            <div class="owner-chips" *ngIf="ownedTeamsOf(user).length">
-              <span class="owner-chip" *ngFor="let t of ownedTeamsOf(user)">
-                {{ t.name }}
+          <div class="owned-projects">
+            <p class="section-label">Projects owned</p>
+            <div class="owner-chips" *ngIf="ownedProjectsOf(user).length">
+              <span class="owner-chip" *ngFor="let p of ownedProjectsOf(user)">
+                {{ p.name }}
                 <button
                   *ngIf="authService.isAdmin()"
                   class="owner-remove"
-                  (click)="removeOwnership(user, t)"
+                  (click)="removeOwnership(user, p)"
                   [disabled]="saving === user.id"
-                  [title]="'Remove ' + user.username + ' as owner of ' + t.name"
+                  [title]="'Remove ' + user.username + ' as owner of ' + p.name"
                 >
                   ✕
                 </button>
               </span>
             </div>
-            <p class="none" *ngIf="!ownedTeamsOf(user).length">Owns no teams.</p>
+            <p class="none" *ngIf="!ownedProjectsOf(user).length">Owns no projects.</p>
 
-            <div class="add-row" *ngIf="authService.isAdmin() && assignableTeamsFor(user).length">
-              <select class="ns-select" [(ngModel)]="addTeamSel[user.id]">
+            <div class="add-row" *ngIf="authService.isAdmin() && assignableProjectsFor(user).length">
+              <select class="ns-select" [(ngModel)]="addProjectSel[user.id]">
                 <option value="">Add as owner of…</option>
-                <option *ngFor="let t of assignableTeamsFor(user)" [value]="t.id">
-                  {{ t.name }}
+                <option *ngFor="let p of assignableProjectsFor(user)" [value]="p.id">
+                  {{ p.name }}
                 </option>
               </select>
               <button
                 class="btn btn-primary btn-sm"
                 (click)="addOwnership(user)"
-                [disabled]="!addTeamSel[user.id] || saving === user.id"
+                [disabled]="!addProjectSel[user.id] || saving === user.id"
               >
                 Add
               </button>
@@ -106,7 +144,7 @@
             <tr *ngFor="let g of grantsOf(user); trackBy: trackByNamespace">
               <td class="g-ns">
                 {{ g.namespace }}
-                <span class="g-team">{{ g.team_name }}</span>
+                <span class="g-project">{{ g.project_name }}</span>
               </td>
               <ng-container *ngIf="g.via === 'grant'; else ownerRow">
                 <td class="g-role">
@@ -132,7 +170,7 @@
               </ng-container>
               <ng-template #ownerRow>
                 <td class="g-role" colspan="2">
-                  <span class="via-owner" [title]="'Full access via ownership of ' + g.team_name">
+                  <span class="via-owner" [title]="'Full access via ownership of ' + g.project_name">
                     {{ g.role }} — via ownership
                   </span>
                 </td>
@@ -151,7 +189,7 @@
                 *ngFor="let ns of availableFor(user); trackBy: trackByNamespace"
                 [value]="ns.namespace"
               >
-                {{ ns.namespace }} ({{ ns.team_name }})
+                {{ ns.namespace }} ({{ ns.project_name }})
               </option>
             </select>
             <select class="role-select" [(ngModel)]="addRole[user.id]">

@@ -152,7 +152,7 @@
   border-top: 1px solid var(--border);
 }
 
-/* --- team ownership -------------------------------------------------------- */
+/* --- project ownership ------------------------------------------------------ */
 .section-label {
   font-size: 11px;
   font-weight: 700;
@@ -162,10 +162,21 @@
   margin: 10px 0 6px;
 }
 
-.owned-teams {
+.owned-projects {
   margin-bottom: 14px;
   padding-bottom: 10px;
   border-bottom: 1px solid var(--border);
+}
+
+/* --- project-manager grant/revoke ------------------------------------------- */
+.project-manager-row {
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.project-manager-row .none {
+  margin-bottom: 8px;
 }
 
 .owner-chips {
@@ -237,7 +248,7 @@
   color: var(--text);
 }
 
-.g-team {
+.g-project {
   margin-left: 8px;
   padding: 1px 6px;
   border-radius: 4px;

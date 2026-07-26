@@ -1,10 +1,10 @@
 """
 Applications reader for the Teams API.
 
-Lists the applications running in each team's Kubernetes namespace and reports
-their name + version, so the portal can show what a team is running on its card.
+Lists the applications running in each project's Kubernetes namespace and reports
+their name + version, so the portal can show what a project is running on its card.
 
-An "application" is an Argo Rollout or a Deployment in the team namespace. For
+An "application" is an Argo Rollout or a Deployment in the project namespace. For
 each we derive:
   * name           - the `app.kubernetes.io/name` label, else the workload's
                      own name.
@@ -17,7 +17,7 @@ each we derive:
                      every cache cycle like everything else on the card - see
                      CACHE_TTL_SECONDS.
 
-Team -> namespace is resolved via the label the teams-operator stamps
+Project -> namespace is resolved via the label the teams-operator stamps
 (`teams.example.com/team-id`), the same approach used by the compliance checker.
 """
 
@@ -32,7 +32,9 @@ from kubernetes.client.rest import ApiException
 
 logger = logging.getLogger("teams-api.workloads")
 
-TEAM_ID_LABEL = "teams.example.com/team-id"
+# The label key itself is an external contract with teams-operator (unchanged);
+# only this Python identifier is renamed to match the project vocabulary.
+PROJECT_ID_LABEL = "teams.example.com/team-id"
 NAME_LABEL = "app.kubernetes.io/name"
 VERSION_LABEL = "app.kubernetes.io/version"
 PART_OF_LABEL = "app.kubernetes.io/part-of"
@@ -66,7 +68,7 @@ CACHE_TTL_SECONDS = 15
 
 
 class ApplicationsReader:
-    """Reads the applications (Rollouts + Deployments) in each team namespace."""
+    """Reads the applications (Rollouts + Deployments) in each project namespace."""
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -97,30 +99,30 @@ class ApplicationsReader:
     # Public API
     # ------------------------------------------------------------------ #
 
-    def applications_for_all(self, teams: List[dict]) -> List[dict]:
-        """Return the application list for every team, across its namespaces.
+    def applications_for_all(self, projects: List[dict]) -> List[dict]:
+        """Return the application list for every project, across its namespaces.
 
-        Each `team` dict carries `namespaces` (already narrowed by the caller to
+        Each `project` dict carries `namespaces` (already narrowed by the caller to
         the namespaces the requester is allowed to see)."""
-        return [self._for_team(team, team.get("namespaces") or []) for team in teams]
+        return [self._for_project(project, project.get("namespaces") or []) for project in projects]
 
-    def applications_for_team(self, team: dict) -> dict:
-        """Return the application list for a single team, across its namespaces."""
-        return self._for_team(team, team.get("namespaces") or [])
+    def applications_for_project(self, project: dict) -> dict:
+        """Return the application list for a single project, across its namespaces."""
+        return self._for_project(project, project.get("namespaces") or [])
 
     # ------------------------------------------------------------------ #
     # Internals
     # ------------------------------------------------------------------ #
 
-    def _for_team(self, team: dict, namespaces: List[str]) -> dict:
+    def _for_project(self, project: dict, namespaces: List[str]) -> dict:
         apps: List[dict] = []
         for ns in namespaces:
             for app in self._apps_in_namespace(ns):
                 app["namespace"] = ns
                 apps.append(app)
         return {
-            "team_id": team["id"],
-            "team_name": team["name"],
+            "project_id": project["id"],
+            "project_name": project["name"],
             # Back-compat single-namespace field: set only when unambiguous.
             "namespace": namespaces[0] if len(namespaces) == 1 else None,
             "namespaces": list(namespaces),
@@ -324,22 +326,22 @@ class ApplicationsReader:
             "rollout": None,  # populated for Rollout kind by _rollouts()
         }
 
-    def _team_namespaces(self) -> Dict[str, str]:
-        """Map team_id -> namespace using the label the operator stamps."""
+    def _project_namespaces(self) -> Dict[str, str]:
+        """Map project_id -> namespace using the label the operator stamps."""
         if not self._k8s_ready:
             return {}
         try:
-            ns_list = self._core.list_namespace(label_selector=TEAM_ID_LABEL)
+            ns_list = self._core.list_namespace(label_selector=PROJECT_ID_LABEL)
         except Exception as e:  # noqa: BLE001
-            logger.error(f"Failed to list team namespaces: {e}")
+            logger.error(f"Failed to list project namespaces: {e}")
             return {}
 
         mapping: Dict[str, str] = {}
         for ns in ns_list.items:
             labels = ns.metadata.labels or {}
-            team_id = labels.get(TEAM_ID_LABEL)
-            if team_id:
-                mapping[team_id] = ns.metadata.name
+            project_id = labels.get(PROJECT_ID_LABEL)
+            if project_id:
+                mapping[project_id] = ns.metadata.name
         return mapping
 
     def _ingress_hosts(self, namespace: str) -> Dict[str, str]:

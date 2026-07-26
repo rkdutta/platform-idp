@@ -175,13 +175,84 @@ class TeamsOperator:
         # anything changed, so without this an event would fire every ~30s.
         self._last_admin_usernames: Optional[Set[str]] = None
 
-    async def fetch_teams(self):
-        """Fetch current teams from the Teams API.
+        # Authenticated identity for calling teams-api's /internal/* control-
+        # plane endpoints (client-credentials grant, confidential client
+        # teams-operator-sa - mirrors teams-api's own teams-api-sa client for
+        # its Keycloak Admin API calls). Replaces the previous fully-open
+        # /internal/* design - see teams-api's auth.require_operator.
+        # KEYCLOAK_TOKEN_URL points at the same in-cluster Keycloak Service
+        # teams-api itself uses (KeycloakAdmin.base in keycloak_admin.py).
+        self.keycloak_token_url = os.getenv(
+            "KEYCLOAK_TOKEN_URL",
+            "http://keycloak-keycloakx-http.keycloak.svc/auth/realms/teams/protocol/openid-connect/token",
+        )
+        self.operator_client_id = os.getenv("OPERATOR_CLIENT_ID", "teams-operator-sa")
+        self.operator_client_secret = os.getenv("OPERATOR_CLIENT_SECRET", "")
+        self._api_token: Optional[str] = None
+        self._api_token_expiry: float = 0.0
 
-        Uses the unauthenticated /internal/teams endpoint: teams-api enforces
-        Keycloak JWT auth on the user-facing /teams (401 without a token), but the
-        operator is an unscoped in-cluster controller with no user token. The
-        internal endpoint returns just id/name/namespaces for reconciliation.
+        # Argo CD self-service Project reconciliation (ensure_keycloak_groups /
+        # ensure_argocd_appproject / ensure_argocd_rbac_policy below). Argo CD
+        # itself runs in var.argocd_namespace (platform-base/argocd.tf) -
+        # "argocd" by default, matching that Terraform variable's default.
+        self.ARGOCD_NAMESPACE = os.getenv("ARGOCD_NAMESPACE", "argocd")
+        self.ARGOCD_RBAC_CONFIGMAP = "argocd-rbac-cm"
+        self.k8s_custom_objects = client.CustomObjectsApi()
+        # Last-synced state per project (id -> (namespaces frozenset, source_repos
+        # tuple)), so ensure_argocd_appproject/ensure_argocd_rbac_policy only
+        # issue a write when something this operator manages actually changed -
+        # same "don't patch every ~30s for no reason" motivation as
+        # sync_admin_binding's _last_admin_usernames above.
+        self._last_project_state: Dict[str, tuple] = {}
+        # project_id -> argocd_project slug, tracked independently of
+        # _last_project_state (populated even when unchanged/skipped) so that
+        # once a project is deleted from teams-api - and its DB record is
+        # gone by the time this operator's next poll notices - there's still
+        # a way to know which AppProject/rbac policy block to clean up.
+        self._project_slugs: Dict[str, str] = {}
+
+    def _teams_api_token(self) -> Optional[str]:
+        """Client-credentials token for calling teams-api's authenticated
+        /internal/* endpoints as the teams-operator-sa confidential client
+        (see teams-api's auth.require_operator). Cached until near expiry,
+        same pattern as _openbao_login/_openbao_request. Returns None
+        (logging the reason) if the client secret isn't configured yet or
+        the token request fails — callers then treat it exactly like any
+        other transient failure in this file (skip this cycle, retry next
+        poll) rather than crash-looping."""
+        if not self.operator_client_secret:
+            logger.warning("⚠️ OPERATOR_CLIENT_SECRET not configured; /internal/* calls will be unauthenticated")
+            return None
+        if self._api_token and time.time() < self._api_token_expiry - 15:
+            return self._api_token
+        try:
+            resp = requests.post(
+                self.keycloak_token_url,
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": self.operator_client_id,
+                    "client_secret": self.operator_client_secret,
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+        except (requests.RequestException, ValueError) as e:
+            logger.error(f"❌ Keycloak token request failed (client_id={self.operator_client_id}): {e}")
+            return None
+        self._api_token = body["access_token"]
+        self._api_token_expiry = time.time() + int(body.get("expires_in", 60))
+        return self._api_token
+
+    def _api_auth_headers(self) -> Dict[str, str]:
+        token = self._teams_api_token()
+        return {"Authorization": f"Bearer {token}"} if token else {}
+
+    async def fetch_teams(self):
+        """Fetch current teams (projects) from the Teams API, authenticated
+        as teams-operator-sa (see _teams_api_token) — replaces the previous
+        fully-open /internal/teams design. Returns just id/name/namespaces/
+        source_repos/argocd_project for reconciliation.
 
         Returns the list of teams on success, or None if the API could not be
         reached / returned an error. None is deliberately distinct from an empty
@@ -192,7 +263,9 @@ class TeamsOperator:
         """
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(f"{self.teams_api_url}/internal/teams") as response:
+                async with session.get(
+                    f"{self.teams_api_url}/internal/teams", headers=self._api_auth_headers()
+                ) as response:
                     if response.status == 200:
                         teams = await response.json()
                         logger.debug(f"Fetched {len(teams)} teams from API")
@@ -208,7 +281,8 @@ class TeamsOperator:
             return None
 
     async def fetch_access(self):
-        """Fetch the current permission state from /internal/access:
+        """Fetch the current permission state from /internal/access,
+        authenticated as teams-operator-sa (see _teams_api_token):
         `{"namespaces": {ns: {"viewer": [...], "maintainer": [...]}},
         "admins": [...] | None}`.
 
@@ -219,7 +293,9 @@ class TeamsOperator:
         """
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(f"{self.teams_api_url}/internal/access") as response:
+                async with session.get(
+                    f"{self.teams_api_url}/internal/access", headers=self._api_auth_headers()
+                ) as response:
                     if response.status == 200:
                         return await response.json()
                     logger.error(f"Failed to fetch access: HTTP {response.status}")
@@ -230,6 +306,244 @@ class TeamsOperator:
         except Exception as e:
             logger.error(f"Unexpected error fetching access: {e}")
             return None
+
+    async def ensure_keycloak_groups(self, project_id: str) -> bool:
+        """Ensure this project's Argo CD viewer/maintainer Keycloak groups
+        exist, by asking teams-api to create them (POST /internal/projects/
+        {id}/keycloak-groups) — the Keycloak Admin API credential stays
+        confined to teams-api, the one place that already safely holds it;
+        this operator only ever calls teams-api, never Keycloak directly."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.teams_api_url}/internal/projects/{project_id}/keycloak-groups",
+                    headers=self._api_auth_headers(),
+                ) as response:
+                    if response.status == 200:
+                        return True
+                    logger.error(
+                        f"❌ Failed to ensure Keycloak groups for project {project_id}: HTTP {response.status}"
+                    )
+                    return False
+        except aiohttp.ClientError as e:
+            logger.error(f"❌ Error ensuring Keycloak groups for project {project_id}: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Unexpected error ensuring Keycloak groups for project {project_id}: {e}")
+            return False
+
+    def ensure_argocd_appproject(self, argocd_project: str, namespaces: Set[str], source_repos: list) -> bool:
+        """Ensure an Argo CD AppProject exists for this project, with
+        `sourceRepos`/`destinations` reconciled to match teams-api's records
+        (unlike the create-if-missing-only helpers elsewhere in this file,
+        these two fields can legitimately change after creation — a project
+        gaining a namespace or a source repo — so this really does patch on
+        every change, not just create-once).
+
+        `destinations` covers every namespace teams-api has provisioned for
+        this project; `sourceRepos` starts empty (deny-by-default) until an
+        admin/project-manager adds one via teams-api's source-repos
+        endpoints. Deliberately does NOT set spec.roles — Argo CD RBAC here
+        is centralized in argocd-rbac-cm's policy.csv (see
+        ensure_argocd_rbac_policy), not the AppProject's own alternate,
+        decentralized role mechanism.
+        """
+        spec = {
+            "sourceRepos": list(source_repos),
+            "destinations": [
+                {"server": "https://kubernetes.default.svc", "namespace": ns}
+                for ns in sorted(namespaces)
+            ],
+        }
+        body = {
+            "apiVersion": "argoproj.io/v1alpha1",
+            "kind": "AppProject",
+            "metadata": {
+                "name": argocd_project,
+                "namespace": self.ARGOCD_NAMESPACE,
+                "labels": {"app.kubernetes.io/managed-by": "teams-operator"},
+            },
+            "spec": spec,
+        }
+        try:
+            self.k8s_custom_objects.create_namespaced_custom_object(
+                group="argoproj.io", version="v1alpha1", namespace=self.ARGOCD_NAMESPACE,
+                plural="appprojects", body=body,
+            )
+            logger.info(f"✅ Created AppProject '{argocd_project}'")
+            return True
+        except ApiException as e:
+            if e.status == 409:
+                try:
+                    self.k8s_custom_objects.patch_namespaced_custom_object(
+                        group="argoproj.io", version="v1alpha1", namespace=self.ARGOCD_NAMESPACE,
+                        plural="appprojects", name=argocd_project, body={"spec": spec},
+                    )
+                    return True
+                except ApiException as patch_err:
+                    logger.error(f"❌ Failed to update AppProject '{argocd_project}': {patch_err}")
+                    return False
+            logger.error(f"❌ Failed to create AppProject '{argocd_project}': {e}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Unexpected error ensuring AppProject '{argocd_project}': {e}")
+            return False
+
+    def _rbac_policy_block(self, argocd_project: str) -> str:
+        """The delimited policy.csv block for one project's viewer/maintainer
+        roles — see ensure_argocd_rbac_policy. Explicit resource types (not a
+        `*` wildcard): most Argo CD RBAC resources (clusters/repositories/
+        accounts/certificates/gpgkeys) are global, not project-scoped, so
+        wildcarding the resource column would either do nothing useful or
+        leak into applicationsets. `exec` deliberately excluded from both
+        roles (shell access is a materially different grant than viewing/
+        maintaining). Groups referenced by the `g,` lines are exactly what
+        ensure_keycloak_groups creates via teams-api."""
+        p = argocd_project
+        return (
+            f"# BEGIN project {p}\n"
+            f"p, role:{p}-viewer, applications, get, {p}/*, allow\n"
+            f"p, role:{p}-viewer, applicationsets, get, {p}/*, allow\n"
+            f"p, role:{p}-viewer, logs, get, {p}/*, allow\n"
+            f"p, role:{p}-viewer, projects, get, {p}, allow\n"
+            f"p, role:{p}-maintainer, applications, *, {p}/*, allow\n"
+            f"p, role:{p}-maintainer, applicationsets, *, {p}/*, allow\n"
+            f"p, role:{p}-maintainer, logs, get, {p}/*, allow\n"
+            f"p, role:{p}-maintainer, projects, get, {p}, allow\n"
+            f"g, argocd-{p}-viewer, role:{p}-viewer\n"
+            f"g, argocd-{p}-maintainer, role:{p}-maintainer\n"
+            f"# END project {p}\n"
+        )
+
+    def ensure_argocd_rbac_policy(self, argocd_project: str) -> bool:
+        """Add/update this project's delimited policy.csv block in
+        argocd-rbac-cm (`# BEGIN project <name>` / `# END project <name>`),
+        touching no other project's block and none of the Terraform-seeded
+        baseline (see platform-base/argocd.tf's kubernetes_config_map.argocd_
+        rbac and its `configs.rbac.create=false` handoff). Argo CD hot-
+        reloads this ConfigMap via an informer watch, so this takes effect
+        without a restart."""
+        try:
+            cm = self.k8s_core_v1.read_namespaced_config_map(self.ARGOCD_RBAC_CONFIGMAP, self.ARGOCD_NAMESPACE)
+        except ApiException as e:
+            logger.error(f"❌ Could not read '{self.ARGOCD_RBAC_CONFIGMAP}': {e}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Unexpected error reading '{self.ARGOCD_RBAC_CONFIGMAP}': {e}")
+            return False
+
+        policy = (cm.data or {}).get("policy.csv", "")
+        begin = f"# BEGIN project {argocd_project}"
+        end = f"# END project {argocd_project}"
+        new_block = self._rbac_policy_block(argocd_project)
+
+        if begin in policy and end in policy:
+            pre = policy[: policy.index(begin)]
+            post = policy[policy.index(end) + len(end):].lstrip("\n")
+            updated = pre + new_block + post
+        else:
+            sep = "\n" if policy and not policy.endswith("\n") else ""
+            updated = policy + sep + new_block
+
+        if updated == policy:
+            return True  # already up to date, no patch needed
+
+        try:
+            self.k8s_core_v1.patch_namespaced_config_map(
+                self.ARGOCD_RBAC_CONFIGMAP, self.ARGOCD_NAMESPACE,
+                {"data": {"policy.csv": updated}},
+            )
+            logger.info(f"✅ Ensured Argo CD RBAC policy block for project '{argocd_project}'")
+            return True
+        except ApiException as e:
+            logger.error(f"❌ Failed to patch '{self.ARGOCD_RBAC_CONFIGMAP}' for project '{argocd_project}': {e}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Unexpected error patching '{self.ARGOCD_RBAC_CONFIGMAP}' for project '{argocd_project}': {e}")
+            return False
+
+    def _remove_rbac_policy_block(self, argocd_project: str) -> bool:
+        """Inverse of ensure_argocd_rbac_policy, for project deletion -
+        strips exactly this project's delimited block, touching nothing
+        else in policy.csv."""
+        try:
+            cm = self.k8s_core_v1.read_namespaced_config_map(self.ARGOCD_RBAC_CONFIGMAP, self.ARGOCD_NAMESPACE)
+        except ApiException as e:
+            if e.status == 404:
+                return True
+            logger.error(f"❌ Could not read '{self.ARGOCD_RBAC_CONFIGMAP}': {e}")
+            return False
+
+        policy = (cm.data or {}).get("policy.csv", "")
+        begin = f"# BEGIN project {argocd_project}"
+        end = f"# END project {argocd_project}"
+        if begin not in policy or end not in policy:
+            return True  # already gone
+
+        pre = policy[: policy.index(begin)]
+        post = policy[policy.index(end) + len(end):].lstrip("\n")
+        updated = pre + post
+        try:
+            self.k8s_core_v1.patch_namespaced_config_map(
+                self.ARGOCD_RBAC_CONFIGMAP, self.ARGOCD_NAMESPACE, {"data": {"policy.csv": updated}}
+            )
+            logger.info(f"🗑️ Removed Argo CD RBAC policy block for project '{argocd_project}'")
+            return True
+        except ApiException as e:
+            logger.error(f"❌ Failed to remove RBAC policy block for '{argocd_project}': {e}")
+            return False
+
+    def delete_argocd_appproject(self, argocd_project: str) -> bool:
+        """Delete this project's AppProject CR (project deletion)."""
+        try:
+            self.k8s_custom_objects.delete_namespaced_custom_object(
+                group="argoproj.io", version="v1alpha1", namespace=self.ARGOCD_NAMESPACE,
+                plural="appprojects", name=argocd_project,
+            )
+            logger.info(f"🗑️ Deleted AppProject '{argocd_project}'")
+            return True
+        except ApiException as e:
+            if e.status == 404:
+                return True
+            logger.error(f"❌ Failed to delete AppProject '{argocd_project}': {e}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Unexpected error deleting AppProject '{argocd_project}': {e}")
+            return False
+
+    def _emit_project_event(self, team_id: str, reason: str, message: str, healthy: bool = True) -> None:
+        """Emit an Event for a project-level (not namespace-level) reconcile
+        action — Keycloak groups, the AppProject, or the argocd-rbac-cm
+        policy block. Labelled with the project id (same EVENT_TEAM_LABEL as
+        every other Event here) so it surfaces in the Teams portal's
+        per-project activity feed (events_reader.py's cluster-wide label
+        query) alongside this project's per-namespace events, even though
+        there's no single owning namespace to attach it to. Stored in this
+        operator's own namespace, same reasoning as _emit_cluster_event."""
+        now = datetime.now(timezone.utc)
+        body = client.CoreV1Event(
+            metadata=client.V1ObjectMeta(
+                generate_name=f"teams-operator-project-{team_id}-",
+                labels={self.EVENT_TEAM_LABEL: team_id},
+            ),
+            involved_object=client.V1ObjectReference(
+                kind="AppProject", name=team_id, namespace=self.ARGOCD_NAMESPACE,
+                api_version="argoproj.io/v1alpha1",
+            ),
+            reason=reason,
+            message=message,
+            type="Normal" if healthy else "Warning",
+            source=client.V1EventSource(component="teams-operator"),
+            first_timestamp=now,
+            last_timestamp=now,
+            count=1,
+        )
+        try:
+            self.k8s_core_v1.create_namespaced_event(self.OPERATOR_NAMESPACE, body)
+        except ApiException as e:
+            logger.error(f"❌ Failed to emit Event ({reason}) for project '{team_id}': {e}")
+        except Exception as e:
+            logger.error(f"❌ Unexpected error emitting Event ({reason}) for project '{team_id}': {e}")
 
     def sync_namespace_rbac(self, namespace: str) -> bool:
         """Ensure the two static RoleBindings exist that give k8s RBAC real
@@ -834,6 +1148,20 @@ class TeamsOperator:
                 del self.team_namespaces[team_id]
                 changed = True
 
+        # Clean up Argo CD Project state (AppProject + rbac policy block) for
+        # any project this operator was tracking that's no longer present -
+        # tracked via _project_slugs rather than deleted_teams above, since a
+        # project can still hold slug-tracking state after its namespace set
+        # has already emptied out on its own.
+        for team_id in set(self._project_slugs) - current_team_ids:
+            slug = self._project_slugs[team_id]
+            appproject_ok = self.delete_argocd_appproject(slug)
+            rbac_ok = self._remove_rbac_policy_block(slug)
+            if appproject_ok and rbac_ok:
+                del self._project_slugs[team_id]
+                self._last_project_state.pop(team_id, None)
+                self._emit_project_event(team_id, "ProjectDeprovisioned", f"Argo CD project '{slug}' removed")
+
         if changed:
             total_ns = sum(len(v) for v in self.team_namespaces.values())
             logger.info(f"📊 Reconciliation complete: {len(current_teams)} teams, {total_ns} namespaces")
@@ -866,6 +1194,42 @@ class TeamsOperator:
                     "NetworkPolicy": netpol_ok,
                     "OpenBaoAccess": openbao_ok,
                 })
+
+        # Argo CD self-service Project reconciliation: Keycloak viewer/
+        # maintainer groups, the AppProject CRD, and this project's
+        # argocd-rbac-cm policy block - one iteration per *project* (not per
+        # namespace, unlike the loop above). Reuses the `teams` list
+        # fetch_teams already returned this cycle, no extra API call.
+        for team_id, team in current_teams.items():
+            argocd_project = team.get('argocd_project')
+            if not argocd_project:
+                continue  # teams-api not yet returning this field (mid-rollout)
+            self._project_slugs[team_id] = argocd_project
+
+            namespaces = set(team.get('namespaces') or [])
+            source_repos = tuple(sorted(team.get('source_repos') or []))
+            state_key = (frozenset(namespaces), source_repos)
+            if self._last_project_state.get(team_id) == state_key:
+                continue  # nothing this operator manages has changed
+
+            groups_ok = await self.ensure_keycloak_groups(team_id)
+            appproject_ok = self.ensure_argocd_appproject(argocd_project, namespaces, list(source_repos))
+            rbac_ok = self.ensure_argocd_rbac_policy(argocd_project)
+
+            if groups_ok and appproject_ok and rbac_ok:
+                self._last_project_state[team_id] = state_key
+                self._emit_project_event(
+                    team_id, "ProjectProvisioned",
+                    f"Argo CD project '{argocd_project}' provisioned "
+                    f"({len(namespaces)} namespace(s), {len(source_repos)} source repo(s))",
+                )
+            else:
+                self._emit_project_event(
+                    team_id, "ProjectProvisionFailed",
+                    f"Argo CD project '{argocd_project}' provisioning incomplete "
+                    f"(groups={groups_ok}, appproject={appproject_ok}, rbac={rbac_ok})",
+                    healthy=False,
+                )
 
         # RBAC sync, part 2: the one binding that's still user-list-based —
         # cluster-admin for Keycloak `admin`-role holders. A single cluster-

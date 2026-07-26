@@ -1,28 +1,28 @@
-// src/app/components/teams-page/teams-page.component.ts
+// src/app/components/projects-page/projects-page.component.ts
 import { Component, ViewChild } from "@angular/core";
 import { AuthService } from "../../services/auth.service";
-import { TeamsService } from "../../services/teams.service";
-import { TeamListComponent } from "../team-list/team-list.component";
+import { ProjectsService } from "../../services/projects.service";
+import { ProjectListComponent } from "../project-list/project-list.component";
 
 /**
- * The default route: create a team (admins) and browse teams, namespaces and
+ * The default route: create a project (admins) and browse projects, namespaces and
  * their applications. Managing *who can access what* lives on the Users page —
- * a per-team access panel doesn't scale as the user count grows.
+ * a per-project access panel doesn't scale as the user count grows.
  */
 @Component({
-  selector: "app-teams-page",
-  templateUrl: "./teams-page.component.html",
-  styleUrls: ["./teams-page.component.css"],
+  selector: "app-projects-page",
+  templateUrl: "./projects-page.component.html",
+  styleUrls: ["./projects-page.component.css"],
 })
-export class TeamsPageComponent {
-  @ViewChild("teamList") teamList!: TeamListComponent;
+export class ProjectsPageComponent {
+  @ViewChild("projectList") projectList!: ProjectListComponent;
 
   downloadingKubeconfig = false;
   kubeconfigError = "";
 
   constructor(
     public authService: AuthService,
-    private teamsService: TeamsService,
+    private projectsService: ProjectsService,
   ) {}
 
   /** Fetches the kubeconfig teams-api serves and triggers a browser download.
@@ -32,7 +32,7 @@ export class TeamsPageComponent {
   downloadKubeconfig(): void {
     this.downloadingKubeconfig = true;
     this.kubeconfigError = "";
-    this.teamsService.getKubeconfig().subscribe({
+    this.projectsService.getKubeconfig().subscribe({
       next: (yaml) => {
         this.downloadingKubeconfig = false;
         const blob = new Blob([yaml], { type: "application/yaml" });

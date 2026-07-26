@@ -2,14 +2,14 @@ import { Injectable } from '@angular/core';
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { Observable, throwError } from 'rxjs';
 import { catchError } from 'rxjs/operators';
-import { Team, TeamCreate, ComplianceSummary, ComplianceDetail, NamespaceProvisioningStatus, TeamEvent, PriorityTier, TeamApplications, UserRef, NamespaceAccess, NamespaceRole, OwnerRef, Me } from '../models/team.model';
+import { Project, ProjectCreate, ComplianceSummary, ComplianceDetail, NamespaceProvisioningStatus, ProjectEvent, PriorityTier, ProjectApplications, UserRef, NamespaceAccess, NamespaceRole, OwnerRef, Me } from '../models/project.model';
 import { environment } from '../../environments/environment';
 import { AuthService } from './auth.service';
 
 @Injectable({
   providedIn: 'root'
 })
-export class TeamsService {
+export class ProjectsService {
   private apiUrl = environment.apiUrl;
 
   constructor(
@@ -17,26 +17,26 @@ export class TeamsService {
     private authService: AuthService
   ) {}
 
-  getTeams(): Observable<Team[]> {
-    const url = `${this.apiUrl}/teams`;
+  getProjects(): Observable<Project[]> {
+    const url = `${this.apiUrl}/projects`;
     console.log('🔍 Making API call to:', url);
     console.log('🔐 User authenticated:', this.authService.isLoggedIn());
-    
-    return this.http.get<Team[]>(url)
+
+    return this.http.get<Project[]>(url)
       .pipe(catchError(this.handleError));
   }
 
-  createTeam(team: TeamCreate): Observable<Team> {
-    const url = `${this.apiUrl}/teams`;
-    console.log('📝 Creating team via API:', url);
-    
-    return this.http.post<Team>(url, team)
+  createProject(project: ProjectCreate): Observable<Project> {
+    const url = `${this.apiUrl}/projects`;
+    console.log('📝 Creating project via API:', url);
+
+    return this.http.post<Project>(url, project)
       .pipe(catchError(this.handleError));
   }
 
-  deleteTeam(teamId: string): Observable<any> {
-    const url = `${this.apiUrl}/teams/${teamId}`;
-    console.log('🗑️ Deleting team via API:', url);
+  deleteProject(projectId: string): Observable<any> {
+    const url = `${this.apiUrl}/projects/${projectId}`;
+    console.log('🗑️ Deleting project via API:', url);
 
     return this.http.delete(url)
       .pipe(catchError(this.handleError));
@@ -48,8 +48,8 @@ export class TeamsService {
       .pipe(catchError(this.handleError));
   }
 
-  getTeamCompliance(teamId: string): Observable<ComplianceDetail> {
-    const url = `${this.apiUrl}/teams/${teamId}/compliance`;
+  getProjectCompliance(projectId: string): Observable<ComplianceDetail> {
+    const url = `${this.apiUrl}/projects/${projectId}/compliance`;
     return this.http.get<ComplianceDetail>(url)
       .pipe(catchError(this.handleError));
   }
@@ -60,9 +60,9 @@ export class TeamsService {
       .pipe(catchError(this.handleError));
   }
 
-  getTeamEvents(teamId: string): Observable<TeamEvent[]> {
-    const url = `${this.apiUrl}/teams/${teamId}/events`;
-    return this.http.get<TeamEvent[]>(url)
+  getProjectEvents(projectId: string): Observable<ProjectEvent[]> {
+    const url = `${this.apiUrl}/projects/${projectId}/events`;
+    return this.http.get<ProjectEvent[]>(url)
       .pipe(catchError(this.handleError));
   }
 
@@ -72,23 +72,23 @@ export class TeamsService {
       .pipe(catchError(this.handleError));
   }
 
-  getApplications(): Observable<TeamApplications[]> {
+  getApplications(): Observable<ProjectApplications[]> {
     const url = `${this.apiUrl}/applications`;
-    return this.http.get<TeamApplications[]>(url)
+    return this.http.get<ProjectApplications[]>(url)
       .pipe(catchError(this.handleError));
   }
 
-  /** Order an extra namespace (team-<name>-<label>) for a team. */
-  orderNamespace(teamId: string, label: string): Observable<Team> {
-    const url = `${this.apiUrl}/teams/${teamId}/namespaces`;
-    return this.http.post<Team>(url, { label })
+  /** Order an extra namespace (team-<name>-<label>) for a project. */
+  orderNamespace(projectId: string, label: string): Observable<Project> {
+    const url = `${this.apiUrl}/projects/${projectId}/namespaces`;
+    return this.http.post<Project>(url, { label })
       .pipe(catchError(this.handleError));
   }
 
-  /** Delete an ordered namespace from a team (not the default namespace). */
-  deleteNamespace(teamId: string, namespace: string): Observable<Team> {
-    const url = `${this.apiUrl}/teams/${teamId}/namespaces/${namespace}`;
-    return this.http.delete<Team>(url)
+  /** Delete an ordered namespace from a project (not the default namespace). */
+  deleteNamespace(projectId: string, namespace: string): Observable<Project> {
+    const url = `${this.apiUrl}/projects/${projectId}/namespaces/${namespace}`;
+    return this.http.delete<Project>(url)
       .pipe(catchError(this.handleError));
   }
 
@@ -107,7 +107,7 @@ export class TeamsService {
       .pipe(catchError(this.handleError));
   }
 
-  /** Namespace -> users+roles, scoped to the caller's owned teams. */
+  /** Namespace -> users+roles, scoped to the caller's owned projects. */
   getAccess(): Observable<NamespaceAccess[]> {
     const url = `${this.apiUrl}/access`;
     return this.http.get<NamespaceAccess[]>(url)
@@ -129,17 +129,53 @@ export class TeamsService {
       .pipe(catchError(this.handleError));
   }
 
-  /** Team ownership (admin-managed). Owners control their team's namespaces
+  /** Project ownership (admin-managed). Owners control their project's namespaces
    *  and who may access them. */
-  addOwner(teamId: string, user_id: string): Observable<OwnerRef[]> {
-    const url = `${this.apiUrl}/teams/${teamId}/owners`;
+  addOwner(projectId: string, user_id: string): Observable<OwnerRef[]> {
+    const url = `${this.apiUrl}/projects/${projectId}/owners`;
     return this.http.post<OwnerRef[]>(url, { user_id })
       .pipe(catchError(this.handleError));
   }
 
-  removeOwner(teamId: string, userId: string): Observable<OwnerRef[]> {
-    const url = `${this.apiUrl}/teams/${teamId}/owners/${userId}`;
+  removeOwner(projectId: string, userId: string): Observable<OwnerRef[]> {
+    const url = `${this.apiUrl}/projects/${projectId}/owners/${userId}`;
     return this.http.delete<OwnerRef[]>(url)
+      .pipe(catchError(this.handleError));
+  }
+
+  /** Argo CD AppProject.spec.sourceRepos entries teams-operator reconciles onto
+   *  the cluster. Any caller in scope of the project (viewer or owner) may read
+   *  these; only the owner/admin may add or remove one. */
+  getSourceRepos(projectId: string): Observable<string[]> {
+    const url = `${this.apiUrl}/projects/${projectId}/source-repos`;
+    return this.http.get<string[]>(url)
+      .pipe(catchError(this.handleError));
+  }
+
+  addSourceRepo(projectId: string, repoUrl: string): Observable<string[]> {
+    const url = `${this.apiUrl}/projects/${projectId}/source-repos`;
+    return this.http.post<string[]>(url, { repo_url: repoUrl })
+      .pipe(catchError(this.handleError));
+  }
+
+  removeSourceRepo(projectId: string, repoUrl: string): Observable<string[]> {
+    const url = `${this.apiUrl}/projects/${projectId}/source-repos`;
+    // teams-api reads the repo to remove from the request body on DELETE.
+    return this.http.request<string[]>('delete', url, { body: { repo_url: repoUrl } })
+      .pipe(catchError(this.handleError));
+  }
+
+  /** Grant/revoke the `project-manager` realm role (admin-only server-side) —
+   *  a project-manager may self-service create projects (POST /projects). */
+  grantProjectManager(userId: string): Observable<any> {
+    const url = `${this.apiUrl}/users/${userId}/project-manager`;
+    return this.http.post(url, {})
+      .pipe(catchError(this.handleError));
+  }
+
+  revokeProjectManager(userId: string): Observable<any> {
+    const url = `${this.apiUrl}/users/${userId}/project-manager`;
+    return this.http.delete(url)
       .pipe(catchError(this.handleError));
   }
 
@@ -154,9 +190,9 @@ export class TeamsService {
 
   private handleError = (error: HttpErrorResponse) => {
     let errorMessage = 'An error occurred';
-    
+
     console.error('API Error:', error);
-    
+
     if (error.status === 401) {
       errorMessage = 'Unauthorized. Please log in again.';
       this.authService.login();
@@ -169,7 +205,7 @@ export class TeamsService {
       // Server-side error
       errorMessage = error.error?.detail || error.message || `HTTP ${error.status}`;
     }
-    
+
     return throwError(() => errorMessage);
   };
 }

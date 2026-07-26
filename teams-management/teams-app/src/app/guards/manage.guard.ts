@@ -3,7 +3,7 @@ import { CanActivate, Router, UrlTree } from "@angular/router";
 import { AuthService } from "../services/auth.service";
 
 /**
- * Gates /users on admin or team-owner ("teamlead") — everyone else is sent
+ * Gates /users on admin or project-owner ("teamlead") — everyone else is sent
  * back to /. The header nav link already hides for other users, and the API
  * itself 403s them (authz.require_any_owner), but a direct/bookmarked/hard-
  * refreshed navigation would otherwise still load the page and show nothing

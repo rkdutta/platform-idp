@@ -1,7 +1,7 @@
 """
 Compliance checker for the Teams API.
 
-Computes, per team, whether the team's Kubernetes namespace complies with the
+Computes, per project, whether the project's Kubernetes namespace complies with the
 platform-enforced Gatekeeper (OPA) constraints. Compliance is derived entirely
 from the Kubernetes API:
 
@@ -11,12 +11,12 @@ from the Kubernetes API:
     cluster-scoped) carry `status.violations[]`, each of which names the
     `namespace` it applies to.
 
-A team is:
+A project is:
   * "compliant"      - constraints exist (or none do) and none report a
-                       violation in the team's namespace.
+                       violation in the project's namespace.
   * "non_compliant"  - at least one constraint reports a violation in the
-                       team's namespace.
-  * "unknown"        - Gatekeeper is unreachable, or the team's namespace has
+                       project's namespace.
+  * "unknown"        - Gatekeeper is unreachable, or the project's namespace has
                        not been created yet (operator hasn't reconciled).
 
 Falco (runtime) signals are intentionally out of scope here; a second checker
@@ -40,8 +40,10 @@ TEMPLATE_VERSION = "v1"
 CONSTRAINT_GROUP = "constraints.gatekeeper.sh"
 CONSTRAINT_VERSION = "v1beta1"
 
-# Label the teams-operator stamps on each team namespace.
-TEAM_ID_LABEL = "teams.example.com/team-id"
+# Label the teams-operator stamps on each project namespace. The label key
+# itself is an external contract with teams-operator (unchanged); only this
+# Python identifier is renamed to match the project vocabulary.
+PROJECT_ID_LABEL = "teams.example.com/team-id"
 
 # Compliance status values (kept as plain strings so the API/UI stay decoupled).
 STATUS_COMPLIANT = "compliant"
@@ -54,7 +56,7 @@ SCAN_TTL_SECONDS = 15
 
 
 class ComplianceChecker:
-    """Reads Gatekeeper state and evaluates per-team namespace compliance."""
+    """Reads Gatekeeper state and evaluates per-project namespace compliance."""
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -79,22 +81,22 @@ class ComplianceChecker:
     # Public API
     # ------------------------------------------------------------------ #
 
-    def summarize_all(self, teams: List[dict]) -> List[dict]:
-        """Return a compact compliance summary for every team (badge data).
+    def summarize_all(self, projects: List[dict]) -> List[dict]:
+        """Return a compact compliance summary for every project (badge data).
 
-        Each `team` carries `namespaces` (already narrowed to what the caller may
+        Each `project` carries `namespaces` (already narrowed to what the caller may
         see); compliance is aggregated across them."""
         scan = self._get_scan()
         return [
-            self._evaluate(team, team.get("namespaces") or [], scan, detailed=False)
-            for team in teams
+            self._evaluate(project, project.get("namespaces") or [], scan, detailed=False)
+            for project in projects
         ]
 
-    def evaluate_team(self, team: dict) -> dict:
-        """Return the detailed compliance breakdown for a single team, aggregated
-        across the team's (in-scope) namespaces."""
+    def evaluate_project(self, project: dict) -> dict:
+        """Return the detailed compliance breakdown for a single project, aggregated
+        across the project's (in-scope) namespaces."""
         scan = self._get_scan()
-        return self._evaluate(team, team.get("namespaces") or [], scan, detailed=True)
+        return self._evaluate(project, project.get("namespaces") or [], scan, detailed=True)
 
     def scan(self) -> dict:
         """Expose the cached cluster scan (constraints + violations + match
@@ -105,10 +107,10 @@ class ComplianceChecker:
     # Evaluation
     # ------------------------------------------------------------------ #
 
-    def _evaluate(self, team: dict, namespaces: List[str], scan: dict, detailed: bool) -> dict:
+    def _evaluate(self, project: dict, namespaces: List[str], scan: dict, detailed: bool) -> dict:
         base = {
-            "team_id": team["id"],
-            "team_name": team["name"],
+            "project_id": project["id"],
+            "project_name": project["name"],
             # Back-compat single-namespace field: set only when unambiguous.
             "namespace": namespaces[0] if len(namespaces) == 1 else None,
             "namespaces": list(namespaces),
@@ -123,7 +125,7 @@ class ComplianceChecker:
 
         if not namespaces:
             return {**base, "status": STATUS_UNKNOWN,
-                    "reason": "Namespace not yet provisioned for this team",
+                    "reason": "Namespace not yet provisioned for this project",
                     "failing_policies": 0, "total_policies": len(scan["constraints"]),
                     **({"policies": []} if detailed else {})}
 
@@ -132,8 +134,8 @@ class ComplianceChecker:
         policies = []
         failing = 0
         for constraint in scan["constraints"]:
-            # A constraint fails for the team if it is violated in ANY of the
-            # team's (in-scope) namespaces.
+            # A constraint fails for the project if it is violated in ANY of the
+            # project's (in-scope) namespaces.
             ns_violations = [
                 v for v in constraint["violations"]
                 if v.get("namespace") in ns_set
@@ -143,7 +145,7 @@ class ComplianceChecker:
                 failing += 1
             if detailed:
                 # Gatekeeper records one violation per Pod/replica; collapse
-                # identical messages. When a team spans multiple namespaces,
+                # identical messages. When a project spans multiple namespaces,
                 # prefix each message with the namespace it came from.
                 messages = list(dict.fromkeys(
                     (f"[{v.get('namespace')}] {v.get('message', '')}" if multi
@@ -250,22 +252,22 @@ class ComplianceChecker:
         return {"available": True, "reason": None,
                 "constraints": constraints, "checked_at": checked_at}
 
-    def _team_namespaces(self) -> Dict[str, str]:
-        """Map team_id -> namespace using the label the operator stamps."""
+    def _project_namespaces(self) -> Dict[str, str]:
+        """Map project_id -> namespace using the label the operator stamps."""
         if not self._k8s_ready:
             return {}
         try:
-            ns_list = self._core.list_namespace(label_selector=TEAM_ID_LABEL)
+            ns_list = self._core.list_namespace(label_selector=PROJECT_ID_LABEL)
         except Exception as e:  # noqa: BLE001
-            logger.error(f"Failed to list team namespaces: {e}")
+            logger.error(f"Failed to list project namespaces: {e}")
             return {}
 
         mapping: Dict[str, str] = {}
         for ns in ns_list.items:
             labels = ns.metadata.labels or {}
-            team_id = labels.get(TEAM_ID_LABEL)
-            if team_id:
-                mapping[team_id] = ns.metadata.name
+            project_id = labels.get(PROJECT_ID_LABEL)
+            if project_id:
+                mapping[project_id] = ns.metadata.name
         return mapping
 
 

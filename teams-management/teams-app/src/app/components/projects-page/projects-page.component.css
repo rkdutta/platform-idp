@@ -57,7 +57,7 @@
   cursor: not-allowed;
 }
 
-/* No create form (non-admin), so the team list spans full width. */
+/* No create form (non-admin), so the project list spans full width. */
 .main-content.read-only {
   grid-template-columns: 1fr;
 }

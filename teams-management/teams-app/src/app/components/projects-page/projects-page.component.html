@@ -1,0 +1,46 @@
+<main class="main-content" [class.read-only]="!authService.isAdmin() && !authService.isProjectManager()">
+  <!-- Any logged-in user can fetch a kubeconfig — it carries no per-user
+       secret, just cluster info + an exec plugin (kubectl oidc-login) that
+       does its own PKCE login against Keycloak at kubectl invocation time. -->
+  <div class="kubeconfig-section">
+    <button
+      class="btn btn-secondary btn-sm"
+      (click)="downloadKubeconfig()"
+      [disabled]="downloadingKubeconfig"
+    >
+      {{ downloadingKubeconfig ? "Downloading…" : "⬇ Download kubeconfig" }}
+    </button>
+    <span class="kubeconfig-note">
+      Requires the <code>kubectl oidc-login</code> plugin
+      (<code>brew install int128/kubelogin/kubelogin</code>) installed locally.
+    </span>
+    <p class="error-message" *ngIf="kubeconfigError">{{ kubeconfigError }}</p>
+  </div>
+
+  <!-- Creating a project is admin-only, or self-service for a user holding the
+       project-manager realm role. Owners and plain users don't see it. -->
+  <div class="form-section" *ngIf="authService.isAdmin() || authService.isProjectManager()">
+    <h2>Create New Project</h2>
+    <app-project-form (projectCreated)="projectList.loadProjects()"></app-project-form>
+  </div>
+
+  <div class="list-section">
+    <h2>Existing Projects</h2>
+    <p class="view-only-note" *ngIf="!authService.canManage() && !authService.isProjectManager()">
+      👁️ Read-only access — you can view the projects and applications you've been
+      granted, but not change them. Ask a project owner for access.
+    </p>
+    <p class="view-only-note" *ngIf="authService.isProjectManager() && !authService.isAdmin()">
+      🛠️ Project manager — you can create new projects. Like an owner, you can order
+      and delete namespaces and manage source repos for projects you own, from the
+      <a routerLink="/users">Users</a> page, but you can't delete projects you don't own.
+      Only admins delete arbitrary projects.
+    </p>
+    <p class="view-only-note" *ngIf="authService.canManage() && !authService.isProjectManager() && !authService.isAdmin()">
+      🛠️ Project owner — you can order and delete namespaces for the projects you own, and
+      manage who can access them from the
+      <a routerLink="/users">Users</a> page. Only admins create or delete projects.
+    </p>
+    <app-project-list #projectList></app-project-list>
+  </div>
+</main>

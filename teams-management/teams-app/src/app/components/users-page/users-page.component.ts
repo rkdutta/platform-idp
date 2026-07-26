@@ -1,36 +1,36 @@
 // src/app/components/users-page/users-page.component.ts
 import { Component, OnInit } from "@angular/core";
-import { TeamsService } from "../../services/teams.service";
+import { ProjectsService } from "../../services/projects.service";
 import { AuthService } from "../../services/auth.service";
 import {
   NamespaceAccess,
   NamespaceRole,
-  Team,
+  Project,
   UserRef,
-} from "../../models/team.model";
+} from "../../models/project.model";
 
 /** One namespace a user holds a role in, flattened for display. */
 interface UserGrant {
   namespace: string;
-  team_name: string;
+  project_name: string;
   role: NamespaceRole;
   via: "owner" | "grant";
 }
 
 /**
  * User-centric access management — the only place either kind of access is
- * managed: per-namespace grants (viewer/maintainer, via /access) and team
- * ownership (via /teams/{id}/owners). The Teams page shows both read-only.
+ * managed: per-namespace grants (viewer/maintainer, via /access) and project
+ * ownership (via /projects/{id}/owners). The Projects page shows both read-only.
  *
- * The user list is the outer axis rather than the team: a namespace-centric panel
+ * The user list is the outer axis rather than the project: a namespace-centric panel
  * grows without bound as users are added, whereas here the page stays a filterable
  * table of people and you drill into one at a time.
  *
- * Everything is scoped by the API — /access only returns namespaces of teams the
+ * Everything is scoped by the API — /access only returns namespaces of projects the
  * caller owns (admins see all), so the pickers here can never offer a namespace
  * the caller isn't allowed to grant. Ownership add/remove is admin-only
- * server-side (require_admin on /teams/{id}/owners); non-admin owners see who
- * owns their team but can't change it.
+ * server-side (require_admin on /projects/{id}/owners); non-admin owners see who
+ * owns their project but can't change it.
  */
 @Component({
   selector: "app-users-page",
@@ -40,7 +40,7 @@ interface UserGrant {
 export class UsersPageComponent implements OnInit {
   users: UserRef[] = [];
   access: NamespaceAccess[] = [];
-  teams: Team[] = [];
+  projects: Project[] = [];
 
   loading = true;
   error = "";
@@ -50,12 +50,12 @@ export class UsersPageComponent implements OnInit {
   expanded: { [userId: string]: boolean } = {};
   addNamespace: { [userId: string]: string } = {};
   addRole: { [userId: string]: NamespaceRole } = {};
-  addTeamSel: { [userId: string]: string } = {};
+  addProjectSel: { [userId: string]: string } = {};
 
   readonly roles: NamespaceRole[] = ["viewer", "maintainer"];
 
   /**
-   * Access indexed by user, rebuilt only when /access or /teams changes.
+   * Access indexed by user, rebuilt only when /access or /projects changes.
    *
    * These MUST NOT be computed in the template. A method returning a fresh array
    * of fresh objects hands *ngFor new identities on every change-detection pass,
@@ -65,14 +65,14 @@ export class UsersPageComponent implements OnInit {
    */
   private grantsByUser: { [userId: string]: UserGrant[] } = {};
   private availableByUser: { [userId: string]: NamespaceAccess[] } = {};
-  private ownedTeamsByUser: { [userId: string]: Team[] } = {};
-  private assignableTeamsByUser: { [userId: string]: Team[] } = {};
+  private ownedProjectsByUser: { [userId: string]: Project[] } = {};
+  private assignableProjectsByUser: { [userId: string]: Project[] } = {};
 
   // Shared empty array: a fresh [] per call would defeat the stable identity above.
   private static readonly NONE: any[] = [];
 
   constructor(
-    private teamsService: TeamsService,
+    private projectsService: ProjectsService,
     public authService: AuthService,
   ) {}
 
@@ -83,24 +83,24 @@ export class UsersPageComponent implements OnInit {
   load(): void {
     this.loading = true;
     this.error = "";
-    this.teamsService.getUsers().subscribe({
+    this.projectsService.getUsers().subscribe({
       next: (users) => {
         this.users = users;
-        this.teamsService.getAccess().subscribe({
+        this.projectsService.getAccess().subscribe({
           next: (access) => {
             this.access = access;
-            // Team ownership is sourced from /teams, not derived from /access:
-            // a team with zero namespaces produces zero /access rows, but its
+            // Project ownership is sourced from /projects, not derived from /access:
+            // a project with zero namespaces produces zero /access rows, but its
             // owner still needs to show up here (that's the whole point of
             // ownership being visibility in its own right — see authz.py).
-            this.teamsService.getTeams().subscribe({
-              next: (teams) => {
-                this.teams = teams;
+            this.projectsService.getProjects().subscribe({
+              next: (projects) => {
+                this.projects = projects;
                 this.indexAll();
                 this.loading = false;
               },
               error: (err) => {
-                this.error = `Could not load teams: ${err}`;
+                this.error = `Could not load projects: ${err}`;
                 this.loading = false;
               },
             });
@@ -141,19 +141,19 @@ export class UsersPageComponent implements OnInit {
     return full || user.username;
   }
 
-  /** Rebuild every per-user index. Call this (only) when access/teams change. */
+  /** Rebuild every per-user index. Call this (only) when access/projects change. */
   private indexAll(): void {
     this.grantsByUser = {};
     this.availableByUser = {};
-    this.ownedTeamsByUser = {};
-    this.assignableTeamsByUser = {};
+    this.ownedProjectsByUser = {};
+    this.assignableProjectsByUser = {};
 
     for (const ns of this.access) {
       for (const u of ns.users) {
         const list = this.grantsByUser[u.user_id] || (this.grantsByUser[u.user_id] = []);
         list.push({
           namespace: ns.namespace,
-          team_name: ns.team_name,
+          project_name: ns.project_name,
           role: u.role,
           via: u.via,
         });
@@ -161,7 +161,7 @@ export class UsersPageComponent implements OnInit {
     }
 
     // Namespaces the caller may grant, minus ones this user already holds
-    // (whether via an explicit grant or via team ownership — both make the
+    // (whether via an explicit grant or via project ownership — both make the
     // "add a grant here" picker pointless for that namespace).
     for (const user of this.users) {
       const held = new Set((this.grantsByUser[user.id] || []).map((g) => g.namespace));
@@ -170,20 +170,20 @@ export class UsersPageComponent implements OnInit {
       );
     }
 
-    for (const team of this.teams) {
-      for (const o of team.owners || []) {
-        const list = this.ownedTeamsByUser[o.user_id] || (this.ownedTeamsByUser[o.user_id] = []);
-        list.push(team);
+    for (const project of this.projects) {
+      for (const o of project.owners || []) {
+        const list = this.ownedProjectsByUser[o.user_id] || (this.ownedProjectsByUser[o.user_id] = []);
+        list.push(project);
       }
     }
 
     for (const user of this.users) {
-      const owned = new Set((this.ownedTeamsByUser[user.id] || []).map((t) => t.id));
-      this.assignableTeamsByUser[user.id] = this.teams.filter((t) => !owned.has(t.id));
+      const owned = new Set((this.ownedProjectsByUser[user.id] || []).map((p) => p.id));
+      this.assignableProjectsByUser[user.id] = this.projects.filter((p) => !owned.has(p.id));
     }
   }
 
-  /** Every namespace this user holds a role in, across all visible teams. */
+  /** Every namespace this user holds a role in, across all visible projects. */
   grantsOf(user: UserRef): UserGrant[] {
     return this.grantsByUser[user.id] || UsersPageComponent.NONE;
   }
@@ -193,14 +193,14 @@ export class UsersPageComponent implements OnInit {
     return this.availableByUser[user.id] || UsersPageComponent.NONE;
   }
 
-  /** Teams this user owns. */
-  ownedTeamsOf(user: UserRef): Team[] {
-    return this.ownedTeamsByUser[user.id] || UsersPageComponent.NONE;
+  /** Projects this user owns. */
+  ownedProjectsOf(user: UserRef): Project[] {
+    return this.ownedProjectsByUser[user.id] || UsersPageComponent.NONE;
   }
 
-  /** Teams this user doesn't already own — the "add owner" picker's options. */
-  assignableTeamsFor(user: UserRef): Team[] {
-    return this.assignableTeamsByUser[user.id] || UsersPageComponent.NONE;
+  /** Projects this user doesn't already own — the "add owner" picker's options. */
+  assignableProjectsFor(user: UserRef): Project[] {
+    return this.assignableProjectsByUser[user.id] || UsersPageComponent.NONE;
   }
 
   // Stable identities for *ngFor, so a re-render can't recreate rows needlessly.
@@ -216,6 +216,10 @@ export class UsersPageComponent implements OnInit {
     return user.roles.includes("admin");
   }
 
+  isProjectManager(user: UserRef): boolean {
+    return user.roles.includes("project-manager");
+  }
+
   toggle(user: UserRef): void {
     this.expanded[user.id] = !this.expanded[user.id];
   }
@@ -229,7 +233,7 @@ export class UsersPageComponent implements OnInit {
   setRole(user: UserRef, namespace: string, role: NamespaceRole): void {
     this.saving = user.id;
     this.error = "";
-    this.teamsService.setAccess(namespace, user.id, role).subscribe({
+    this.projectsService.setAccess(namespace, user.id, role).subscribe({
       next: () => {
         this.saving = "";
         this.refreshAll();
@@ -253,7 +257,7 @@ export class UsersPageComponent implements OnInit {
   revoke(user: UserRef, namespace: string): void {
     this.saving = user.id;
     this.error = "";
-    this.teamsService.revokeAccess(namespace, user.id).subscribe({
+    this.projectsService.revokeAccess(namespace, user.id).subscribe({
       next: () => {
         this.saving = "";
         this.refreshAll();
@@ -265,18 +269,18 @@ export class UsersPageComponent implements OnInit {
     });
   }
 
-  /** Make this user an owner of a team (admin only server-side). */
+  /** Make this user an owner of a project (admin only server-side). */
   addOwnership(user: UserRef): void {
-    const teamId = this.addTeamSel[user.id];
-    if (!teamId) {
+    const projectId = this.addProjectSel[user.id];
+    if (!projectId) {
       return;
     }
     this.saving = user.id;
     this.error = "";
-    this.teamsService.addOwner(teamId, user.id).subscribe({
+    this.projectsService.addOwner(projectId, user.id).subscribe({
       next: () => {
         this.saving = "";
-        this.addTeamSel[user.id] = "";
+        this.addProjectSel[user.id] = "";
         this.refreshAll();
       },
       error: (err) => {
@@ -286,36 +290,80 @@ export class UsersPageComponent implements OnInit {
     });
   }
 
-  removeOwnership(user: UserRef, team: Team): void {
-    if (!confirm(`Remove ${user.username} as an owner of "${team.name}"?`)) {
+  removeOwnership(user: UserRef, project: Project): void {
+    if (!confirm(`Remove ${user.username} as an owner of "${project.name}"?`)) {
       return;
     }
     this.saving = user.id;
     this.error = "";
-    this.teamsService.removeOwner(team.id, user.id).subscribe({
+    this.projectsService.removeOwner(project.id, user.id).subscribe({
       next: () => {
         this.saving = "";
         this.refreshAll();
       },
       error: (err) => {
         this.saving = "";
-        this.error = `Could not remove ${user.username} from ${team.name}: ${err}`;
+        this.error = `Could not remove ${user.username} from ${project.name}: ${err}`;
       },
     });
+  }
+
+  /** Grant the `project-manager` realm role (admin-only server-side) — lets this
+   *  user self-service create projects without needing an admin to do it for them.
+   *  Unlike addOwnership/removeOwnership/setRole, this changes `user.roles`
+   *  itself, so /users (not just /access + /projects) needs re-fetching. */
+  grantProjectManager(user: UserRef): void {
+    this.saving = user.id;
+    this.error = "";
+    this.projectsService.grantProjectManager(user.id).subscribe({
+      next: () => {
+        this.saving = "";
+        this.refreshUsersAndAll();
+      },
+      error: (err) => {
+        this.saving = "";
+        this.error = `Could not make ${user.username} a project manager: ${err}`;
+      },
+    });
+  }
+
+  revokeProjectManager(user: UserRef): void {
+    this.saving = user.id;
+    this.error = "";
+    this.projectsService.revokeProjectManager(user.id).subscribe({
+      next: () => {
+        this.saving = "";
+        this.refreshUsersAndAll();
+      },
+      error: (err) => {
+        this.saving = "";
+        this.error = `Could not remove ${user.username} as project manager: ${err}`;
+      },
+    });
+  }
+
+  /** refreshAll() plus /users — for the one action (project-manager grant/revoke)
+   *  that actually changes a UserRef's roles array. */
+  private refreshUsersAndAll(): void {
+    this.projectsService.getUsers().subscribe({
+      next: (users) => (this.users = users),
+      error: (err) => (this.error = `Could not reload users: ${err}`),
+    });
+    this.refreshAll();
   }
 
   /** Re-read assignments + ownership — the Keycloak user directory hasn't
    *  changed, so /users isn't re-fetched. */
   private refreshAll(): void {
-    this.teamsService.getAccess().subscribe({
+    this.projectsService.getAccess().subscribe({
       next: (access) => {
         this.access = access;
-        this.teamsService.getTeams().subscribe({
-          next: (teams) => {
-            this.teams = teams;
+        this.projectsService.getProjects().subscribe({
+          next: (projects) => {
+            this.projects = projects;
             this.indexAll();
           },
-          error: (err) => (this.error = `Could not reload teams: ${err}`),
+          error: (err) => (this.error = `Could not reload projects: ${err}`),
         });
       },
       error: (err) => (this.error = `Could not reload access: ${err}`),

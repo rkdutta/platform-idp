@@ -1,108 +1,118 @@
 import { Component, OnInit, OnDestroy } from "@angular/core";
-import { TeamsService } from "../../services/teams.service";
+import { ProjectsService } from "../../services/projects.service";
 import { AuthService } from "../../services/auth.service";
 import { environment } from "../../../environments/environment";
 import {
-  Team,
+  Project,
   ComplianceStatus,
   ComplianceSummary,
   ComplianceDetail,
   ProvisioningStatus,
   NamespaceProvisioningStatus,
   NamespaceCondition,
-  TeamEvent,
+  ProjectEvent,
   PriorityTier,
   Application,
   ApplicationGroup,
-} from "../../models/team.model";
+} from "../../models/project.model";
 
 @Component({
-  selector: "app-team-list",
-  templateUrl: "./team-list.component.html",
-  styleUrls: ["./team-list.component.css"],
+  selector: "app-project-list",
+  templateUrl: "./project-list.component.html",
+  styleUrls: ["./project-list.component.css"],
 })
-export class TeamListComponent implements OnInit, OnDestroy {
-  teams: Team[] = [];
+export class ProjectListComponent implements OnInit, OnDestroy {
+  projects: Project[] = [];
   isLoading = true;
   errorMessage = "";
 
-  // Compliance state, keyed by team id.
-  compliance: { [teamId: string]: ComplianceSummary } = {};
-  complianceDetail: { [teamId: string]: ComplianceDetail } = {};
-  expanded: { [teamId: string]: boolean } = {};
-  loadingDetail: { [teamId: string]: boolean } = {};
+  // Compliance state, keyed by project id.
+  compliance: { [projectId: string]: ComplianceSummary } = {};
+  complianceDetail: { [projectId: string]: ComplianceDetail } = {};
+  expanded: { [projectId: string]: boolean } = {};
+  loadingDetail: { [projectId: string]: boolean } = {};
 
   // Namespace provisioning status (RBAC/image-pull/quota/limits/network-policy/
-  // OpenBao access), keyed by team id THEN namespace — a snapshot of
+  // OpenBao access), keyed by project id THEN namespace — a snapshot of
   // teams-operator's last reconcile attempt for each concern, not a live
   // health check (see docs/openbao-spiffe-access.md and provisioning_status.py
   // in teams-api for why: the platform deliberately doesn't watch a namespace
   // for drift after provisioning it, so it never fights a developer's own
   // changes inside their own namespace).
-  namespaceStatus: { [teamId: string]: { [namespace: string]: NamespaceProvisioningStatus } } = {};
+  namespaceStatus: { [projectId: string]: { [namespace: string]: NamespaceProvisioningStatus } } = {};
 
-  // Team activity feed (teams-operator's Events, aggregated across the
-  // team's namespaces) — collapsed by default, lazy-loaded on first
+  // Project activity feed (teams-operator's Events, aggregated across the
+  // project's namespaces) — collapsed by default, lazy-loaded on first
   // expand, then auto-refreshed on a timer only while expanded (collapsing
-  // stops the poll, so a long-open tab with many teams doesn't keep
+  // stops the poll, so a long-open tab with many projects doesn't keep
   // hitting the API for panels nobody's looking at).
-  eventsExpanded: { [teamId: string]: boolean } = {};
-  teamEvents: { [teamId: string]: TeamEvent[] } = {};
-  loadingEvents: { [teamId: string]: boolean } = {};
-  private eventsPollHandle: { [teamId: string]: ReturnType<typeof setInterval> } = {};
+  eventsExpanded: { [projectId: string]: boolean } = {};
+  projectEvents: { [projectId: string]: ProjectEvent[] } = {};
+  loadingEvents: { [projectId: string]: boolean } = {};
+  private eventsPollHandle: { [projectId: string]: ReturnType<typeof setInterval> } = {};
   private static readonly EVENTS_POLL_INTERVAL_MS = 15000;
 
-  // Applications running in each team's namespace, keyed by team id, already
+  // Applications running in each project's namespace, keyed by project id, already
   // grouped by app.kubernetes.io/part-of into application cards.
-  appGroups: { [teamId: string]: ApplicationGroup[] } = {};
+  appGroups: { [projectId: string]: ApplicationGroup[] } = {};
 
-  // Application groups keyed by team id THEN namespace, so each namespace card
+  // Application groups keyed by project id THEN namespace, so each namespace card
   // renders only the apps running in it.
-  appGroupsByNs: { [teamId: string]: { [namespace: string]: ApplicationGroup[] } } = {};
+  appGroupsByNs: { [projectId: string]: { [namespace: string]: ApplicationGroup[] } } = {};
 
-  // Each team's namespace, keyed by team id (for Rollouts dashboard deep links).
-  teamNamespace: { [teamId: string]: string | null } = {};
+  // Each project's namespace, keyed by project id (for Rollouts dashboard deep links).
+  projectNamespace: { [projectId: string]: string | null } = {};
 
-  // Expansion state per team id. Cards start COLLAPSED, so the list stays
+  // Expansion state per project id. Cards start COLLAPSED, so the list stays
   // scannable (each collapsed card still shows its compliance badge); an entry
   // is only present once the user has toggled that card.
-  collapsed: { [teamId: string]: boolean } = {};
+  collapsed: { [projectId: string]: boolean } = {};
 
   // --- Namespace management (ownership management lives on the Users page) ---
-  // Per-team "order namespace" label input.
-  orderLabel: { [teamId: string]: string } = {};
+  // Per-project "order namespace" label input.
+  orderLabel: { [projectId: string]: string } = {};
   actionError = "";
+
+  // Source repos (Argo CD AppProject.spec.sourceRepos, reconciled onto the
+  // cluster by teams-operator) — same collapsed-by-default, lazy-loaded-on-first-
+  // expand shape as the "Recent activity" events section below. Any caller in
+  // scope of the project can view; only an owner/admin (canManageProject) may
+  // add/remove one.
+  sourceReposExpanded: { [projectId: string]: boolean } = {};
+  sourceRepos: { [projectId: string]: string[] } = {};
+  loadingSourceRepos: { [projectId: string]: boolean } = {};
+  newRepoUrl: { [projectId: string]: string } = {};
 
   // public so the template can gate the Delete button on manage rights.
   constructor(
-    private teamsService: TeamsService,
+    private projectsService: ProjectsService,
     public authService: AuthService,
   ) {}
 
   // Which tenant priority tiers exist, for the info popover next to an
-  // application card's Tier field. Not per-team (every team shares the
-  // same tier catalog) - loaded once, not reloaded on every loadTeams().
+  // application card's Tier field. Not per-project (every project shares the
+  // same tier catalog) - loaded once, not reloaded on every loadProjects().
   priorityTiers: PriorityTier[] = [];
 
   ngOnInit() {
-    this.loadTeams();
-    this.teamsService.getPriorityClasses().subscribe({
+    this.loadProjects();
+    this.projectsService.getPriorityClasses().subscribe({
       next: (tiers) => (this.priorityTiers = tiers),
-      // Supplementary info popover; a failure here must not blank the team list.
+      // Supplementary info popover; a failure here must not blank the project list.
       error: (error) => console.error("Failed to load priority tiers:", error),
     });
   }
 
-  loadTeams() {
+  loadProjects() {
     this.isLoading = true;
     this.errorMessage = "";
     // Clear any stale banner; the calls below re-set it only if they fail again,
     // so a recovered backend makes the banner disappear.
     this.actionError = "";
 
-    this.teamsService.getTeams().subscribe({
-      next: (teams) => {
-        this.teams = teams;
+    this.projectsService.getProjects().subscribe({
+      next: (projects) => {
+        this.projects = projects;
         this.isLoading = false;
         this.loadCompliance();
         this.loadApplications();
@@ -115,38 +125,38 @@ export class TeamListComponent implements OnInit, OnDestroy {
     });
   }
 
-  toggleCollapse(teamId: string) {
-    this.collapsed[teamId] = !this.isCollapsed(teamId);
+  toggleCollapse(projectId: string) {
+    this.collapsed[projectId] = !this.isCollapsed(projectId);
   }
 
   // Default is collapsed: only an explicit `false` counts as expanded.
-  isCollapsed(teamId: string): boolean {
-    return this.collapsed[teamId] !== false;
+  isCollapsed(projectId: string): boolean {
+    return this.collapsed[projectId] !== false;
   }
 
   // --- Namespace management -------------------------------------------------
 
-  /** True if the caller owns this team (or is an admin) — resolved server-side
+  /** True if the caller owns this project (or is an admin) — resolved server-side
    *  and delivered via GET /me, since ownership isn't in the token. */
-  canManageTeam(team: Team): boolean {
+  canManageProject(project: Project): boolean {
     return (
       this.authService.isAdmin() ||
-      !!this.authService.me?.owned_team_ids.includes(team.id)
+      !!this.authService.me?.owned_project_ids.includes(project.id)
     );
   }
 
-  orderNamespace(team: Team) {
-    const label = (this.orderLabel[team.id] || "").trim();
+  orderNamespace(project: Project) {
+    const label = (this.orderLabel[project.id] || "").trim();
     if (!label) {
       return;
     }
     this.actionError = "";
-    this.teamsService.orderNamespace(team.id, label).subscribe({
+    this.projectsService.orderNamespace(project.id, label).subscribe({
       next: () => {
-        this.orderLabel[team.id] = "";
-        // No token refresh needed: owning the team already grants the new
+        this.orderLabel[project.id] = "";
+        // No token refresh needed: owning the project already grants the new
         // namespace, and the API resolves that from its database on the next call.
-        this.loadTeams();
+        this.loadProjects();
       },
       error: (error) => (this.actionError = error),
     });
@@ -155,61 +165,105 @@ export class TeamListComponent implements OnInit, OnDestroy {
   // The default namespace is just informational now — it's deletable like any
   // other. Read from the API's explicit field rather than array position:
   // once the default can be deleted, no namespace is guaranteed to sort first.
-  isDefaultNamespace(team: Team, namespace: string): boolean {
-    return team.default_namespace === namespace;
+  isDefaultNamespace(project: Project, namespace: string): boolean {
+    return project.default_namespace === namespace;
   }
 
-  deleteNamespace(team: Team, namespace: string) {
-    const message = this.isDefaultNamespace(team, namespace)
-      ? `Delete "${namespace}"? It's this team's default namespace — deleting it removes everything running there, and the team will have no namespaces left until a new one is ordered.`
+  deleteNamespace(project: Project, namespace: string) {
+    const message = this.isDefaultNamespace(project, namespace)
+      ? `Delete "${namespace}"? It's this project's default namespace — deleting it removes everything running there, and the project will have no namespaces left until a new one is ordered.`
       : `Delete namespace "${namespace}"? This removes the namespace and everything running in it.`;
     if (!confirm(message)) {
       return;
     }
     this.actionError = "";
-    this.teamsService.deleteNamespace(team.id, namespace).subscribe({
-      next: () => this.loadTeams(),
+    this.projectsService.deleteNamespace(project.id, namespace).subscribe({
+      next: () => this.loadProjects(),
+      error: (error) => (this.actionError = error),
+    });
+  }
+
+  toggleSourceRepos(projectId: string) {
+    this.sourceReposExpanded[projectId] = !this.sourceReposExpanded[projectId];
+    if (this.sourceReposExpanded[projectId] && !this.sourceRepos[projectId]) {
+      this.loadSourceRepos(projectId);
+    }
+  }
+
+  private loadSourceRepos(projectId: string) {
+    this.loadingSourceRepos[projectId] = true;
+    this.projectsService.getSourceRepos(projectId).subscribe({
+      next: (repos) => {
+        this.sourceRepos[projectId] = repos;
+        this.loadingSourceRepos[projectId] = false;
+      },
+      error: (error) => {
+        console.error("Failed to load source repos:", error);
+        this.loadingSourceRepos[projectId] = false;
+      },
+    });
+  }
+
+  addSourceRepo(project: Project) {
+    const repoUrl = (this.newRepoUrl[project.id] || "").trim();
+    if (!repoUrl) {
+      return;
+    }
+    this.actionError = "";
+    this.projectsService.addSourceRepo(project.id, repoUrl).subscribe({
+      next: (repos) => {
+        this.sourceRepos[project.id] = repos;
+        this.newRepoUrl[project.id] = "";
+      },
+      error: (error) => (this.actionError = error),
+    });
+  }
+
+  removeSourceRepo(project: Project, repoUrl: string) {
+    this.actionError = "";
+    this.projectsService.removeSourceRepo(project.id, repoUrl).subscribe({
+      next: (repos) => (this.sourceRepos[project.id] = repos),
       error: (error) => (this.actionError = error),
     });
   }
 
   loadCompliance() {
-    this.teamsService.getComplianceSummaries().subscribe({
+    this.projectsService.getComplianceSummaries().subscribe({
       next: (summaries) => {
         this.compliance = {};
         for (const summary of summaries) {
-          this.compliance[summary.team_id] = summary;
+          this.compliance[summary.project_id] = summary;
         }
       },
-      // Compliance is supplementary; a failure here must not blank the team list.
+      // Compliance is supplementary; a failure here must not blank the project list.
       error: (error) => console.error("Failed to load compliance:", error),
     });
   }
 
   loadNamespaceStatus() {
-    this.teamsService.getNamespaceStatuses().subscribe({
+    this.projectsService.getNamespaceStatuses().subscribe({
       next: (statuses) => {
         this.namespaceStatus = {};
         for (const s of statuses) {
-          (this.namespaceStatus[s.team_id] = this.namespaceStatus[s.team_id] || {})[s.namespace] = s;
+          (this.namespaceStatus[s.project_id] = this.namespaceStatus[s.project_id] || {})[s.namespace] = s;
         }
       },
-      // Same as compliance: supplementary, a failure here must not blank the team list.
+      // Same as compliance: supplementary, a failure here must not blank the project list.
       error: (error) => console.error("Failed to load namespace status:", error),
     });
   }
 
   loadApplications() {
-    this.teamsService.getApplications().subscribe({
-      next: (teamApps) => {
+    this.projectsService.getApplications().subscribe({
+      next: (projectApps) => {
         this.appGroups = {};
         this.appGroupsByNs = {};
-        this.teamNamespace = {};
-        for (const entry of teamApps) {
-          this.appGroups[entry.team_id] = this.groupApplications(entry.applications);
-          this.teamNamespace[entry.team_id] = entry.namespace;
+        this.projectNamespace = {};
+        for (const entry of projectApps) {
+          this.appGroups[entry.project_id] = this.groupApplications(entry.applications);
+          this.projectNamespace[entry.project_id] = entry.namespace;
 
-          // Partition the team's apps by namespace, then group each namespace's
+          // Partition the project's apps by namespace, then group each namespace's
           // apps by part-of, so each namespace card shows only its own apps.
           const byNs: { [ns: string]: Application[] } = {};
           for (const app of entry.applications) {
@@ -220,34 +274,34 @@ export class TeamListComponent implements OnInit, OnDestroy {
           for (const ns of Object.keys(byNs)) {
             grouped[ns] = this.groupApplications(byNs[ns]);
           }
-          this.appGroupsByNs[entry.team_id] = grouped;
+          this.appGroupsByNs[entry.project_id] = grouped;
         }
       },
       error: (error) => console.error("Failed to load applications:", error),
     });
   }
 
-  // Application groups running in a specific namespace of a team.
-  appGroupsFor(teamId: string, namespace: string): ApplicationGroup[] {
-    return this.appGroupsByNs[teamId]?.[namespace] || [];
+  // Application groups running in a specific namespace of a project.
+  appGroupsFor(projectId: string, namespace: string): ApplicationGroup[] {
+    return this.appGroupsByNs[projectId]?.[namespace] || [];
   }
 
   // --- Application (part-of) card collapse + rollups ----------------------
-  // Keyed by team:namespace:group, since the same app name can exist in more
-  // than one namespace. Like team cards, these start COLLAPSED.
+  // Keyed by project:namespace:group, since the same app name can exist in more
+  // than one namespace. Like project cards, these start COLLAPSED.
   appGroupCollapsed: { [key: string]: boolean } = {};
 
-  private appGroupKey(teamId: string, namespace: string, group: ApplicationGroup): string {
-    return `${teamId}:${namespace}:${group.name}`;
+  private appGroupKey(projectId: string, namespace: string, group: ApplicationGroup): string {
+    return `${projectId}:${namespace}:${group.name}`;
   }
 
-  toggleAppGroup(teamId: string, namespace: string, group: ApplicationGroup) {
-    const key = this.appGroupKey(teamId, namespace, group);
-    this.appGroupCollapsed[key] = !this.isAppGroupCollapsed(teamId, namespace, group);
+  toggleAppGroup(projectId: string, namespace: string, group: ApplicationGroup) {
+    const key = this.appGroupKey(projectId, namespace, group);
+    this.appGroupCollapsed[key] = !this.isAppGroupCollapsed(projectId, namespace, group);
   }
 
-  isAppGroupCollapsed(teamId: string, namespace: string, group: ApplicationGroup): boolean {
-    return this.appGroupCollapsed[this.appGroupKey(teamId, namespace, group)] !== false;
+  isAppGroupCollapsed(projectId: string, namespace: string, group: ApplicationGroup): boolean {
+    return this.appGroupCollapsed[this.appGroupKey(projectId, namespace, group)] !== false;
   }
 
   // Health of one component: a Rollout reports its own phase; a plain
@@ -337,16 +391,16 @@ export class TeamListComponent implements OnInit, OnDestroy {
     return app.component === "api" ? "API docs" : "Open app";
   }
 
-  // Per-app compliance expand state, keyed by "<teamId>:<appName>".
+  // Per-app compliance expand state, keyed by "<projectId>:<appName>".
   appComplianceExpanded: { [key: string]: boolean } = {};
 
-  toggleAppCompliance(teamId: string, app: Application) {
-    const key = `${teamId}:${app.name}`;
+  toggleAppCompliance(projectId: string, app: Application) {
+    const key = `${projectId}:${app.name}`;
     this.appComplianceExpanded[key] = !this.appComplianceExpanded[key];
   }
 
-  isAppComplianceExpanded(teamId: string, app: Application): boolean {
-    return !!this.appComplianceExpanded[`${teamId}:${app.name}`];
+  isAppComplianceExpanded(projectId: string, app: Application): boolean {
+    return !!this.appComplianceExpanded[`${projectId}:${app.name}`];
   }
 
   appStatusLabel(app: Application): string {
@@ -360,9 +414,9 @@ export class TeamListComponent implements OnInit, OnDestroy {
     }
   }
 
-  // Link to the team namespace's rollout list in the Argo Rollouts dashboard.
-  teamDashboardUrl(teamId: string): string | null {
-    const ns = this.teamNamespace[teamId];
+  // Link to the project namespace's rollout list in the Argo Rollouts dashboard.
+  projectDashboardUrl(projectId: string): string | null {
+    const ns = this.projectNamespace[projectId];
     return ns ? `${environment.rolloutsDashboardUrl}/rollouts/${ns}/` : null;
   }
 
@@ -383,85 +437,85 @@ export class TeamListComponent implements OnInit, OnDestroy {
     return `${environment.rolloutsDashboardUrl}/rollouts/rollout/${ns}/${app.name}`;
   }
 
-  toggleEvents(teamId: string) {
-    this.eventsExpanded[teamId] = !this.eventsExpanded[teamId];
-    if (this.eventsExpanded[teamId]) {
-      this.loadEvents(teamId);
+  toggleEvents(projectId: string) {
+    this.eventsExpanded[projectId] = !this.eventsExpanded[projectId];
+    if (this.eventsExpanded[projectId]) {
+      this.loadEvents(projectId);
       // Clear any stale handle before starting a new one (defensive —
       // toggling shouldn't normally double-arm this, but a leaked interval
       // is a real bug class, not just a cosmetic one).
-      this.stopEventsPoll(teamId);
-      this.eventsPollHandle[teamId] = setInterval(
-        () => this.loadEvents(teamId),
-        TeamListComponent.EVENTS_POLL_INTERVAL_MS
+      this.stopEventsPoll(projectId);
+      this.eventsPollHandle[projectId] = setInterval(
+        () => this.loadEvents(projectId),
+        ProjectListComponent.EVENTS_POLL_INTERVAL_MS
       );
     } else {
-      this.stopEventsPoll(teamId);
+      this.stopEventsPoll(projectId);
     }
   }
 
-  private loadEvents(teamId: string) {
+  private loadEvents(projectId: string) {
     // Only show the loading indicator on the *first* load — a background
     // refresh replacing an already-visible list shouldn't flash "Loading…"
     // over it every 15s.
-    if (!this.teamEvents[teamId]) {
-      this.loadingEvents[teamId] = true;
+    if (!this.projectEvents[projectId]) {
+      this.loadingEvents[projectId] = true;
     }
-    this.teamsService.getTeamEvents(teamId).subscribe({
+    this.projectsService.getProjectEvents(projectId).subscribe({
       next: (events) => {
-        this.teamEvents[teamId] = events;
-        this.loadingEvents[teamId] = false;
+        this.projectEvents[projectId] = events;
+        this.loadingEvents[projectId] = false;
       },
       error: (error) => {
-        console.error("Failed to load team events:", error);
-        this.loadingEvents[teamId] = false;
+        console.error("Failed to load project events:", error);
+        this.loadingEvents[projectId] = false;
       },
     });
   }
 
-  private stopEventsPoll(teamId: string) {
-    const handle = this.eventsPollHandle[teamId];
+  private stopEventsPoll(projectId: string) {
+    const handle = this.eventsPollHandle[projectId];
     if (handle) {
       clearInterval(handle);
-      delete this.eventsPollHandle[teamId];
+      delete this.eventsPollHandle[projectId];
     }
   }
 
   ngOnDestroy() {
-    for (const teamId of Object.keys(this.eventsPollHandle)) {
-      this.stopEventsPoll(teamId);
+    for (const projectId of Object.keys(this.eventsPollHandle)) {
+      this.stopEventsPoll(projectId);
     }
   }
 
-  toggleDetail(teamId: string) {
-    this.expanded[teamId] = !this.expanded[teamId];
-    if (this.expanded[teamId] && !this.complianceDetail[teamId]) {
-      this.loadingDetail[teamId] = true;
-      this.teamsService.getTeamCompliance(teamId).subscribe({
+  toggleDetail(projectId: string) {
+    this.expanded[projectId] = !this.expanded[projectId];
+    if (this.expanded[projectId] && !this.complianceDetail[projectId]) {
+      this.loadingDetail[projectId] = true;
+      this.projectsService.getProjectCompliance(projectId).subscribe({
         next: (detail) => {
-          this.complianceDetail[teamId] = detail;
-          this.loadingDetail[teamId] = false;
+          this.complianceDetail[projectId] = detail;
+          this.loadingDetail[projectId] = false;
         },
         error: (error) => {
           console.error("Failed to load compliance detail:", error);
-          this.loadingDetail[teamId] = false;
+          this.loadingDetail[projectId] = false;
         },
       });
     }
   }
 
-  statusOf(teamId: string): ComplianceStatus {
-    return this.compliance[teamId]?.status ?? "unknown";
+  statusOf(projectId: string): ComplianceStatus {
+    return this.compliance[projectId]?.status ?? "unknown";
   }
 
   // Tooltip for the collapsed-card badge. Done here (not inline in the template)
   // because the compliance map is empty until the summaries load.
-  complianceReason(teamId: string): string {
-    return this.compliance[teamId]?.reason || "Namespace policy compliance";
+  complianceReason(projectId: string): string {
+    return this.compliance[projectId]?.reason || "Namespace policy compliance";
   }
 
-  statusLabel(teamId: string): string {
-    switch (this.statusOf(teamId)) {
+  statusLabel(projectId: string): string {
+    switch (this.statusOf(projectId)) {
       case "compliant":
         return "Compliant";
       case "non_compliant":
@@ -471,12 +525,12 @@ export class TeamListComponent implements OnInit, OnDestroy {
     }
   }
 
-  nsStatusOf(teamId: string, namespace: string): ProvisioningStatus {
-    return this.namespaceStatus[teamId]?.[namespace]?.status ?? "unknown";
+  nsStatusOf(projectId: string, namespace: string): ProvisioningStatus {
+    return this.namespaceStatus[projectId]?.[namespace]?.status ?? "unknown";
   }
 
-  nsStatusLabel(teamId: string, namespace: string): string {
-    switch (this.nsStatusOf(teamId, namespace)) {
+  nsStatusLabel(projectId: string, namespace: string): string {
+    switch (this.nsStatusOf(projectId, namespace)) {
       case "ready":
         return "Ready";
       case "degraded":
@@ -490,8 +544,8 @@ export class TeamListComponent implements OnInit, OnDestroy {
   // (failed), yellow light/dot (still being provisioned — "unknown" means
   // teams-operator hasn't reconciled this namespace yet, which reads as
   // "in progress" rather than a real failure).
-  nsStatusIcon(teamId: string, namespace: string): string {
-    switch (this.nsStatusOf(teamId, namespace)) {
+  nsStatusIcon(projectId: string, namespace: string): string {
+    switch (this.nsStatusOf(projectId, namespace)) {
       case "ready":
         return "✓";
       case "degraded":
@@ -504,20 +558,20 @@ export class TeamListComponent implements OnInit, OnDestroy {
   // Fallback native title="" text, used only when there's no conditions list
   // to show in the hover popover (the "unknown" case — e.g. the operator
   // hasn't reconciled this namespace yet — where there's nothing to list).
-  nsStatusReason(teamId: string, namespace: string): string {
-    return this.namespaceStatus[teamId]?.[namespace]?.reason || "Namespace provisioning status";
+  nsStatusReason(projectId: string, namespace: string): string {
+    return this.namespaceStatus[projectId]?.[namespace]?.reason || "Namespace provisioning status";
   }
 
-  nsConditions(teamId: string, namespace: string): NamespaceCondition[] {
-    return this.namespaceStatus[teamId]?.[namespace]?.conditions ?? [];
+  nsConditions(projectId: string, namespace: string): NamespaceCondition[] {
+    return this.namespaceStatus[projectId]?.[namespace]?.conditions ?? [];
   }
 
   // Plain-English label for each condition `type` teams-operator provisions
   // (see update_namespace_status in teams_operator.py) — the raw type
   // strings are stable identifiers shared with the backend/operator, not
-  // meant to be read directly by a team lead.
+  // meant to be read directly by a project lead.
   private static readonly CONDITION_LABELS: { [type: string]: string } = {
-    RBAC: "Team member access (view/edit permissions)",
+    RBAC: "Project member access (view/edit permissions)",
     ImagePullAccess: "Container image pulls (Harbor)",
     ResourceQuota: "Resource quotas",
     LimitRange: "Default resource limits",
@@ -526,14 +580,14 @@ export class TeamListComponent implements OnInit, OnDestroy {
   };
 
   conditionLabel(type: string): string {
-    return TeamListComponent.CONDITION_LABELS[type] || type;
+    return ProjectListComponent.CONDITION_LABELS[type] || type;
   }
 
-  deleteTeam(teamId: string, teamName: string) {
-    if (confirm(`Are you sure you want to delete team "${teamName}"?`)) {
-      this.teamsService.deleteTeam(teamId).subscribe({
+  deleteProject(projectId: string, projectName: string) {
+    if (confirm(`Are you sure you want to delete project "${projectName}"?`)) {
+      this.projectsService.deleteProject(projectId).subscribe({
         next: () => {
-          this.loadTeams();
+          this.loadProjects();
         },
         error: (error) => {
           this.errorMessage = error;
