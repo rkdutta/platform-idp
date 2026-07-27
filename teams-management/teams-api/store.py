@@ -110,9 +110,55 @@ def connect(path: Optional[Path] = None) -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA)
         conn.commit()
+        _migrate_stale_namespace_grants_fk(conn)
         _conn = conn
         log.info("SQLite store ready at %s", db_path)
         return _conn
+
+
+def _migrate_stale_namespace_grants_fk(conn: sqlite3.Connection) -> None:
+    """Repair a DB created before the team->project rename.
+
+    `namespace_grants`'s FK is baked in at CREATE TABLE time, and its own table
+    name never changed across the rename, so `CREATE TABLE IF NOT EXISTS`
+    never rewrote it: a DB that predates the rename still enforces
+    `REFERENCES team_namespaces(namespace)` even though every namespace now
+    lives in `project_namespaces`. Every grant on a namespace created after
+    the rename then fails FOREIGN KEY constraint failed (add_owner/
+    project_owners doesn't share this problem - that table name never
+    collided with a pre-rename one, so it was created fresh with the right
+    FK). Rebuilds the table against `project_namespaces`, keeping any row
+    whose namespace still has a home there and dropping the rest (they'd be
+    unreachable orphans anyway - their project is long gone).
+    """
+    fk = conn.execute("PRAGMA foreign_key_list(namespace_grants)").fetchall()
+    if not any(row["table"] == "team_namespaces" for row in fk):
+        return
+    log.warning("Migrating namespace_grants off legacy team_namespaces FK reference")
+    conn.execute("ALTER TABLE namespace_grants RENAME TO namespace_grants_legacy")
+    conn.execute(
+        """
+        CREATE TABLE namespace_grants (
+            namespace   TEXT NOT NULL REFERENCES project_namespaces(namespace) ON DELETE CASCADE,
+            user_id     TEXT NOT NULL,
+            username    TEXT NOT NULL DEFAULT '',
+            role        TEXT NOT NULL CHECK (role IN ('viewer', 'maintainer')),
+            PRIMARY KEY (namespace, user_id)
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO namespace_grants (namespace, user_id, username, role) "
+        "SELECT namespace, user_id, username, role FROM namespace_grants_legacy "
+        "WHERE namespace IN (SELECT namespace FROM project_namespaces)"
+    )
+    conn.execute("DROP TABLE namespace_grants_legacy")
+    # The pre-rename tables (teams/team_namespaces/team_owners) are now fully
+    # orphaned - no code references them and namespace_grants no longer does
+    # either. Drop them rather than leave dead, confusing tables behind.
+    for legacy_table in ("team_namespaces", "team_owners", "teams"):
+        conn.execute(f"DROP TABLE IF EXISTS {legacy_table}")
+    conn.commit()
 
 
 def _db() -> sqlite3.Connection:
