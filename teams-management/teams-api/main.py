@@ -519,9 +519,12 @@ def get_me(request: Request):
 # access to your own effective permissions, nothing more).
 #
 # --listen-address must match one of teams-cli's registered redirect URIs
-# (127.0.0.1:8400) — it also has a wildcard path registered there
-# (http://127.0.0.1:8400/*) because kubelogin's local callback server doesn't
-# use the /callback path teams-cli's own login flow does.
+# (127.0.0.1:8400). kubelogin's own docs: its redirect_uri is the *bare*
+# http://<host>:<port> with no path at all — not the /callback path
+# teams-cli's own login flow uses — so teams-cli's Keycloak client has both
+# http://localhost:8400 and http://127.0.0.1:8400 (no path) registered
+# alongside the /callback ones, or Keycloak rejects it with
+# invalid_redirect_uri (confirmed live).
 _KUBECONFIG_TEMPLATE = """\
 apiVersion: v1
 kind: Config
