@@ -16,6 +16,12 @@ import {
   ApplicationGroup,
 } from "../../models/project.model";
 
+// Which project cards are expanded, persisted across page refreshes within
+// this browser (same localStorage pattern as ThemeService) - otherwise every
+// refresh mid-session re-collapses every card, which is a real hassle when
+// you're actively working with a project open.
+const COLLAPSE_STORAGE_KEY = "teams-portal-expanded-projects";
+
 @Component({
   selector: "app-project-list",
   templateUrl: "./project-list.component.html",
@@ -87,7 +93,9 @@ export class ProjectListComponent implements OnInit, OnDestroy {
   constructor(
     private projectsService: ProjectsService,
     public authService: AuthService,
-  ) {}
+  ) {
+    this.collapsed = this.loadCollapsedState();
+  }
 
   // Which tenant priority tiers exist, for the info popover next to an
   // application card's Tier field. Not per-project (every project shares the
@@ -127,11 +135,42 @@ export class ProjectListComponent implements OnInit, OnDestroy {
 
   toggleCollapse(projectId: string) {
     this.collapsed[projectId] = !this.isCollapsed(projectId);
+    this.persistCollapsedState();
   }
 
   // Default is collapsed: only an explicit `false` counts as expanded.
   isCollapsed(projectId: string): boolean {
     return this.collapsed[projectId] !== false;
+  }
+
+  /** Which project ids are explicitly expanded, from localStorage — the
+   *  inverse of `collapsed` (which entries are missing/true), so a fresh
+   *  browser with nothing stored yet still defaults every card to collapsed. */
+  private loadCollapsedState(): { [projectId: string]: boolean } {
+    try {
+      const raw = localStorage.getItem(COLLAPSE_STORAGE_KEY);
+      const expandedIds: string[] = raw ? JSON.parse(raw) : [];
+      const collapsed: { [projectId: string]: boolean } = {};
+      for (const id of expandedIds) {
+        collapsed[id] = false;
+      }
+      return collapsed;
+    } catch {
+      // localStorage may be unavailable (private mode), or hold a bad value
+      // from an older version of this key — fall back to "everything collapsed"
+      // rather than let a stale/corrupt entry break the page.
+      return {};
+    }
+  }
+
+  private persistCollapsedState(): void {
+    try {
+      const expandedIds = Object.keys(this.collapsed).filter((id) => this.collapsed[id] === false);
+      localStorage.setItem(COLLAPSE_STORAGE_KEY, JSON.stringify(expandedIds));
+    } catch {
+      // localStorage may be unavailable (private mode) — expansion still
+      // works for this session, it just won't persist across a refresh.
+    }
   }
 
   // --- Namespace management -------------------------------------------------

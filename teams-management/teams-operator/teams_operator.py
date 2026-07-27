@@ -493,6 +493,55 @@ class TeamsOperator:
             logger.error(f"❌ Failed to remove RBAC policy block for '{argocd_project}': {e}")
             return False
 
+    def delete_argocd_applications(self, argocd_project: str) -> bool:
+        """Delete every Argo CD Application belonging to this project
+        (spec.project == argocd_project) - project deletion.
+
+        Deleting the AppProject does NOT cascade-delete the Applications
+        that reference it (no k8s ownerReference relationship between them),
+        so without this they'd be orphaned: left behind in the argocd
+        namespace, referencing a project that no longer exists. Each delete
+        goes through Argo CD's own resources-finalizer (if the Application
+        has one), which prunes its live managed resources via Argo CD's own
+        logic - independent of (and a harmless no-op race against) this same
+        reconcile pass's namespace deletion, since a resource that's already
+        gone is treated as successfully pruned. Called before
+        delete_argocd_appproject, mirroring "detach applications, then
+        delete the project" - Argo CD doesn't hard-block deleting an
+        AppProject with live references, but there's no reason to race it.
+        """
+        try:
+            apps = self.k8s_custom_objects.list_namespaced_custom_object(
+                group="argoproj.io", version="v1alpha1", namespace=self.ARGOCD_NAMESPACE,
+                plural="applications",
+            )
+        except ApiException as e:
+            logger.error(f"❌ Could not list Applications to clean up for project '{argocd_project}': {e}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Unexpected error listing Applications for project '{argocd_project}': {e}")
+            return False
+
+        ok = True
+        for app in apps.get("items", []):
+            if app.get("spec", {}).get("project") != argocd_project:
+                continue
+            name = app["metadata"]["name"]
+            try:
+                self.k8s_custom_objects.delete_namespaced_custom_object(
+                    group="argoproj.io", version="v1alpha1", namespace=self.ARGOCD_NAMESPACE,
+                    plural="applications", name=name,
+                )
+                logger.info(f"🗑️ Deleted Application '{name}' (project '{argocd_project}')")
+            except ApiException as e:
+                if e.status != 404:
+                    logger.error(f"❌ Failed to delete Application '{name}' (project '{argocd_project}'): {e}")
+                    ok = False
+            except Exception as e:
+                logger.error(f"❌ Unexpected error deleting Application '{name}' (project '{argocd_project}'): {e}")
+                ok = False
+        return ok
+
     def delete_argocd_appproject(self, argocd_project: str) -> bool:
         """Delete this project's AppProject CR (project deletion)."""
         try:
@@ -1148,16 +1197,20 @@ class TeamsOperator:
                 del self.team_namespaces[team_id]
                 changed = True
 
-        # Clean up Argo CD Project state (AppProject + rbac policy block) for
-        # any project this operator was tracking that's no longer present -
-        # tracked via _project_slugs rather than deleted_teams above, since a
-        # project can still hold slug-tracking state after its namespace set
-        # has already emptied out on its own.
+        # Clean up Argo CD Project state (Applications + AppProject + rbac
+        # policy block) for any project this operator was tracking that's no
+        # longer present - tracked via _project_slugs rather than
+        # deleted_teams above, since a project can still hold slug-tracking
+        # state after its namespace set has already emptied out on its own.
+        # Applications first (see delete_argocd_applications) - deleting the
+        # AppProject doesn't cascade-delete the Applications that reference
+        # it, so without this they'd be orphaned in the argocd namespace.
         for team_id in set(self._project_slugs) - current_team_ids:
             slug = self._project_slugs[team_id]
+            apps_ok = self.delete_argocd_applications(slug)
             appproject_ok = self.delete_argocd_appproject(slug)
             rbac_ok = self._remove_rbac_policy_block(slug)
-            if appproject_ok and rbac_ok:
+            if apps_ok and appproject_ok and rbac_ok:
                 del self._project_slugs[team_id]
                 self._last_project_state.pop(team_id, None)
                 self._emit_project_event(team_id, "ProjectDeprovisioned", f"Argo CD project '{slug}' removed")
