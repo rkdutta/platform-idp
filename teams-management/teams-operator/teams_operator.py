@@ -130,6 +130,14 @@ class TeamsOperator:
         self.openbao_role = os.getenv("OPENBAO_ROLE", "teams-operator-admin")
         self._openbao_token: Optional[str] = None
         self._openbao_token_expiry: float = 0.0
+        # Cached accessor of the oidc/ auth mount, needed to bind identity
+        # group-aliases (Vault/OpenBao keys aliases by mount *accessor*, not
+        # mount path) — see _openbao_oidc_accessor / _ensure_openbao_group_alias.
+        # Looked up once via sys/auth rather than hardcoded, since the
+        # accessor is a random value assigned when `bao auth enable oidc`
+        # runs (bootstrap/README.md) and would otherwise need updating here
+        # by hand after every storage wipe.
+        self._openbao_oidc_accessor_cache: Optional[str] = None
 
         # Per-namespace provisioning status (see update_namespace_status).
         # Deliberately a point-in-time "did the last reconcile attempt for
@@ -882,40 +890,137 @@ class TeamsOperator:
             logger.error(f"❌ OpenBao request {method} {path} failed: {e}")
             return None
 
+    def _openbao_oidc_accessor(self) -> Optional[str]:
+        """The oidc/ auth mount's accessor (cached for the process lifetime).
+        Returns None — logging why — if the oidc method isn't enabled yet
+        (bootstrap/enable-oidc-sso.sh openbao hasn't been run) or the
+        lookup fails; callers treat that as a transient/not-yet-ready
+        condition, same as every other _openbao_request failure here."""
+        if self._openbao_oidc_accessor_cache:
+            return self._openbao_oidc_accessor_cache
+        resp = self._openbao_request("GET", "sys/auth")
+        if resp is None or not resp.ok:
+            logger.error("❌ Could not list OpenBao auth methods to find the oidc/ mount accessor")
+            return None
+        oidc = resp.json().get("oidc/")
+        if not oidc:
+            logger.error("❌ No oidc/ auth mount in OpenBao — has bootstrap/enable-oidc-sso.sh openbao been run?")
+            return None
+        self._openbao_oidc_accessor_cache = oidc["accessor"]
+        return self._openbao_oidc_accessor_cache
+
+    def _ensure_openbao_group_alias(self, group_name: str, policy_name: str) -> bool:
+        """Ensure an OpenBao external identity group named `group_name`
+        carries `policy_name`, aliased to that exact same name on the
+        oidc/ mount — so anyone in the Keycloak group of that name (e.g.
+        '{namespace}-viewer', already used for k8s RBAC and Argo CD's
+        RBAC — see _rbac_policy_block) gets `policy_name` automatically on
+        their next OIDC login via the groups claim (groups_claim=groups,
+        set up in bootstrap/README.md's OpenBao OIDC section). Mirrors the
+        manually-bootstrapped openbao-admins/argocd-admins pattern from
+        that same doc, generalized per namespace-role.
+
+        The group write is a natural upsert (name-keyed endpoint); the
+        alias write is not — OpenBao 400s on a second create for the same
+        mount+name — so the alias is checked for first."""
+        resp = self._openbao_request(
+            "PUT", f"identity/group/name/{group_name}",
+            {"type": "external", "policies": [policy_name]},
+        )
+        if resp is None or not resp.ok:
+            logger.error(
+                f"❌ Failed to ensure OpenBao identity group '{group_name}': "
+                f"{resp.status_code if resp is not None else 'no response'} "
+                f"{resp.text if resp is not None else ''}"
+            )
+            return False
+
+        resp = self._openbao_request("GET", f"identity/group/name/{group_name}")
+        if resp is None or not resp.ok:
+            logger.error(f"❌ Could not read back OpenBao identity group '{group_name}'")
+            return False
+        group = resp.json()["data"]
+        alias = group.get("alias")
+        if alias and alias.get("name") == group_name:
+            return True  # already bound, nothing else to do
+
+        accessor = self._openbao_oidc_accessor()
+        if accessor is None:
+            return False
+        resp = self._openbao_request(
+            "POST", "identity/group-alias",
+            {"name": group_name, "mount_accessor": accessor, "canonical_id": group["id"]},
+        )
+        if resp is not None and resp.ok:
+            logger.info(f"✅ Bound OpenBao group-alias '{group_name}' -> policy '{policy_name}'")
+            return True
+        logger.error(
+            f"❌ Failed to bind OpenBao group-alias '{group_name}': "
+            f"{resp.status_code if resp is not None else 'no response'} "
+            f"{resp.text if resp is not None else ''}"
+        )
+        return False
+
     def ensure_openbao_access(self, namespace: str) -> bool:
-        """Ensure `namespace` has everything a tenant pod's openbao-agent
-        sidecar needs to authenticate and get scoped KV read/write: an ACL
-        policy limited to this namespace's slice of kv-teams, a jwt auth
-        role that maps this namespace's SPIFFE IDs to that policy, and the
-        agent-config ConfigMap the sidecars mount (see
-        apps/security/tenant-guardrails's openbao-spiffe-volume-*.yaml).
-        Create-if-missing/leave-as-is-on-conflict, same semantics as
-        _apply_namespaced_templates — no drift reconciliation of an
-        already-created policy/role/ConfigMap. Returns True only if all
-        three (policy, role, ConfigMap) are confirmed OK this cycle — a
-        partial success (e.g. policy written but role failed) is exactly
-        the kind of broken-but-not-obvious state that motivated surfacing
-        this as a per-namespace "OpenBaoAccess" condition in the first
-        place, so it's reported as not-ready, not silently swallowed."""
+        """Ensure `namespace` has everything both a tenant pod's
+        openbao-agent sidecar AND a human logging in via OIDC SSO need to
+        reach this namespace's slice of kv-teams: a maintainer (full CRUD)
+        ACL policy, a read-only viewer ACL policy, a jwt auth role mapping
+        this namespace's SPIFFE IDs to the maintainer policy (workloads
+        always get full access — they need to write their own secrets),
+        and identity group-aliases mapping the "{namespace}-maintainer" /
+        "{namespace}-viewer" Keycloak groups (the same groups already used
+        for k8s RBAC and Argo CD's RBAC — see _rbac_policy_block) to those
+        same two policies. Plus the agent-config ConfigMap the sidecars
+        mount (see apps/security/tenant-guardrails's
+        openbao-spiffe-volume-*.yaml). Create-if-missing/leave-as-is-on-
+        conflict, same semantics as _apply_namespaced_templates — no drift
+        reconciliation of an already-created policy/role/ConfigMap (the
+        group-aliases are the one exception, since OpenBao itself 400s on
+        a re-create — see _ensure_openbao_group_alias). Returns True only
+        if everything is confirmed OK this cycle — a partial success is
+        exactly the kind of broken-but-not-obvious state that motivated
+        surfacing this as a per-namespace "OpenBaoAccess" condition in the
+        first place, so it's reported as not-ready, not silently
+        swallowed."""
         ok = True
 
         try:
-            with open(os.path.join(self.OPENBAO_POLICY_TEMPLATES_DIR, "team.hcl")) as f:
-                policy_hcl = f.read().replace("{{ NAMESPACE }}", namespace)
+            with open(os.path.join(self.OPENBAO_POLICY_TEMPLATES_DIR, "project-maintainer.hcl")) as f:
+                maintainer_policy_hcl = f.read().replace("{{ NAMESPACE }}", namespace)
+            with open(os.path.join(self.OPENBAO_POLICY_TEMPLATES_DIR, "project-viewer.hcl")) as f:
+                viewer_policy_hcl = f.read().replace("{{ NAMESPACE }}", namespace)
         except OSError as e:
-            logger.error(f"❌ Could not read OpenBao policy template: {e}")
+            logger.error(f"❌ Could not read OpenBao policy templates: {e}")
             return False
-        resp = self._openbao_request("PUT", f"sys/policies/acl/{namespace}-policy", {"policy": policy_hcl})
+
+        resp = self._openbao_request(
+            "PUT", f"sys/policies/acl/{namespace}-maintainer-policy", {"policy": maintainer_policy_hcl}
+        )
         if resp is None:
             return False  # already logged; nothing else in this method can succeed without OpenBao access
         if resp.ok:
-            logger.info(f"✅ Ensured OpenBao policy '{namespace}-policy'")
+            logger.info(f"✅ Ensured OpenBao policy '{namespace}-maintainer-policy'")
         else:
-            logger.error(f"❌ Failed to write OpenBao policy for '{namespace}': HTTP {resp.status_code} {resp.text}")
+            logger.error(
+                f"❌ Failed to write OpenBao maintainer policy for '{namespace}': HTTP {resp.status_code} {resp.text}"
+            )
+            ok = False
+
+        resp = self._openbao_request(
+            "PUT", f"sys/policies/acl/{namespace}-viewer-policy", {"policy": viewer_policy_hcl}
+        )
+        if resp is not None and resp.ok:
+            logger.info(f"✅ Ensured OpenBao policy '{namespace}-viewer-policy'")
+        else:
+            logger.error(
+                f"❌ Failed to write OpenBao viewer policy for '{namespace}': "
+                f"HTTP {resp.status_code if resp is not None else 'no response'} {resp.text if resp is not None else ''}"
+            )
             ok = False
 
         try:
-            with open(os.path.join(self.OPENBAO_ROLE_TEMPLATES_DIR, "team.json")) as f:
+            with open(os.path.join(self.OPENBAO_ROLE_TEMPLATES_DIR, "project-maintainer.json")) as f:
                 role_body = json.loads(f.read().replace("{{ NAMESPACE }}", namespace))
         except (OSError, json.JSONDecodeError) as e:
             logger.error(f"❌ Could not read/parse OpenBao role template: {e}")
@@ -926,6 +1031,11 @@ class TeamsOperator:
         else:
             if resp is not None:
                 logger.error(f"❌ Failed to write OpenBao role for '{namespace}': HTTP {resp.status_code} {resp.text}")
+            ok = False
+
+        if not self._ensure_openbao_group_alias(f"{namespace}-maintainer", f"{namespace}-maintainer-policy"):
+            ok = False
+        if not self._ensure_openbao_group_alias(f"{namespace}-viewer", f"{namespace}-viewer-policy"):
             ok = False
 
         try:
