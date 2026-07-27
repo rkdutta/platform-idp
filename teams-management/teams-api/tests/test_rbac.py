@@ -395,7 +395,7 @@ def test_group_reconciliation_noop_when_keycloak_disabled(db, monkeypatch):
 # --------------------------------------------------------------------------- #
 # /kubeconfig
 # --------------------------------------------------------------------------- #
-def test_kubeconfig_renders_server_and_ca(db, monkeypatch):
+def test_kubeconfig_renders_server_and_ca(db, admin, monkeypatch):
     import base64
 
     import main  # noqa: PLC0415
@@ -404,7 +404,7 @@ def test_kubeconfig_renders_server_and_ca(db, monkeypatch):
     monkeypatch.setattr(main, "K8S_API_CA_CERT", "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n")
     monkeypatch.setattr(main, "KEYCLOAK_CA_CERT", "-----BEGIN CERTIFICATE-----\nfakekc\n-----END CERTIFICATE-----\n")
 
-    resp = main.get_kubeconfig()
+    resp = main.get_kubeconfig(admin)
     body = resp.body.decode()
     assert "server: https://127.0.0.1:50706" in body
     assert "command: kubectl" in body
@@ -426,7 +426,7 @@ def test_kubeconfig_renders_server_and_ca(db, monkeypatch):
     assert base64.b64decode(kc_encoded).decode() == main.KEYCLOAK_CA_CERT
 
 
-def test_kubeconfig_fails_loudly_when_unconfigured(db, monkeypatch):
+def test_kubeconfig_fails_loudly_when_unconfigured(db, admin, monkeypatch):
     import main  # noqa: PLC0415
 
     monkeypatch.setattr(main, "K8S_API_SERVER", "")
@@ -434,11 +434,11 @@ def test_kubeconfig_fails_loudly_when_unconfigured(db, monkeypatch):
     monkeypatch.setattr(main, "KEYCLOAK_CA_CERT", "")
 
     with pytest.raises(HTTPException) as e:
-        main.get_kubeconfig()
+        main.get_kubeconfig(admin)
     assert e.value.status_code == 503
 
 
-def test_kubeconfig_fails_loudly_when_only_keycloak_ca_missing(db, monkeypatch):
+def test_kubeconfig_fails_loudly_when_only_keycloak_ca_missing(db, admin, monkeypatch):
     """The kubelogin exec stanza needs Keycloak's CA too — partially configured
     (k8s side set, Keycloak side not) must still 503, not serve a kubeconfig
     that can authenticate to the cluster but never actually get a token."""
@@ -449,8 +449,67 @@ def test_kubeconfig_fails_loudly_when_only_keycloak_ca_missing(db, monkeypatch):
     monkeypatch.setattr(main, "KEYCLOAK_CA_CERT", "")
 
     with pytest.raises(HTTPException) as e:
-        main.get_kubeconfig()
+        main.get_kubeconfig(admin)
     assert e.value.status_code == 503
+
+
+def _configure_kubeconfig(main, monkeypatch):
+    monkeypatch.setattr(main, "K8S_API_SERVER", "https://127.0.0.1:50706")
+    monkeypatch.setattr(main, "K8S_API_CA_CERT", "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n")
+    monkeypatch.setattr(main, "KEYCLOAK_CA_CERT", "-----BEGIN CERTIFICATE-----\nfakekc\n-----END CERTIFICATE-----\n")
+
+
+def test_kubeconfig_has_a_context_per_visible_namespace(db, alice, monkeypatch):
+    """A bare `kubectl get pods` (no -n) defaults to whatever namespace
+    current-context points at — without a per-namespace context, that's
+    always the empty "default" namespace, indistinguishable from "RBAC is
+    broken" even when it isn't. Each namespace the caller can see must get
+    its own named, namespace-scoped context, switchable via
+    `kubectl config use-context <namespace>`."""
+    import main  # noqa: PLC0415
+
+    _configure_kubeconfig(main, monkeypatch)
+    _project(db, "sss", "t-sss")
+    db.add_namespace("t-sss", "project-sss-prod")
+    db.set_grant("project-sss-default", "alice-id", "alice", "viewer")
+    db.set_grant("project-sss-prod", "alice-id", "alice", "maintainer")
+
+    body = main.get_kubeconfig(alice).body.decode()
+
+    assert "- name: project-sss-default" in body
+    assert "- name: project-sss-prod" in body
+    assert "- name: teams" in body
+    # current-context picks the alphabetically-first visible namespace, not
+    # the no-namespace fallback.
+    assert "current-context: project-sss-default" in body
+
+
+def test_kubeconfig_falls_back_to_generic_context_with_no_access(db, bob, monkeypatch):
+    """A user who can't see any namespace yet still gets a usable (if
+    namespace-less) kubeconfig, not an error or an empty contexts list."""
+    import main  # noqa: PLC0415
+
+    _configure_kubeconfig(main, monkeypatch)
+
+    body = main.get_kubeconfig(bob).body.decode()
+    assert "- name: teams" in body
+    assert "current-context: teams" in body
+    assert "namespace:" not in body
+
+
+def test_kubeconfig_admin_sees_every_namespace(db, admin, monkeypatch):
+    """Admins aren't scoped by grants (authz.visible_namespaces returns None
+    for them), so their kubeconfig falls back to every namespace that
+    exists, not zero."""
+    import main  # noqa: PLC0415
+
+    _configure_kubeconfig(main, monkeypatch)
+    _project(db, "sss", "t-sss")
+    _project(db, "mmm", "t-mmm")
+
+    body = main.get_kubeconfig(admin).body.decode()
+    assert "- name: project-sss-default" in body
+    assert "- name: project-mmm-default" in body
 
 
 def test_admin_is_unrestricted(db, admin):

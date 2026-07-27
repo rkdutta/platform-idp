@@ -531,11 +531,7 @@ clusters:
       server: {server}
       certificate-authority-data: {ca_data}
 contexts:
-  - name: teams
-    context:
-      cluster: teams
-      user: oidc
-current-context: teams
+{contexts}current-context: {current_context}
 users:
   - name: oidc
     user:
@@ -555,10 +551,47 @@ users:
 """
 
 
+def _kubeconfig_contexts(request: Request) -> tuple[str, str]:
+    """Named kubectl contexts for the caller's own kubeconfig: a generic
+    `teams` context with no namespace set (for `-A`/explicit `-n` use, and
+    the fallback when the caller can't see any namespace yet), plus one
+    named-after-the-namespace context per namespace the caller can actually
+    see — each with `namespace:` pre-set, so `kubectl config use-context
+    <namespace>` just works with no `-n` needed on every command. Without
+    this, a bare `kubectl get pods` silently looks in the `default`
+    namespace (empty, no access) rather than the caller's own — indistinguishable
+    from "RBAC is broken" even when it isn't.
+
+    Returns (contexts_yaml_block, current_context_name); the yaml block's
+    entries always end in a newline so the caller can concatenate it
+    directly above a `current-context:` line with no extra blank line.
+    """
+    if is_admin(request):
+        namespaces = sorted(store.all_namespaces())
+    else:
+        visible = authz.visible_namespaces(request)
+        namespaces = sorted(visible) if visible else []
+
+    blocks = ["  - name: teams\n    context:\n      cluster: teams\n      user: oidc\n"]
+    for ns in namespaces:
+        blocks.append(
+            f"  - name: {ns}\n"
+            f"    context:\n"
+            f"      cluster: teams\n"
+            f"      user: oidc\n"
+            f"      namespace: {ns}\n"
+        )
+    current_context = namespaces[0] if namespaces else "teams"
+    return "".join(blocks), current_context
+
+
 @app.get("/kubeconfig")
-def get_kubeconfig():
+def get_kubeconfig(request: Request):
     """A ready-to-use kubeconfig: cluster connection info + a `kubectl
-    oidc-login` `exec:` stanza. See _KUBECONFIG_TEMPLATE.
+    oidc-login` `exec:` stanza, plus one named context per namespace the
+    caller can see (see _kubeconfig_contexts) — generated per-caller, unlike
+    a single static file every user would otherwise get identically. See
+    _KUBECONFIG_TEMPLATE.
 
     Requires K8S_API_SERVER/K8S_API_CA_CERT/KEYCLOAK_CA_CERT to be configured
     (see main.py's top-level constants and bootstrap/README.md) — without them
@@ -571,9 +604,12 @@ def get_kubeconfig():
             detail="Cluster connection info not configured "
             "(K8S_API_SERVER/K8S_API_CA_CERT/KEYCLOAK_CA_CERT)",
         )
+    contexts, current_context = _kubeconfig_contexts(request)
     body = _KUBECONFIG_TEMPLATE.format(
         server=K8S_API_SERVER,
         ca_data=base64.b64encode(K8S_API_CA_CERT.encode()).decode(),
+        contexts=contexts,
+        current_context=current_context,
         issuer=OIDC_ISSUER,
         keycloak_ca_data=base64.b64encode(KEYCLOAK_CA_CERT.encode()).decode(),
     )
