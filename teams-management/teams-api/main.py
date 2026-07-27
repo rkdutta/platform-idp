@@ -208,85 +208,6 @@ def _delete_k8s_groups(namespace: str) -> None:
         except KeycloakAdminError as e:
             logger.error("Could not delete k8s RBAC group for %s/%s: %s", namespace, role, e)
 
-
-# --- Argo CD project RBAC via Keycloak groups --------------------------------
-# teams-operator's argocd-rbac-cm policy block for each project binds
-# role:<project>-viewer/-maintainer to Group subjects named
-# project-<project>-viewer/-maintainer (see ensure_argocd_rbac_policy in
-# teams_operator.py) - but it only ever CREATES those two groups
-# (ensure_keycloak_groups -> POST /internal/projects/{id}/keycloak-groups
-# below), it never decides who's actually a member. That decision belongs
-# here, same as the per-namespace k8s RBAC groups above: aggregate this
-# project's namespace-level access (owners + explicit grants, exactly what
-# internal_access() already computes) up to one project-wide viewer/
-# maintainer membership, since Argo CD's project access has no per-namespace
-# granularity of its own.
-
-def _argocd_project_group_name(argocd_project: str, role: str) -> str:
-    return f"project-{argocd_project}-{role}"
-
-
-def _project_role_members(project: dict) -> Dict[str, Set[str]]:
-    """Desired Argo CD project viewer/maintainer membership: the union, across
-    every namespace of this project, of who holds each role there (owners
-    already count as maintainer on every namespace - see internal_access).
-    Maintainer wins if a user shows up as viewer via one namespace and
-    maintainer via another, since maintainer is a strict superset there."""
-    viewer: Set[str] = set()
-    maintainer: Set[str] = set()
-    access = internal_access()["namespaces"]
-    for ns in project.get("namespaces") or []:
-        roles = access.get(ns, {})
-        viewer.update(roles.get("viewer", []))
-        maintainer.update(roles.get("maintainer", []))
-    viewer -= maintainer
-    return {"viewer": viewer, "maintainer": maintainer}
-
-
-def _sync_project_groups(project_id: str) -> None:
-    """Best-effort mirror of a project's aggregate namespace access into its
-    two Argo CD RBAC Keycloak groups. Never raises, same tolerance as
-    _sync_group_membership - _reconcile_argocd_project_groups_once is the
-    self-healing backstop for whatever this misses."""
-    if not keycloak.enabled:
-        return
-    project = store.get_project(project_id)
-    if not project:
-        return
-    slug = argocd_project_name(project["name"])
-    desired = _project_role_members(project)
-    for role in ("viewer", "maintainer"):
-        group = _argocd_project_group_name(slug, role)
-        try:
-            have = set(keycloak.group_members(group))
-        except KeycloakAdminError as e:
-            logger.error("Could not read Argo CD project group members for %s: %s", group, e)
-            continue
-        for username in desired[role] - have:
-            try:
-                keycloak.add_user_to_group(username, group)
-            except KeycloakAdminError as e:
-                logger.error("Argo CD project group sync failed (add %s -> %s): %s", username, group, e)
-        for username in have - desired[role]:
-            try:
-                keycloak.remove_user_from_group(username, group)
-            except KeycloakAdminError as e:
-                logger.error("Argo CD project group sync failed (remove %s <- %s): %s", username, group, e)
-
-
-def _reconcile_argocd_project_groups_once() -> None:
-    """One reconciliation pass across every project - the self-healing
-    backstop for _sync_project_groups, same role _reconcile_k8s_groups_once
-    plays for the per-namespace groups."""
-    if not keycloak.enabled:
-        return
-    try:
-        for project in store.list_projects():
-            _sync_project_groups(project["id"])
-    except Exception as e:  # noqa: BLE001 - a bad cycle must not kill the loop
-        logger.error("Argo CD project RBAC group reconciliation cycle failed: %s", e)
-
-
 GROUP_RECONCILE_INTERVAL = int(os.getenv("GROUP_RECONCILE_INTERVAL", "60"))
 
 
@@ -320,15 +241,13 @@ def _reconcile_k8s_groups_once() -> None:
 
 
 async def _group_reconciliation_loop() -> None:
-    """Runs _reconcile_k8s_groups_once and _reconcile_argocd_project_groups_once
-    forever, spaced GROUP_RECONCILE_INTERVAL apart — the self-healing backstop
-    for the best-effort syncs above. One bad cycle (e.g. Keycloak transiently
-    unreachable) just retries next interval.
+    """Runs _reconcile_k8s_groups_once forever, spaced GROUP_RECONCILE_INTERVAL
+    apart — the self-healing backstop for the best-effort syncs above. One bad
+    cycle (e.g. Keycloak transiently unreachable) just retries next interval.
     """
     while True:
         await asyncio.sleep(GROUP_RECONCILE_INTERVAL)
         _reconcile_k8s_groups_once()
-        _reconcile_argocd_project_groups_once()
 
 
 @app.on_event("startup")
@@ -696,7 +615,6 @@ async def create_project(request: Request, project: ProjectCreate):
         if creator_id:
             store.add_owner(project_id, creator_id, caller_name(request))
             _sync_group_membership(ns, "maintainer", caller_name(request), add=True)
-            _sync_project_groups(project_id)
             created = store.get_project(project_id)
 
     return Project(**_with_owners(created))
@@ -715,9 +633,13 @@ async def get_project(request: Request, project_id: str):
 async def delete_project(request: Request, project_id: str):
     """Delete a project (admin only). Namespaces, owners, grants and source
     repos cascade away; the operator prunes the Kubernetes namespaces and
-    this project's Argo CD AppProject + argocd-rbac-cm policy block on its
-    next poll (it needs the argocd_project slug from its own tracking state,
-    since the DB record is gone by the time it notices)."""
+    this project's Argo CD Applications + AppProject + argocd-rbac-cm policy
+    block on its next poll (it needs the argocd_project slug from its own
+    tracking state, since the DB record is gone by the time it notices).
+    No dedicated Argo CD Keycloak groups to clean up here — the rbac-cm
+    policy block's `g,` lines bind directly to the project's namespaces'
+    own k8s RBAC groups (see teams_operator.py's _rbac_policy_block), which
+    _delete_k8s_groups below already removes."""
     project = store.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -726,13 +648,6 @@ async def delete_project(request: Request, project_id: str):
     store.record(caller_name(request), "project.delete", project["name"])
     for ns in namespaces:
         _delete_k8s_groups(ns)
-    slug = argocd_project_name(project["name"])
-    if keycloak.enabled:
-        for suffix in ("viewer", "maintainer"):
-            try:
-                keycloak.delete_group(f"project-{slug}-{suffix}")
-            except KeycloakAdminError as e:
-                logger.error("Could not delete Argo CD %s group for project %s: %s", suffix, project["name"], e)
     return {"message": f"Project '{project['name']}' deleted successfully"}
 
 
@@ -768,10 +683,9 @@ def add_owner(request: Request, project_id: str, body: OwnerAdd):
     # Ownership confers maintainer on every namespace of the project (see
     # authz.namespace_role) — mirror that into each one's maintainer k8s
     # group now, not just whichever namespace happens to exist by the next
-    # reconciliation cycle. Same for the Argo CD project's maintainer group.
+    # reconciliation cycle.
     for ns in store.namespaces_of(project_id):
         _sync_group_membership(ns, "maintainer", user["username"], add=True)
-    _sync_project_groups(project_id)
 
     return store.owners_of(project_id)
 
@@ -800,7 +714,6 @@ def remove_owner(request: Request, project_id: str, user_id: str):
             # explicit grant on this namespace still justifies it.
             if store.grant_role(ns, user_id) != "maintainer":
                 _sync_group_membership(ns, "maintainer", username, add=False)
-        _sync_project_groups(project_id)
 
     return store.owners_of(project_id)
 
@@ -830,7 +743,6 @@ async def order_namespace(request: Request, project_id: str, order: NamespaceOrd
     # that into the new namespace's maintainer k8s group immediately.
     for o in store.owners_of(project_id):
         _sync_group_membership(ns, "maintainer", o["username"], add=True)
-    _sync_project_groups(project_id)
 
     return Project(**_with_owners(store.get_project(project_id)))
 
@@ -852,7 +764,6 @@ async def delete_namespace(request: Request, project_id: str, namespace: str):
     store.remove_namespace(namespace)
     store.record(caller_name(request), "namespace.delete", namespace, project["name"])
     _delete_k8s_groups(namespace)
-    _sync_project_groups(project_id)
     return Project(**_with_owners(store.get_project(project_id)))
 
 
@@ -1073,8 +984,6 @@ def grant_access(request: Request, grant: AccessGrant):
         if old_role and old_role != grant.role:
             _sync_group_membership(grant.namespace, old_role, user["username"], add=False)
         _sync_group_membership(grant.namespace, grant.role, user["username"], add=True)
-    if project:
-        _sync_project_groups(project["id"])
 
     return {
         "message": f"Granted {user['username']} {grant.role} on {grant.namespace}"
@@ -1098,8 +1007,6 @@ def revoke_access(request: Request, grant: AccessGrant):
         project = store.project_for_namespace(grant.namespace)
         if not (project and store.is_owner(user_id, project["id"])):
             _sync_group_membership(grant.namespace, old_role, user["username"], add=False)
-        if project:
-            _sync_project_groups(project["id"])
 
     return {"message": f"Revoked access to {grant.namespace}"}
 
@@ -1120,43 +1027,6 @@ def internal_teams():
         }
         for p in store.list_projects()
     ]
-
-
-@app.post(
-    "/internal/projects/{project_id}/keycloak-groups",
-    dependencies=[Depends(require_operator)],
-)
-def internal_ensure_project_groups(project_id: str):
-    """Ensure this project's Argo CD viewer/maintainer Keycloak groups exist
-    (idempotent create-if-missing via keycloak.ensure_group). Called by
-    teams-operator's ensure_keycloak_groups reconcile step — kept here (not
-    done directly by the operator) so the Keycloak Admin API credential stays
-    confined to teams-api, the one place that already safely holds it.
-
-    Named `project-<project>-viewer`/`-maintainer` (e.g. `project-demo-go-
-    viewer`) — distinct from the per-namespace `{namespace}-viewer`/
-    `-maintainer` k8s RBAC groups teams-operator manages elsewhere
-    (sync_namespace_rbac): those are namespace-shaped (they always carry a
-    trailing `-default`/`-<label>` segment), these are project-shaped (bare
-    slug, no such suffix), so the two naming schemes never collide even
-    though both now share the `project-` prefix. Different axis regardless
-    (Argo CD project access vs. in-cluster namespace RBAC).
-    """
-    project = store.get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    if not keycloak.enabled:
-        raise HTTPException(status_code=503, detail="Keycloak unavailable")
-    slug = argocd_project_name(project["name"])
-    viewer_group = f"project-{slug}-viewer"
-    maintainer_group = f"project-{slug}-maintainer"
-    try:
-        keycloak.ensure_group(viewer_group)
-        keycloak.ensure_group(maintainer_group)
-    except KeycloakAdminError as e:
-        logger.error("ensure project groups failed for '%s': %s", project["name"], e)
-        raise HTTPException(status_code=503, detail="Keycloak unavailable")
-    return {"viewer_group": viewer_group, "maintainer_group": maintainer_group}
 
 
 @app.get("/internal/access", dependencies=[Depends(require_operator)])
