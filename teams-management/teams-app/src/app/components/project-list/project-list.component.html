@@ -132,6 +132,16 @@
               </span>
               <!-- The caller's own role here, so it's obvious what they may do. -->
               <span class="ns-role" *ngIf="authService.roleIn(ns) as role">{{ role }}</span>
+              <a
+                *ngIf="nsOpenbaoUrl(ns) as burl"
+                class="clink ns-openbao-link"
+                [href]="burl"
+                target="_blank"
+                rel="noopener noreferrer"
+                [title]="'Open ' + ns + ' secrets in OpenBao (OIDC login required)'"
+              >
+                Secrets ↗
+              </a>
               <button
                 *ngIf="canManageProject(project)"
                 class="btn btn-danger btn-sm btn-icon ns-delete"

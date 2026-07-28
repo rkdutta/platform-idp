@@ -466,6 +466,17 @@ export class ProjectListComponent implements OnInit, OnDestroy {
       : null;
   }
 
+  // Deep link into OpenBao's UI, landing directly on this namespace's KV
+  // secrets (kv-teams/<namespace>/). OpenBao's own OIDC login decides who can
+  // actually see anything there — a maintainer/viewer grant on this namespace
+  // maps 1:1 to an OpenBao policy via the identity group-alias teams-operator
+  // provisions (ensure_openbao_access; see docs/openbao-spiffe-access.md).
+  nsOpenbaoUrl(namespace: string): string | null {
+    return namespace
+      ? `${environment.openbaoUrl}/ui/vault/secrets/kv-teams/list/${namespace}/`
+      : null;
+  }
+
   // Deep link into the Argo Rollouts dashboard for a given app, or null if it's
   // not a Rollout / the namespace is unknown (the dashboard only shows Rollouts).
   rolloutDashboardUrl(app: Application): string | null {

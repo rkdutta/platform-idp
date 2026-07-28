@@ -9,6 +9,12 @@ export const environment = {
   // or maintainer can create/manage Applications directly (Argo CD's own
   // RBAC, synced from here, decides what they can actually do there).
   argocdUrl: "http://argocd.127.0.0.1.sslip.io:8080",
+  // Base URL of the OpenBao UI - each namespace card deep-links to
+  // <openbaoUrl>/ui/vault/secrets/kv-teams/list/<namespace>/. OpenBao's own
+  // OIDC login (see bootstrap/README.md) plus the per-namespace maintainer/
+  // viewer policy + identity group-alias teams-operator provisions (see
+  // docs/openbao-spiffe-access.md) decide what the caller actually sees there.
+  openbaoUrl: "https://openbao.127.0.0.1.sslip.io:8443",
   keycloak: {
     // same as above, but with keycloak forward port
     url: "http://platform-auth.127.0.0.1.sslip.io",
