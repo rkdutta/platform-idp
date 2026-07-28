@@ -104,7 +104,7 @@ class TeamsOperator:
         # + an openbao-agent sidecar (see apps/security/tenant-guardrails's
         # openbao-spiffe-volume-*.yaml / openbao-sidecar-*.yaml mutations) that
         # logs into a per-namespace JWT auth role scoped to that namespace's
-        # slice of the kv-teams KV mount. This operator creates that role (plus
+        # slice of the kv KV mount. This operator creates that role (plus
         # its policy and the sidecars' agent-config ConfigMap) per namespace —
         # same ConfigMap-mounted-template approach as quotas/limits/netpols
         # above, except these templates aren't Kubernetes objects: the policy/
@@ -964,7 +964,7 @@ class TeamsOperator:
     def ensure_openbao_access(self, namespace: str) -> bool:
         """Ensure `namespace` has everything both a tenant pod's
         openbao-agent sidecar AND a human logging in via OIDC SSO need to
-        reach this namespace's slice of kv-teams: a maintainer (full CRUD)
+        reach this namespace's slice of kv: a maintainer (full CRUD)
         ACL policy, a read-only viewer ACL policy, a jwt auth role mapping
         this namespace's SPIFFE IDs to the maintainer policy (workloads
         always get full access — they need to write their own secrets),
@@ -1060,6 +1060,91 @@ class TeamsOperator:
         except Exception as e:
             logger.error(f"❌ Unexpected error creating ConfigMap '{self.OPENBAO_AGENT_CONFIGMAP}' in '{namespace}': {e}")
             ok = False
+
+        return ok
+
+    def _delete_kv_tree(self, path: str) -> bool:
+        """Recursively delete every secret under kv/<path>/ - KV v2 has no
+        native "delete this whole prefix" call, so list the path then delete
+        each leaf, recursing into sub-"directories" (a LIST entry ending in
+        '/' is always a nested list, never a leaf secret - same convention
+        the OpenBao/Vault CLI and UI use). DELETE .../metadata/<key> removes
+        every version of that secret outright (unlike .../data/<key>, a
+        soft/recoverable delete of just the latest version) - full teardown
+        is the point here, not a reversible one. A 404 on the initial list
+        means the path never had anything in it - not an error."""
+        resp = self._openbao_request("GET", f"kv/metadata/{path}?list=true")
+        if resp is None:
+            return False
+        if resp.status_code == 404:
+            return True
+        if not resp.ok:
+            logger.error(f"❌ Could not list OpenBao kv/{path} for cleanup: HTTP {resp.status_code} {resp.text}")
+            return False
+
+        ok = True
+        for key in resp.json().get("data", {}).get("keys", []):
+            if key.endswith("/"):
+                ok = self._delete_kv_tree(f"{path}/{key.rstrip('/')}") and ok
+                continue
+            resp2 = self._openbao_request("DELETE", f"kv/metadata/{path}/{key}")
+            if resp2 is not None and (resp2.ok or resp2.status_code == 404):
+                logger.info(f"✅ Deleted OpenBao secret 'kv/{path}/{key}'")
+            else:
+                logger.error(
+                    f"❌ Failed to delete OpenBao secret 'kv/{path}/{key}': "
+                    f"HTTP {resp2.status_code if resp2 is not None else 'no response'} "
+                    f"{resp2.text if resp2 is not None else ''}"
+                )
+                ok = False
+        return ok
+
+    def delete_openbao_access(self, namespace: str) -> bool:
+        """Tear down everything ensure_openbao_access ever created for
+        `namespace`, once its project is deleted: every secret actually
+        stored under kv/<namespace>/*, the two ACL policies, the workload
+        jwt auth role, and the two identity groups (deleting a group also
+        removes its group-alias - there's no separate alias cleanup call).
+        Without this, a deleted project's secrets and the access-control
+        objects around them linger in OpenBao forever with no UI path back
+        to them - the exact gap namespace deletion left for every other
+        OpenBao object until now. Best-effort like every other OpenBao call
+        here: a transient failure is logged and reported, not raised, so it
+        never blocks the k8s namespace deletion itself."""
+        ok = self._delete_kv_tree(namespace)
+
+        resp = self._openbao_request("DELETE", f"auth/jwt/role/{namespace}")
+        if resp is not None and (resp.ok or resp.status_code == 404):
+            logger.info(f"✅ Deleted OpenBao jwt auth role '{namespace}'")
+        else:
+            logger.error(
+                f"❌ Failed to delete OpenBao jwt auth role '{namespace}': "
+                f"HTTP {resp.status_code if resp is not None else 'no response'} {resp.text if resp is not None else ''}"
+            )
+            ok = False
+
+        for suffix in ("maintainer", "viewer"):
+            resp = self._openbao_request("DELETE", f"sys/policies/acl/{namespace}-{suffix}-policy")
+            if resp is not None and (resp.ok or resp.status_code == 404):
+                logger.info(f"✅ Deleted OpenBao policy '{namespace}-{suffix}-policy'")
+            else:
+                logger.error(
+                    f"❌ Failed to delete OpenBao policy '{namespace}-{suffix}-policy': "
+                    f"HTTP {resp.status_code if resp is not None else 'no response'} "
+                    f"{resp.text if resp is not None else ''}"
+                )
+                ok = False
+
+            resp = self._openbao_request("DELETE", f"identity/group/name/{namespace}-{suffix}")
+            if resp is not None and (resp.ok or resp.status_code == 404):
+                logger.info(f"✅ Deleted OpenBao identity group '{namespace}-{suffix}'")
+            else:
+                logger.error(
+                    f"❌ Failed to delete OpenBao identity group '{namespace}-{suffix}': "
+                    f"HTTP {resp.status_code if resp is not None else 'no response'} "
+                    f"{resp.text if resp is not None else ''}"
+                )
+                ok = False
 
         return ok
 
@@ -1235,7 +1320,16 @@ class TeamsOperator:
             return False
     
     def delete_namespace(self, namespace_name: str, team_name: str, team_id: str) -> bool:
-        """Delete a Kubernetes namespace when team is removed"""
+        """Delete a Kubernetes namespace when team is removed, and tear down
+        everything this operator ever provisioned for it in OpenBao - secrets,
+        policies, the jwt role, identity groups (see delete_openbao_access).
+        Two independent systems: OpenBao cleanup runs regardless of which k8s
+        outcome below is hit, including "already deleted" (a previous cycle
+        may have removed the namespace but failed partway through OpenBao
+        cleanup, e.g. a transient OpenBao outage) - only the two real k8s
+        error paths short-circuit past it, since retrying next cycle covers
+        both halves anyway."""
+        openbao_ok = self.delete_openbao_access(namespace_name)
         try:
             self.k8s_core_v1.delete_namespace(name=namespace_name)
             logger.info(f"🗑️ Deleted namespace '{namespace_name}' for removed team '{team_name}'")
@@ -1245,11 +1339,11 @@ class TeamsOperator:
             # never reaching the UI. See _emit_event.
             self._emit_event(self.OPERATOR_NAMESPACE, namespace_name, team_id,
                               "NamespaceDeleted", f"Namespace deleted for team '{team_name}'")
-            return True
+            return openbao_ok
         except ApiException as e:
             if e.status == 404:  # Namespace doesn't exist
                 logger.warning(f"⚠️ Namespace '{namespace_name}' not found (already deleted?)")
-                return True
+                return openbao_ok
             else:
                 logger.error(f"❌ Failed to delete namespace '{namespace_name}': {e}")
                 return False

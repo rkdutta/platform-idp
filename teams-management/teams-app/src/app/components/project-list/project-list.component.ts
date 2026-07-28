@@ -467,22 +467,25 @@ export class ProjectListComponent implements OnInit, OnDestroy {
   }
 
   // Deep link into OpenBao's UI, landing directly on the "create a new
-  // secret" form for this namespace's KV path (kv-teams/<namespace>/...),
-  // not the list view — a brand-new project has nothing under its path yet,
-  // and the list view's empty state reads as a broken/error page ("unable to
-  // find secret... try going back to the root"). The create form is always
-  // actionable regardless of whether anything exists yet. Trailing slash
-  // pre-fills the path as a directory prefix (matching the ACL policy's own
-  // "kv-teams/data/<namespace>/*" shape, which requires a name under the
-  // namespace, not a secret literally named after it) rather than the
-  // literal final path, so the user only has to type the secret's name.
+  // secret" form for this namespace's KV path (kv/<namespace>/...), not the
+  // list view — a brand-new project has nothing under its path yet, and the
+  // list view's empty state reads as a broken/error page ("unable to find
+  // secret... try going back to the root"). The create form is always
+  // actionable regardless of whether anything exists yet. No trailing slash:
+  // confirmed live that OpenBao's create route rejects a path ending in "/"
+  // outright ("The secret path may not end in /") rather than treating it as
+  // a directory prefix — the bare namespace name is just the pre-filled
+  // starting value in an editable field, so the user still has to type a
+  // name after it before saving (the ACL policy only grants
+  // "kv/data/<namespace>/*", a name *under* the namespace, never the
+  // namespace path itself).
   // OpenBao's own OIDC login decides who can actually save anything there —
   // a maintainer/viewer grant on this namespace maps 1:1 to an OpenBao
   // policy via the identity group-alias teams-operator provisions
   // (ensure_openbao_access; see docs/openbao-spiffe-access.md).
   nsOpenbaoUrl(namespace: string): string | null {
     return namespace
-      ? `${environment.openbaoUrl}/ui/vault/secrets/kv-teams/create/${namespace}/`
+      ? `${environment.openbaoUrl}/ui/vault/secrets/kv/create/${namespace}`
       : null;
   }
 
