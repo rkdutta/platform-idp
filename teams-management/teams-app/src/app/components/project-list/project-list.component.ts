@@ -466,14 +466,23 @@ export class ProjectListComponent implements OnInit, OnDestroy {
       : null;
   }
 
-  // Deep link into OpenBao's UI, landing directly on this namespace's KV
-  // secrets (kv-teams/<namespace>/). OpenBao's own OIDC login decides who can
-  // actually see anything there — a maintainer/viewer grant on this namespace
-  // maps 1:1 to an OpenBao policy via the identity group-alias teams-operator
-  // provisions (ensure_openbao_access; see docs/openbao-spiffe-access.md).
+  // Deep link into OpenBao's UI, landing directly on the "create a new
+  // secret" form for this namespace's KV path (kv-teams/<namespace>/...),
+  // not the list view — a brand-new project has nothing under its path yet,
+  // and the list view's empty state reads as a broken/error page ("unable to
+  // find secret... try going back to the root"). The create form is always
+  // actionable regardless of whether anything exists yet. Trailing slash
+  // pre-fills the path as a directory prefix (matching the ACL policy's own
+  // "kv-teams/data/<namespace>/*" shape, which requires a name under the
+  // namespace, not a secret literally named after it) rather than the
+  // literal final path, so the user only has to type the secret's name.
+  // OpenBao's own OIDC login decides who can actually save anything there —
+  // a maintainer/viewer grant on this namespace maps 1:1 to an OpenBao
+  // policy via the identity group-alias teams-operator provisions
+  // (ensure_openbao_access; see docs/openbao-spiffe-access.md).
   nsOpenbaoUrl(namespace: string): string | null {
     return namespace
-      ? `${environment.openbaoUrl}/ui/vault/secrets/kv-teams/list/${namespace}/`
+      ? `${environment.openbaoUrl}/ui/vault/secrets/kv-teams/create/${namespace}/`
       : null;
   }
 
