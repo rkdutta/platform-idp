@@ -570,8 +570,13 @@ class TeamsOperator:
         every other Event here) so it surfaces in the Teams portal's
         per-project activity feed (events_reader.py's cluster-wide label
         query) alongside this project's per-namespace events, even though
-        there's no single owning namespace to attach it to. Stored in this
-        operator's own namespace, same reasoning as _emit_cluster_event."""
+        there's no single owning namespace to attach it to. Stored in the
+        argocd namespace, co-located with the AppProject it references —
+        core/v1 Events require metadata.namespace == involvedObject.namespace
+        (verified against the API), so this can't live in the operator's own
+        namespace: that mismatch is a hard 422 ('does not match
+        event.namespace'). Where it's stored doesn't affect the portal feed,
+        which reads Events by label cluster-wide (events_reader.py)."""
         now = datetime.now(timezone.utc)
         body = client.CoreV1Event(
             metadata=client.V1ObjectMeta(
@@ -591,7 +596,7 @@ class TeamsOperator:
             count=1,
         )
         try:
-            self.k8s_core_v1.create_namespaced_event(self.OPERATOR_NAMESPACE, body)
+            self.k8s_core_v1.create_namespaced_event(self.ARGOCD_NAMESPACE, body)
         except ApiException as e:
             logger.error(f"❌ Failed to emit Event ({reason}) for project '{team_id}': {e}")
         except Exception as e:
@@ -1152,26 +1157,39 @@ class TeamsOperator:
         self, event_namespace: str, involved_namespace: str, team_id: Optional[str],
         reason: str, message: str, healthy: bool = True,
     ) -> None:
-        """Emit a Kubernetes Event whose involvedObject is the
-        `involved_namespace` Namespace, stored in `event_namespace` — the
-        Teams portal reads these (via teams-api's events_reader.py, a
-        cluster-wide query by the team-id label) to show a per-team
-        activity feed. `event_namespace` is normally the same as
-        `involved_namespace` (so `kubectl get events -n <ns>` keeps working
-        naturally), EXCEPT when the involved namespace is being/has been
-        deleted and can't hold it — an Event stored *in* a namespace is
-        cascade-deleted along with it, so delete_namespace passes
-        self.OPERATOR_NAMESPACE instead. Best-effort: a failure to emit an
-        Event must never break reconciliation, so this only logs on error.
-        Shared low-level primitive for namespace lifecycle events
-        (create_namespace/delete_namespace) and provisioning-condition
+        """Emit a Kubernetes Event about the `involved_namespace` Namespace,
+        read by the Teams portal (via teams-api's events_reader.py, a
+        cluster-wide query by the team-id label) for a per-team activity feed.
+
+        Core/v1 Events are validated so metadata.namespace ==
+        involvedObject.namespace (and a cluster-scoped involvedObject — empty
+        namespace — must be stored in `default`); both rules are enforced by
+        the apiserver, verified live. Normally `event_namespace` equals
+        `involved_namespace`, so the Event is co-located in that namespace and
+        `kubectl get events -n <ns>` works naturally. When the caller passes a
+        DIFFERENT `event_namespace` (delete_namespace does — the namespace is
+        being torn down, and an Event stored inside it would be cascade-deleted
+        before reaching the UI), the Namespace is referenced cluster-scoped (it
+        IS a cluster-scoped object) and the Event stored in `default`, the only
+        namespace the apiserver allows for a cluster-scoped involvedObject.
+        Best-effort: a failure to emit must never break reconciliation, so this
+        only logs on error. Shared low-level primitive for namespace lifecycle
+        events (create_namespace/delete_namespace) and provisioning-condition
         transitions (update_namespace_status)."""
         now = datetime.now(timezone.utc)
         labels = {self.EVENT_TEAM_LABEL: team_id} if team_id else {}
+        if event_namespace == involved_namespace:
+            store_namespace = involved_namespace
+            involved_object_namespace = involved_namespace
+        else:
+            # Can't co-locate (the namespace is going away): reference the
+            # Namespace cluster-scoped and store the Event in `default`.
+            store_namespace = "default"
+            involved_object_namespace = None
         body = client.CoreV1Event(
             metadata=client.V1ObjectMeta(generate_name=f"teams-operator-{involved_namespace}-", labels=labels),
             involved_object=client.V1ObjectReference(
-                kind="Namespace", name=involved_namespace, namespace=involved_namespace, api_version="v1"
+                kind="Namespace", name=involved_namespace, namespace=involved_object_namespace, api_version="v1"
             ),
             reason=reason,
             message=message,
@@ -1182,7 +1200,7 @@ class TeamsOperator:
             count=1,
         )
         try:
-            self.k8s_core_v1.create_namespaced_event(event_namespace, body)
+            self.k8s_core_v1.create_namespaced_event(store_namespace, body)
         except ApiException as e:
             logger.error(f"❌ Failed to emit Event ({reason}) for '{involved_namespace}': {e}")
         except Exception as e:
@@ -1204,8 +1222,11 @@ class TeamsOperator:
         team-id label (there's no team), so this can't appear in the
         per-team activity feed - it's still emitted (satisfies "every
         cluster action gets an Event"), visible via `kubectl get events -n
-        <this operator's namespace>`, but the Teams portal has no
-        cluster-wide activity view today to show it in."""
+        default`, but the Teams portal has no cluster-wide activity view
+        today to show it in. Stored in `default`, not the operator's own
+        namespace: a cluster-scoped involvedObject (empty namespace) forces
+        the Event into `default` — anywhere else is a hard 422 (verified
+        against the API)."""
         now = datetime.now(timezone.utc)
         body = client.CoreV1Event(
             metadata=client.V1ObjectMeta(generate_name=f"teams-operator-{name}-"),
@@ -1221,7 +1242,7 @@ class TeamsOperator:
             count=1,
         )
         try:
-            self.k8s_core_v1.create_namespaced_event(self.OPERATOR_NAMESPACE, body)
+            self.k8s_core_v1.create_namespaced_event("default", body)
         except ApiException as e:
             logger.error(f"❌ Failed to emit Event ({reason}) for ClusterRoleBinding '{name}': {e}")
         except Exception as e:
@@ -1333,10 +1354,11 @@ class TeamsOperator:
         try:
             self.k8s_core_v1.delete_namespace(name=namespace_name)
             logger.info(f"🗑️ Deleted namespace '{namespace_name}' for removed team '{team_name}'")
-            # Stored in this operator's own namespace, NOT namespace_name -
-            # that namespace is being torn down right now, and an Event
-            # stored inside it would be cascade-deleted along with it,
-            # never reaching the UI. See _emit_event.
+            # Pass a DIFFERENT event_namespace than namespace_name: that
+            # namespace is being torn down right now, and an Event stored
+            # inside it would be cascade-deleted before reaching the UI. This
+            # signals _emit_event to reference the Namespace cluster-scoped and
+            # store the Event in `default` instead. See _emit_event.
             self._emit_event(self.OPERATOR_NAMESPACE, namespace_name, team_id,
                               "NamespaceDeleted", f"Namespace deleted for team '{team_name}'")
             return openbao_ok
