@@ -1055,10 +1055,24 @@ def github_register_url(request: Request, project_id: str):
     connection_id = uuid.uuid4().hex
     store.add_github_app_connection(connection_id, project["id"], caller_name(request))
     state = _sign_state(kind="register", project_id=project["id"], connection_id=connection_id)
+    callback_url = f"{TEAMS_API_PUBLIC_URL}/github/callback"
     manifest = {
         "name": f"{_sanitize(project['name'])[:20]}-argo-{connection_id[:6]}",
         "url": TEAMS_APP_URL,
+        # redirect_url is the ONE-TIME App-CREATION target: GitHub redirects here
+        # with the manifest `code` right after the App is made (teams-operator
+        # converts it to the key). Distinct from setup_url below.
         "redirect_url": f"{TEAMS_API_PUBLIC_URL}/github/manifest-callback",
+        # setup_url is the POST-INSTALLATION target: after a user installs this App
+        # and picks repos, GitHub redirects here with installation_id/setup_action/
+        # state — which is how teams-api learns the installation (see /github/callback
+        # and the install-url flow). Without it the "add repos" step can never hand
+        # the installation back. setup_on_update = the "Redirect on update" checkbox,
+        # so re-configuring which repos are shared also re-delivers the installation.
+        "setup_url": callback_url,
+        "setup_on_update": True,
+        # OAuth user-authorization callback (kept consistent with setup_url).
+        "callback_urls": [callback_url],
         "public": False,
         # Least privilege: read-only repo contents + metadata is all Argo CD needs
         # to clone and to mint installation tokens.
