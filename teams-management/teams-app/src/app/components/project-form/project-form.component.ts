@@ -56,6 +56,17 @@ export class ProjectFormComponent implements OnInit {
     this.selectedRepos = this.selectedRepos.filter((r) => r !== repo);
   }
 
+  /** Compact chip label for a repo URL — "owner/repo", host+".git" stripped.
+   *  Full URL stays available via the chip's title on hover. */
+  shortRepo(url: string): string {
+    try {
+      const u = new URL(url);
+      return u.pathname.replace(/^\/+/, "").replace(/\.git$/, "") || u.hostname;
+    } catch {
+      return url.replace(/^https?:\/\//, "").replace(/\.git$/, "");
+    }
+  }
+
   onSubmit() {
     if (this.projectForm.invalid) {
       return;

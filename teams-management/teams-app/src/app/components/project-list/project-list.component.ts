@@ -402,6 +402,17 @@ export class ProjectListComponent implements OnInit, OnDestroy {
 
   // Repository name of an image ref (no registry host, no tag), e.g.
   // "localhost:5001/demo-api-py:1.0.0" -> "demo-api-py".
+  /** Compact chip label for a repo URL — "owner/repo", host+".git" stripped.
+   *  Full URL stays available via the chip's title on hover. */
+  shortRepo(url: string): string {
+    try {
+      const u = new URL(url);
+      return u.pathname.replace(/^\/+/, "").replace(/\.git$/, "") || u.hostname;
+    } catch {
+      return url.replace(/^https?:\/\//, "").replace(/\.git$/, "");
+    }
+  }
+
   imageName(image: string): string {
     let ref = (image || "").split("@")[0];
     const slash = ref.indexOf("/");

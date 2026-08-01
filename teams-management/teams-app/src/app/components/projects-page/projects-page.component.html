@@ -14,29 +14,34 @@
     <!-- Admin-only: curate the global source-repo whitelist available to every
          project (project managers pick from it at creation). -->
     <div class="form-section" *ngIf="authService.isAdmin()">
-      <h2>Global repository whitelist</h2>
-      <p class="field-hint">
-        Repos here are available to every project's Argo CD AppProject. Project
-        managers can pick from these (or add their own) when creating a project.
-      </p>
+      <div class="section-head">
+        <h2>Global repository whitelist</h2>
+        <span class="info-wrap">
+          <span class="info-icon" tabindex="0" role="button"
+                aria-label="About the global whitelist">?</span>
+          <div class="info-popover">
+            Repos here are available to every project's Argo CD AppProject.
+            Project managers can pick from these — or connect their own — when
+            creating a project.
+          </div>
+        </span>
+        <span class="section-count" *ngIf="globalRepos.length > 0">{{ globalRepos.length }}</span>
+      </div>
 
-      <ul class="repo-list" *ngIf="globalRepos.length > 0">
-        <li class="repo-item" *ngFor="let repo of globalRepos">
-          <code class="repo-url">{{ repo }}</code>
-          <button class="btn btn-danger btn-sm btn-icon"
-                  (click)="removeGlobalRepo(repo)"
+      <div class="repo-chips" *ngIf="globalRepos.length > 0">
+        <span class="repo-chip" *ngFor="let repo of globalRepos" [title]="repo">
+          <span class="repo-chip-label">{{ shortRepo(repo) }}</span>
+          <button class="repo-chip-remove" (click)="removeGlobalRepo(repo)"
                   [title]="'Remove ' + repo" [attr.aria-label]="'Remove ' + repo">✕</button>
-        </li>
-      </ul>
+        </span>
+      </div>
       <p class="detail-empty" *ngIf="globalRepos.length === 0">
         No whitelisted repos yet.
       </p>
 
-      <div class="adhoc-repo">
-        <button class="btn btn-sm" (click)="addReposFromGithub()">
-          + Add repos from GitHub
-        </button>
-      </div>
+      <button class="btn" (click)="addReposFromGithub()">
+        <span class="btn-plus">+</span> Add repos from GitHub
+      </button>
       <div class="error-message" *ngIf="globalReposError">{{ globalReposError }}</div>
     </div>
   </div>

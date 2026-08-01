@@ -49,6 +49,183 @@
   font-size: 1.5rem;
 }
 
+/* Heading row: title + a "?" help affordance (verbose prose lives in the
+   popover, not inline) + an optional count pill. */
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.section-head h2 {
+  margin-bottom: 0;
+}
+
+.section-count {
+  margin-left: auto;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 11px;
+  background: var(--neutral-soft);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+/* "?" info icon + hover/focus popover — same pattern as the Tier help on the
+   project cards, so the whole portal reads as one system. */
+.info-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.info-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-3);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: help;
+  user-select: none;
+}
+
+.info-icon:hover,
+.info-icon:focus-visible {
+  border-color: var(--primary);
+  color: var(--primary);
+  outline: none;
+}
+
+.info-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 20;
+  width: max-content;
+  max-width: 280px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow-md);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-4px);
+  transition: opacity 0.15s ease, transform 0.15s ease, visibility 0.15s;
+}
+
+.info-wrap:hover .info-popover,
+.info-icon:focus-visible + .info-popover {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+/* Repos as wrapping chips: compact, many per row, and capped so the panel
+   never grows out of proportion as the whitelist fills up. */
+.repo-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.repo-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px 5px 10px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  font-family: "Courier New", monospace;
+  font-size: 12px;
+  color: var(--text);
+  max-width: 100%;
+}
+
+.repo-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repo-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.repo-chip-remove:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+/* Secondary/outline button — a clear, obviously-clickable affordance. The
+   base .btn is defined per-component (Angular scopes styles), so it must be
+   declared here or "+ Add repos" renders as bare text. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-3);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-plus {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
+}
+
 @media (max-width: 768px) {
   .main-content {
     grid-template-columns: 1fr;

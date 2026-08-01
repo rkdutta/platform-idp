@@ -17,32 +17,45 @@
   </div>
 
   <div class="form-group">
-    <label>Source repositories <span class="required">*</span></label>
-    <p class="field-hint">
-      At least one is required. Pick from the whitelist below. Need a repo that
-      isn't listed? Connect it from GitHub on an existing project or the global
-      whitelist, then it becomes available here.
+    <div class="label-row">
+      <label>Source repositories <span class="required">*</span></label>
+      <span class="info-wrap">
+        <span class="info-icon" tabindex="0" role="button"
+              aria-label="About source repositories">?</span>
+        <div class="info-popover">
+          At least one is required. Add from the whitelist below. Need a repo
+          that isn't listed? Connect it from GitHub on the global whitelist or
+          an existing project, then it becomes available here.
+        </div>
+      </span>
+    </div>
+
+    <!-- Selected repos (what will be submitted) — removable chips. -->
+    <div class="repo-chips" *ngIf="selectedRepos.length > 0">
+      <span class="repo-chip is-selected" *ngFor="let repo of selectedRepos" [title]="repo">
+        <span class="repo-chip-label">{{ shortRepo(repo) }}</span>
+        <button type="button" class="repo-chip-remove"
+                (click)="removeRepo(repo)" [attr.aria-label]="'Remove ' + repo"
+                [title]="'Remove ' + repo">✕</button>
+      </span>
+    </div>
+    <p class="picker-empty" *ngIf="selectedRepos.length === 0">
+      No repositories added yet — pick at least one below.
     </p>
 
-    <!-- Selected repos (what will be submitted). -->
-    <ul class="selected-repos" *ngIf="selectedRepos.length > 0">
-      <li *ngFor="let repo of selectedRepos" class="selected-repo">
-        <code>{{ repo }}</code>
-        <button type="button" class="btn btn-danger btn-sm btn-icon"
-                (click)="removeRepo(repo)" [attr.aria-label]="'Remove ' + repo">✕</button>
-      </li>
-    </ul>
-
-    <!-- Pick from the admin global whitelist. -->
+    <!-- Pick from the admin global whitelist — add-chips. -->
     <div class="whitelist-picker" *ngIf="availableWhitelist.length > 0">
-      <span class="picker-label">Whitelisted:</span>
-      <button type="button" class="btn btn-sm btn-chip"
-              *ngFor="let repo of availableWhitelist"
-              (click)="addFromWhitelist(repo)" [title]="'Add ' + repo">
-        + {{ repo }}
-      </button>
+      <span class="picker-label">Add from whitelist</span>
+      <div class="repo-chips">
+        <button type="button" class="repo-chip add-chip"
+                *ngFor="let repo of availableWhitelist"
+                (click)="addFromWhitelist(repo)" [title]="'Add ' + repo">
+          <span class="add-chip-plus">+</span>
+          <span class="repo-chip-label">{{ shortRepo(repo) }}</span>
+        </button>
+      </div>
     </div>
-    <p class="field-hint" *ngIf="whitelist.length === 0">
+    <p class="picker-empty" *ngIf="whitelist.length === 0">
       No whitelisted repos yet — an admin needs to connect repos to the global
       whitelist first.
     </p>

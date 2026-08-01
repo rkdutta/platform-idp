@@ -421,7 +421,7 @@
             (click)="orderNamespace(project)"
             [disabled]="!orderLabel[project.id]"
           >
-            + Order namespace
+            <span class="btn-plus">+</span> Order namespace
           </button>
         </div>
       </div>
@@ -522,34 +522,36 @@
             <p class="detail-empty" *ngIf="repos.length === 0">
               No source repos configured yet.
             </p>
-            <ul class="repo-list" *ngIf="repos.length > 0">
-              <li class="repo-item" *ngFor="let repo of repos">
-                <code class="repo-url">{{ repo.url }}</code>
-                <span class="repo-badge" [class.badge-global]="repo.origin === 'global'"
-                      [class.badge-project]="repo.origin === 'project'">
-                  {{ repo.origin }}
-                </span>
-                <span class="repo-badge"
-                      [class.badge-connected]="repo.connected"
-                      [class.badge-disconnected]="!repo.connected">
-                  {{ repo.connected ? "connected" : "not connected" }}
-                </span>
+            <!-- Repos as chips. The ✕ is the only affordance the owner needs;
+                 repos inherited from the global whitelist can't be removed here,
+                 so they carry a subtle "↑ inherited" glyph instead of a loud
+                 origin/connected badge. -->
+            <div class="repo-chips" *ngIf="repos.length > 0">
+              <span class="repo-chip" *ngFor="let repo of repos" [title]="repo.url">
+                <span class="repo-chip-label">{{ shortRepo(repo.url) }}</span>
+                <span
+                  class="repo-chip-inherited"
+                  *ngIf="repo.origin === 'global'"
+                  title="Inherited from the global whitelist"
+                  aria-label="Inherited from the global whitelist"
+                  >↑</span
+                >
                 <button
                   *ngIf="canManageProject(project) && repo.origin === 'project'"
-                  class="btn btn-danger btn-sm btn-icon"
+                  class="repo-chip-remove"
                   (click)="removeSourceRepo(project, repo.url)"
                   [title]="'Remove ' + repo.url"
                   [attr.aria-label]="'Remove ' + repo.url"
                 >
                   ✕
                 </button>
-              </li>
-            </ul>
+              </span>
+            </div>
           </ng-container>
 
           <div class="order-ns" *ngIf="canManageProject(project)">
             <button class="btn btn-sm" (click)="addReposFromGithub(project)">
-              + Add repos from GitHub
+              <span class="btn-plus">+</span> Add repos from GitHub
             </button>
           </div>
         </div>
