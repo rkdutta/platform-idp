@@ -1,48 +1,11 @@
 <main class="main-content" [class.read-only]="!authService.isAdmin() && !authService.isProjectManager()">
-  <!-- Left column: stacks the create-project form and (admin-only) the global
-       repo whitelist. Wrapping them in a single column keeps the two-column
-       grid intact so "Existing Projects" stays in the right column instead of
-       wrapping to the bottom. -->
+  <!-- Left column: the create-project form. Creating a project is admin-only, or
+       self-service for a user holding the project-manager realm role. Owners and
+       plain users don't see it. -->
   <div class="form-column" *ngIf="authService.isAdmin() || authService.isProjectManager()">
-    <!-- Creating a project is admin-only, or self-service for a user holding the
-         project-manager realm role. Owners and plain users don't see it. -->
     <div class="form-section">
       <h2>Create New Project</h2>
       <app-project-form (projectCreated)="projectList.loadProjects()"></app-project-form>
-    </div>
-
-    <!-- Admin-only: curate the global source-repo whitelist available to every
-         project (project managers pick from it at creation). -->
-    <div class="form-section" *ngIf="authService.isAdmin()">
-      <div class="section-head">
-        <h2>Global repository whitelist</h2>
-        <span class="info-wrap">
-          <span class="info-icon" tabindex="0" role="button"
-                aria-label="About the global whitelist">?</span>
-          <div class="info-popover">
-            Repos here are available to every project's Argo CD AppProject.
-            Project managers can pick from these — or connect their own — when
-            creating a project.
-          </div>
-        </span>
-        <span class="section-count" *ngIf="globalRepos.length > 0">{{ globalRepos.length }}</span>
-      </div>
-
-      <div class="repo-chips" *ngIf="globalRepos.length > 0">
-        <span class="repo-chip" *ngFor="let repo of globalRepos" [title]="repo">
-          <span class="repo-chip-label">{{ shortRepo(repo) }}</span>
-          <button class="repo-chip-remove" (click)="removeGlobalRepo(repo)"
-                  [title]="'Remove ' + repo" [attr.aria-label]="'Remove ' + repo">✕</button>
-        </span>
-      </div>
-      <p class="detail-empty" *ngIf="globalRepos.length === 0">
-        No whitelisted repos yet.
-      </p>
-
-      <button class="btn" (click)="addReposFromGithub()">
-        <span class="btn-plus">+</span> Add repos from GitHub
-      </button>
-      <div class="error-message" *ngIf="globalReposError">{{ globalReposError }}</div>
     </div>
   </div>
 

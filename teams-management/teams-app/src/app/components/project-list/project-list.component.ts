@@ -132,6 +132,15 @@ export class ProjectListComponent implements OnInit, OnDestroy {
       next: (projects) => {
         this.projects = projects;
         this.isLoading = false;
+        // Recent activity is expanded by default: for every project whose card is
+        // already open (persisted-expanded across refreshes), load + arm its
+        // activity poll. Collapsed cards stay dormant until expanded.
+        for (const p of projects) {
+          this.syncEventsPoll(p.id);
+          // Eager-load source repos so we can flag/auto-expand projects with none
+          // (drawing the owner to register one) even while the card is collapsed.
+          this.loadSourceRepos(p.id);
+        }
         this.loadCompliance();
         this.loadApplications();
         this.loadNamespaceStatus();
@@ -146,6 +155,9 @@ export class ProjectListComponent implements OnInit, OnDestroy {
   toggleCollapse(projectId: string) {
     this.collapsed[projectId] = !this.isCollapsed(projectId);
     this.persistCollapsedState();
+    // Expanding a card reveals its (default-open) activity section, so start its
+    // poll; collapsing hides it, so stop polling.
+    this.syncEventsPoll(projectId);
   }
 
   // Default is collapsed: only an explicit `false` counts as expanded.
@@ -233,10 +245,24 @@ export class ProjectListComponent implements OnInit, OnDestroy {
   }
 
   toggleSourceRepos(projectId: string) {
-    this.sourceReposExpanded[projectId] = !this.sourceReposExpanded[projectId];
+    this.sourceReposExpanded[projectId] = !this.isSourceReposExpanded(projectId);
     if (this.sourceReposExpanded[projectId] && !this.sourceRepos[projectId]) {
       this.loadSourceRepos(projectId);
     }
+  }
+
+  /** True once source repos are loaded and the project has none — used to draw
+   *  attention (a header warning + auto-expanded section) so the owner knows to
+   *  register a repo before they can deploy. */
+  hasNoSourceRepos(projectId: string): boolean {
+    return this.sourceRepos[projectId]?.length === 0;
+  }
+
+  /** The Source repos section is expanded by DEFAULT when the project has no
+   *  repos (to surface the call-to-action); otherwise collapsed. An explicit
+   *  user toggle (true/false) always wins over that default. */
+  isSourceReposExpanded(projectId: string): boolean {
+    return this.sourceReposExpanded[projectId] ?? this.hasNoSourceRepos(projectId);
   }
 
   private loadSourceRepos(projectId: string) {
@@ -569,21 +595,35 @@ export class ProjectListComponent implements OnInit, OnDestroy {
     return `${environment.rolloutsDashboardUrl}/rollouts/rollout/${ns}/${app.name}`;
   }
 
+  // Recent activity is expanded by DEFAULT: an unset entry counts as expanded,
+  // so only an explicit `false` (the user collapsed it) hides the section.
+  isEventsExpanded(projectId: string): boolean {
+    return this.eventsExpanded[projectId] !== false;
+  }
+
   toggleEvents(projectId: string) {
-    this.eventsExpanded[projectId] = !this.eventsExpanded[projectId];
-    if (this.eventsExpanded[projectId]) {
-      this.loadEvents(projectId);
-      // Clear any stale handle before starting a new one (defensive —
-      // toggling shouldn't normally double-arm this, but a leaked interval
-      // is a real bug class, not just a cosmetic one).
+    this.eventsExpanded[projectId] = !this.isEventsExpanded(projectId);
+    this.syncEventsPoll(projectId);
+  }
+
+  /** Reconcile the activity load + background poll with the current UI state:
+   *  active only while the project's CARD is expanded AND its activity section
+   *  is expanded (default). Idempotent — safe to call on load, card toggle, or
+   *  section toggle; it clears any stale interval before re-arming. Keeping the
+   *  poll scoped to a visible section avoids polling events for every collapsed
+   *  card on the page. */
+  private syncEventsPoll(projectId: string) {
+    const active = !this.isCollapsed(projectId) && this.isEventsExpanded(projectId);
+    if (!active) {
       this.stopEventsPoll(projectId);
-      this.eventsPollHandle[projectId] = setInterval(
-        () => this.loadEvents(projectId),
-        ProjectListComponent.EVENTS_POLL_INTERVAL_MS
-      );
-    } else {
-      this.stopEventsPoll(projectId);
+      return;
     }
+    this.loadEvents(projectId);
+    this.stopEventsPoll(projectId);
+    this.eventsPollHandle[projectId] = setInterval(
+      () => this.loadEvents(projectId),
+      ProjectListComponent.EVENTS_POLL_INTERVAL_MS
+    );
   }
 
   private loadEvents(projectId: string) {

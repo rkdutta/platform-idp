@@ -123,14 +123,6 @@ CREATE TABLE IF NOT EXISTS github_app_registrations (
     created_at    TEXT NOT NULL
 );
 
--- Admin-curated global whitelist of repos available to EVERY project (see
--- docs/self-service-repos-github-app.md). teams-api unions these with each
--- project's own repos in /internal/teams, so the operator reconciles the
--- effective set into every AppProject's sourceRepos.
-CREATE TABLE IF NOT EXISTS global_source_repos (
-    repo_url    TEXT PRIMARY KEY
-);
-
 -- Pending GitHub App connections awaiting resolution (see
 -- docs/self-service-repos-github-app.md). When a user finishes the "pick repos
 -- on GitHub" flow, the callback records (target, installation_id) here — teams-api
@@ -337,8 +329,8 @@ def create_project(
 ) -> dict:
     """Create a project + its default namespace, and (optionally) its initial
     source repos — all in one transaction, so a repo insert failing can't leave
-    a half-created project behind (source repos are mandatory at creation now;
-    see main.py create_project / docs/self-service-repos-github-app.md)."""
+    a half-created project behind. Repos are optional at creation now; a project
+    can start empty (see main.py create_project / docs/self-service-repos-github-app.md)."""
     with _lock:
         _db().execute(
             "INSERT INTO projects (id, name, created_at) VALUES (?,?,?)",
@@ -554,28 +546,6 @@ def repo_exists(project_id: str, repo_url: str) -> bool:
     return row is not None
 
 
-# --- Global source-repo whitelist (admin-curated, available to every project) --
-def global_source_repos() -> List[str]:
-    rows = _db().execute(
-        "SELECT repo_url FROM global_source_repos ORDER BY repo_url"
-    ).fetchall()
-    return [r["repo_url"] for r in rows]
-
-
-def add_global_source_repo(repo_url: str) -> None:
-    with _lock:
-        _db().execute(
-            "INSERT OR IGNORE INTO global_source_repos (repo_url) VALUES (?)", (repo_url,)
-        )
-        _db().commit()
-
-
-def remove_global_source_repo(repo_url: str) -> None:
-    with _lock:
-        _db().execute("DELETE FROM global_source_repos WHERE repo_url = ?", (repo_url,))
-        _db().commit()
-
-
 # --- Pending GitHub App connections (operator resolves these; see main.py) -----
 def add_github_connection(target: str, installation_id: str, connection_id: str = "") -> None:
     with _lock:
@@ -684,15 +654,6 @@ def delete_github_app_registration(connection_id: str) -> None:
             "DELETE FROM github_app_registrations WHERE connection_id = ?", (connection_id,)
         )
         _db().commit()
-
-
-def effective_source_repos(project_id: str) -> List[str]:
-    """The repos the project's AppProject should allow: the project's own repos
-    UNIONed with the admin global whitelist. This is what teams-operator
-    reconciles into sourceRepos (see /internal/teams) — computing the union here
-    means a global-whitelist change is reflected for every project on the
-    operator's next poll with no operator-side global logic."""
-    return sorted(set(source_repos_of(project_id)) | set(global_source_repos()))
 
 
 # --------------------------------------------------------------------------- #

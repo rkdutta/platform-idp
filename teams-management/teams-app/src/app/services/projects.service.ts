@@ -143,10 +143,9 @@ export class ProjectsService {
       .pipe(catchError(this.handleError));
   }
 
-  /** The project's effective source repos (project repos ∪ the admin global
-   *  whitelist), each annotated with origin + GitHub App connection state.
-   *  teams-operator reconciles these into the AppProject's sourceRepos. Any
-   *  caller in scope may read; only the owner/admin may add or remove one. */
+  /** The project's source repos, which teams-operator reconciles into the
+   *  AppProject's sourceRepos. Any caller in scope may read; only the owner/admin
+   *  may add or remove one. */
   getSourceRepos(projectId: string): Observable<SourceRepoInfo[]> {
     const url = `${this.apiUrl}/projects/${projectId}/source-repos`;
     return this.http.get<SourceRepoInfo[]>(url)
@@ -166,37 +165,13 @@ export class ProjectsService {
       .pipe(catchError(this.handleError));
   }
 
-  /** Admin-curated global whitelist of repos available to every project. Any
-   *  authenticated user may read it (project managers pick from it at creation);
-   *  only admins may add/remove. */
-  getGlobalSourceRepos(): Observable<string[]> {
-    const url = `${this.apiUrl}/source-repos/global`;
-    return this.http.get<string[]>(url).pipe(catchError(this.handleError));
-  }
-
-  addGlobalSourceRepo(repoUrl: string): Observable<string[]> {
-    const url = `${this.apiUrl}/source-repos/global`;
-    return this.http.post<string[]>(url, { repo_url: repoUrl })
-      .pipe(catchError(this.handleError));
-  }
-
-  removeGlobalSourceRepo(repoUrl: string): Observable<string[]> {
-    const url = `${this.apiUrl}/source-repos/global`;
-    return this.http.request<string[]>('delete', url, { body: { repo_url: repoUrl } })
-      .pipe(catchError(this.handleError));
-  }
-
-  /** Start the "add repos from GitHub" flow: returns the App install/configure
-   *  URL (carrying a signed state) to send the user's browser to. `target` is a
-   *  project id, or the literal 'global' for the admin whitelist. For a project a
-   *  `connectionId` (one of the project's registered connections) is required —
-   *  the install goes to that App. The user picks the repos on GitHub; the
+  /** Start the "add repos from GitHub" flow for a project: returns the App
+   *  install/configure URL (carrying a signed state) to send the user's browser
+   *  to. `connectionId` (one of the project's registered connections) is required
+   *  — the install goes to that App. The user picks the repos on GitHub; the
    *  operator resolves and adds them. */
-  getGithubInstallUrl(target: string, connectionId?: string): Observable<{ install_url: string }> {
-    const params = new URLSearchParams({ target });
-    if (connectionId) {
-      params.set('connection_id', connectionId);
-    }
+  getGithubInstallUrl(projectId: string, connectionId: string): Observable<{ install_url: string }> {
+    const params = new URLSearchParams({ target: projectId, connection_id: connectionId });
     const url = `${this.apiUrl}/github/install-url?${params.toString()}`;
     return this.http.get<{ install_url: string }>(url).pipe(catchError(this.handleError));
   }

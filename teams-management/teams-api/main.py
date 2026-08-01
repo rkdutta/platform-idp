@@ -391,15 +391,15 @@ def _valid_repo_url(url: str) -> str:
 
 class ProjectCreate(BaseModel):
     name: str
-    # Mandatory at creation now (>=1) — see docs/self-service-repos-github-app.md.
+    # Optional at creation: a project can start with no repos and register one
+    # later from its card (see docs/self-service-repos-github-app.md). Any URLs
+    # provided are validated + de-duped.
     source_repos: List[str] = []
 
     @field_validator("source_repos")
     @classmethod
-    def _at_least_one_valid_repo(cls, v: List[str]) -> List[str]:
+    def _normalize_repos(cls, v: List[str]) -> List[str]:
         cleaned = [_valid_repo_url(u) for u in (v or [])]
-        if not cleaned:
-            raise ValueError("at least one source repo URL is required")
         # de-dupe preserving order
         seen: Set[str] = set()
         out: List[str] = []
@@ -411,16 +411,10 @@ class ProjectCreate(BaseModel):
 
 
 class SourceRepoInfo(BaseModel):
-    """A repo in a project's effective source-repo set, for the UI listing.
-
-    `origin` is 'project' (added to this project) or 'global' (from the admin
-    whitelist, inherited by every project). `connected` is True once the repo
-    has been linked through the platform GitHub App (see the /github/* flow);
-    global repos report the project's own connection state if it also holds the
-    same URL, else False."""
+    """A repo in a project's source-repo set, for the UI listing. Reconciled into
+    the project's Argo CD AppProject sourceRepos; connected to a private repo via
+    a per-project GitHub App connection (see the /github/* flow)."""
     url: str
-    origin: str = "project"     # project | global
-    connected: bool = False
 
 class GithubConnection(BaseModel):
     """A registered GitHub App connection a project may connect repos through
@@ -780,7 +774,7 @@ async def create_project(request: Request, project: ProjectCreate):
 
     project_id = str(uuid.uuid4())
     ns = default_namespace(project.name)
-    # source_repos is validated (>=1, normalized, de-duped) by ProjectCreate.
+    # source_repos is optional now (may be empty); normalized + de-duped by ProjectCreate.
     created = store.create_project(
         project_id, project.name, ns, created_at=datetime.now().isoformat(),
         source_repos=project.source_repos,
@@ -958,58 +952,20 @@ async def delete_namespace(request: Request, project_id: str, namespace: str):
     return Project(**_with_owners(store.get_project(project_id)))
 
 
-# --- Global source-repo whitelist (admin-curated) ----------------------------
-# Available to EVERY project: teams-api unions these with each project's own
-# repos in /internal/teams, so teams-operator reconciles the effective set into
-# every AppProject's sourceRepos. Read by any authenticated user (project
-# managers pick from it at creation); mutated by admins only.
-
-@app.get("/source-repos/global", response_model=List[str])
-def get_global_source_repos(request: Request):
-    """The admin-curated repos available to every project."""
-    return store.global_source_repos()
-
-@app.post("/source-repos/global", response_model=List[str], dependencies=[Depends(require_admin)])
-def add_global_source_repo(request: Request, body: SourceRepo):
-    """Add a repo to the global whitelist (admin only)."""
-    url = _valid_repo_url(body.repo_url)
-    store.add_global_source_repo(url)
-    store.record(caller_name(request), "global_source_repo.add", "*", url)
-    return store.global_source_repos()
-
-@app.delete("/source-repos/global", response_model=List[str], dependencies=[Depends(require_admin)])
-def remove_global_source_repo(request: Request, body: SourceRepo):
-    """Remove a repo from the global whitelist (admin only)."""
-    store.remove_global_source_repo(body.repo_url)
-    store.record(caller_name(request), "global_source_repo.remove", "*", body.repo_url)
-    return store.global_source_repos()
-
-
 # --- Source repos (admin or project owner) -----------------------------------
-# Self-service: teams-operator reconciles the EFFECTIVE list (project repos ∪ the
-# global whitelist) into the project's Argo CD AppProject `sourceRepos` on its
-# next poll (ensure_argocd_appproject) - not applied to the cluster directly by
-# this API. The listing endpoints return the effective set annotated with each
-# repo's origin (project|global) and GitHub App connection state.
+# Self-service: teams-operator reconciles this list into the project's Argo CD
+# AppProject `sourceRepos` on its next poll (ensure_argocd_appproject) - not
+# applied to the cluster directly by this API.
 
 def _source_repo_infos(project_id: str) -> List[SourceRepoInfo]:
-    project_detail = {
-        r["repo_url"]: r["installation_id"] for r in store.source_repos_detail_of(project_id)
-    }
-    global_repos = set(store.global_source_repos())
-    infos: List[SourceRepoInfo] = []
-    for url in sorted(set(project_detail) | global_repos):
-        infos.append(SourceRepoInfo(
-            url=url,
-            origin="global" if url in global_repos else "project",
-            connected=bool(project_detail.get(url)),
-        ))
-    return infos
+    return [
+        SourceRepoInfo(url=r["repo_url"])
+        for r in store.source_repos_detail_of(project_id)
+    ]
 
 @app.get("/projects/{project_id}/source-repos", response_model=List[SourceRepoInfo])
 def get_source_repos(request: Request, project_id: str):
-    """The effective source repos for this project's AppProject (in scope),
-    annotated with origin + GitHub App connection state."""
+    """The source repos for this project's AppProject (in scope)."""
     project = authz.require_visible_project(request, project_id)
     return _source_repo_infos(project["id"])
 
@@ -1024,8 +980,7 @@ def add_source_repo(request: Request, project_id: str, body: SourceRepo):
 
 @app.delete("/projects/{project_id}/source-repos", response_model=List[SourceRepoInfo])
 def remove_source_repo(request: Request, project_id: str, body: SourceRepo):
-    """Remove a source repo from this project (admin or owner). Only removes it
-    from THIS project; a globally-whitelisted repo stays available."""
+    """Remove a source repo from this project (admin or owner)."""
     project = authz.require_project_owner(request, project_id)
     store.remove_source_repo(project_id, body.repo_url)
     store.record(caller_name(request), "source_repo.remove", project["name"], body.repo_url)
@@ -1033,16 +988,17 @@ def remove_source_repo(request: Request, project_id: str, body: SourceRepo):
 
 
 # --- GitHub App: self-service private-repo connection -------------------------
-# Flow: user clicks "Add repos from GitHub" -> we return the App install URL
-# carrying a signed `state` (which just remembers WHERE to add them: a project or
-# the global whitelist) -> GitHub lets them pick repositories -> GitHub redirects
-# the browser to /github/callback with an installation_id. teams-api has NO App
-# key, so it can't enumerate the picked repos; it records a pending connection and
-# teams-operator (which holds the key) resolves it to the repo list, reports it
-# back (/internal/github-connections/resolve), and materializes the Argo CD repo
+# Flow: user picks one of a project's registered connections (or registers a new
+# one) -> we return that App's install URL carrying a signed `state` (which
+# remembers the project + connection to add repos to) -> GitHub lets them pick
+# repositories -> GitHub redirects the browser to /github/callback with an
+# installation_id. teams-api has NO App key, so it can't enumerate the picked
+# repos; it records a pending connection and teams-operator (which holds the key)
+# resolves it to the repo list, reports it back
+# (/internal/github-connections/resolve), and materializes the Argo CD repo
 # credentials. See docs/self-service-repos-github-app.md.
 #
-# `state` carries a `target`: a project id, or the literal "global".
+# `state` carries a `target` (a project id) + `connection_id`.
 
 def _sign_state(**fields: str) -> str:
     """Pack + HMAC-sign a state blob for the GitHub redirect flows. Carries
@@ -1119,33 +1075,26 @@ def github_register_url(request: Request, project_id: str):
 
 @app.get("/github/install-url")
 def github_install_url(request: Request, target: str, connection_id: str = ""):
-    """Return the GitHub App install/configure URL for adding repos to `target`.
-    For a project target the user must pick one of the project's registered
-    connections (`connection_id`) — the install goes to *that* App. The literal
-    'global' target (admin only) uses the single platform App. The user picks the
+    """Return the GitHub App install/configure URL for adding repos to a project.
+    The user must pick one of the project's registered connections
+    (`connection_id`) — the install goes to *that* App. The user picks the
     repositories on GitHub; the signed `state` tells the callback where to add
     them and which connection minted the installation."""
     if not GITHUB_APP_STATE_SECRET:
         raise HTTPException(status_code=503, detail="GitHub App state secret not configured")
-    if target == "global":
-        require_admin(request)
-        if not GITHUB_APP_SLUG:
-            raise HTTPException(status_code=503, detail="Platform GitHub App not configured (GITHUB_APP_SLUG)")
-        slug, label, conn_id = GITHUB_APP_SLUG, "*", ""
-    else:
-        project = authz.require_project_owner(request, target)
-        label = project["name"]
-        if not connection_id:
-            raise HTTPException(
-                status_code=400,
-                detail="connection_id is required for a project — register or pick a connection first",
-            )
-        conn = store.get_github_app_connection(connection_id)
-        if not conn or conn["project_id"] != target:
-            raise HTTPException(status_code=404, detail="unknown connection for this project")
-        if conn["status"] != "ready" or not conn["slug"]:
-            raise HTTPException(status_code=409, detail="connection is still being registered")
-        slug, conn_id = conn["slug"], connection_id
+    project = authz.require_project_owner(request, target)
+    label = project["name"]
+    if not connection_id:
+        raise HTTPException(
+            status_code=400,
+            detail="connection_id is required — register or pick a connection first",
+        )
+    conn = store.get_github_app_connection(connection_id)
+    if not conn or conn["project_id"] != target:
+        raise HTTPException(status_code=404, detail="unknown connection for this project")
+    if conn["status"] != "ready" or not conn["slug"]:
+        raise HTTPException(status_code=409, detail="connection is still being registered")
+    slug, conn_id = conn["slug"], connection_id
 
     state = _sign_state(target=target, connection_id=conn_id)
     store.record(caller_name(request), "github.connect.start", label, conn_id)
@@ -1171,8 +1120,8 @@ def github_callback(request: Request, state: str = "", installation_id: str = ""
         # The org owner must approve the install first, or the user cancelled.
         return RedirectResponse(url=f"{TEAMS_APP_URL}/?github={setup_action or 'cancelled'}")
 
-    # A stale/deleted project fails cleanly (global always valid).
-    if target != "global" and not store.get_project(target):
+    # A stale/deleted project fails cleanly.
+    if not store.get_project(target):
         return RedirectResponse(url=f"{TEAMS_APP_URL}/?github=target_gone")
 
     store.add_github_connection(target, installation_id, connection_id)
@@ -1424,16 +1373,14 @@ def internal_teams():
     id/name/namespaces/source_repos (never compliance/apps/access), unscoped
     (the operator provisions every project).
 
-    `source_repos` is the EFFECTIVE set — the project's own repos UNIONed with the
-    admin global whitelist (store.effective_source_repos) — so the operator
-    reconciles global-whitelist changes into every AppProject with no operator-side
-    global logic (see docs/self-service-repos-github-app.md)."""
+    `source_repos` is the project's own repos, reconciled into its AppProject's
+    sourceRepos (see docs/self-service-repos-github-app.md)."""
     return [
         {
             "id": p["id"],
             "name": p["name"],
             "namespaces": p["namespaces"],
-            "source_repos": store.effective_source_repos(p["id"]),
+            "source_repos": store.source_repos_of(p["id"]),
             # Repos connected via a GitHub App, for the operator to materialize
             # Argo CD githubApp repo credentials. Each carries installation_id +
             # connection_id (which registered App minted it; '' = platform App).
@@ -1516,21 +1463,16 @@ def internal_github_connections():
 @app.post("/internal/github-connections/resolve", dependencies=[Depends(require_operator)])
 def internal_resolve_github_connection(body: GithubConnectionResolve):
     """teams-operator reports the repos an installation grants; teams-api adds them
-    to the target (a project's source repos, connected, or the global whitelist)
-    and clears the pending row. Idempotent — a repeated report just re-adds
-    already-present repos. A resolve for a since-deleted project still clears the
-    pending row (nothing to add)."""
-    if body.target == "global":
+    to the target project's source repos (connected via `connection_id`) and clears
+    the pending row. Idempotent — a repeated report just re-adds already-present
+    repos. A resolve for a since-deleted project still clears the pending row."""
+    project = store.get_project(body.target)
+    if project:
         for url in body.repos:
-            store.add_global_source_repo(url)
-    else:
-        project = store.get_project(body.target)
-        if project:
-            for url in body.repos:
-                store.add_source_repo(project["id"], url)
-                store.set_repo_installation(
-                    project["id"], url, body.installation_id, body.connection_id
-                )
+            store.add_source_repo(project["id"], url)
+            store.set_repo_installation(
+                project["id"], url, body.installation_id, body.connection_id
+            )
     store.delete_github_connection(body.target, body.installation_id)
     store.record("github-app", "github.connect.resolved", body.target, f"{len(body.repos)} repo(s)")
     return {"resolved": True, "count": len(body.repos)}

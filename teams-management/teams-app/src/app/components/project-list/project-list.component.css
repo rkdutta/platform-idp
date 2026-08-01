@@ -748,6 +748,15 @@
   background-color: var(--solid-neutral);
 }
 
+.badge-warning {
+  background-color: var(--warning);
+}
+
+/* Small "none yet" flag beside the Source repos toggle. */
+.repos-flag {
+  margin-left: 4px;
+}
+
 /* Namespace provisioning-status indicator (RBAC/image-pull/quota/limits/
    network-policy/OpenBao access) — a single colored tick, not a text badge:
    green = ready, red = degraded, yellow = unknown/still being provisioned
@@ -1105,13 +1114,32 @@
   white-space: nowrap;
 }
 
-/* Global-whitelist repos are inherited and can't be removed on the project —
-   a quiet glyph, not a text badge, is all the signal that needs. */
-.repo-chip-inherited {
-  flex-shrink: 0;
-  color: var(--text-faint);
-  font-size: 12px;
-  cursor: help;
+/* Call-to-action when a project has no source repos yet — a project can't
+   deploy until one is registered, so make it prominent. */
+.repos-cta {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--warning-soft);
+  border: 1px solid var(--warning);
+}
+
+.repos-cta-icon {
+  font-size: 16px;
+  line-height: 1.4;
+}
+
+.repos-cta-text {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.repos-cta-text strong {
+  display: block;
 }
 
 .repo-chip-remove {

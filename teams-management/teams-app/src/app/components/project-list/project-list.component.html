@@ -50,6 +50,15 @@
         >
           {{ statusLabel(project.id) }}
         </span>
+        <!-- Flag a project with no source repos so it stands out even collapsed —
+             it can't deploy anything until one is registered. -->
+        <span
+          class="badge badge-warning project-header-badge"
+          *ngIf="isCollapsed(project.id) && hasNoSourceRepos(project.id)"
+          title="No source repositories — register one to start deploying"
+        >
+          ⚠ no repos
+        </span>
         <span class="project-header-spacer"></span>
         <button
           *ngIf="authService.isAdmin()"
@@ -507,37 +516,43 @@
         <button
           class="compliance-toggle"
           (click)="toggleSourceRepos(project.id)"
-          [attr.aria-expanded]="sourceReposExpanded[project.id]"
+          [attr.aria-expanded]="isSourceReposExpanded(project.id)"
         >
           <span class="compliance-label">Source repos</span>
-          <span class="chevron">{{ sourceReposExpanded[project.id] ? "▲" : "▼" }}</span>
+          <span class="badge badge-warning repos-flag" *ngIf="hasNoSourceRepos(project.id)">
+            none yet
+          </span>
+          <span class="chevron">{{ isSourceReposExpanded(project.id) ? "▲" : "▼" }}</span>
         </button>
 
-        <div class="events-detail" *ngIf="sourceReposExpanded[project.id]">
+        <div class="events-detail" *ngIf="isSourceReposExpanded(project.id)">
           <div class="detail-loading" *ngIf="loadingSourceRepos[project.id] && !sourceRepos[project.id]">
             Loading source repos…
           </div>
 
           <ng-container *ngIf="sourceRepos[project.id] as repos">
-            <p class="detail-empty" *ngIf="repos.length === 0">
-              No source repos configured yet.
-            </p>
-            <!-- Repos as chips. The ✕ is the only affordance the owner needs;
-                 repos inherited from the global whitelist can't be removed here,
-                 so they carry a subtle "↑ inherited" glyph instead of a loud
-                 origin/connected badge. -->
+            <!-- No repos yet: a prominent call-to-action, since a project can't
+                 deploy anything until at least one source repo is registered. -->
+            <div class="repos-cta" *ngIf="repos.length === 0">
+              <span class="repos-cta-icon">⚠️</span>
+              <div class="repos-cta-text">
+                <strong>No source repositories yet.</strong>
+                <ng-container *ngIf="canManageProject(project)">
+                  Register a GitHub connection below and add a repo to start
+                  deploying applications.
+                </ng-container>
+                <ng-container *ngIf="!canManageProject(project)">
+                  A project owner must register a source repo before applications
+                  can be deployed.
+                </ng-container>
+              </div>
+            </div>
+            <!-- Repos as chips — the ✕ removes one (owner/admin only). -->
             <div class="repo-chips" *ngIf="repos.length > 0">
               <span class="repo-chip" *ngFor="let repo of repos" [title]="repo.url">
                 <span class="repo-chip-label">{{ shortRepo(repo.url) }}</span>
-                <span
-                  class="repo-chip-inherited"
-                  *ngIf="repo.origin === 'global'"
-                  title="Inherited from the global whitelist"
-                  aria-label="Inherited from the global whitelist"
-                  >↑</span
-                >
                 <button
-                  *ngIf="canManageProject(project) && repo.origin === 'project'"
+                  *ngIf="canManageProject(project)"
                   class="repo-chip-remove"
                   (click)="removeSourceRepo(project, repo.url)"
                   [title]="'Remove ' + repo.url"
@@ -615,13 +630,13 @@
         <button
           class="compliance-toggle"
           (click)="toggleEvents(project.id)"
-          [attr.aria-expanded]="eventsExpanded[project.id]"
+          [attr.aria-expanded]="isEventsExpanded(project.id)"
         >
           <span class="compliance-label">Recent activity</span>
-          <span class="chevron">{{ eventsExpanded[project.id] ? "▲" : "▼" }}</span>
+          <span class="chevron">{{ isEventsExpanded(project.id) ? "▲" : "▼" }}</span>
         </button>
 
-        <div class="events-detail" *ngIf="eventsExpanded[project.id]">
+        <div class="events-detail" *ngIf="isEventsExpanded(project.id)">
           <div class="detail-loading" *ngIf="loadingEvents[project.id] && !projectEvents[project.id]">
             Loading activity…
           </div>
