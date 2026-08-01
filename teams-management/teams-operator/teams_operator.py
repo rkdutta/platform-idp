@@ -12,7 +12,9 @@ import os
 import time
 from datetime import datetime, timezone
 from typing import Set, Dict, Any, List, Optional, Tuple
+from urllib.parse import urlparse
 import aiohttp
+import jwt
 import requests
 import yaml
 from kubernetes import client, config
@@ -143,16 +145,14 @@ class TeamsOperator:
         # GitHub App repo credentials (see docs/self-service-repos-github-app.md).
         # The App id + private key live in OpenBao at OPENBAO_GITHUB_APP_PATH (a
         # KV-v2 data path, so it includes the /data/ segment); this operator reads
-        # them (platform-operator-policy) and materializes Argo CD githubApp
-        # repository Secrets from them. _github_app_creds_cache caches the (id,
-        # key) pair for the process lifetime; _project_repo_secrets tracks which
-        # repository Secret names this operator created per project slug, so it
-        # can prune ones whose repo was disconnected/removed.
+        # them (platform-operator-policy) and both (a) enumerate a connected
+        # installation's repos (resolve_github_connections) and (b) materialize a
+        # single Argo CD githubApp repo-creds per account (reconcile_github_repo_creds).
+        # _github_app_creds_cache caches the (id, key) pair for the process lifetime.
         self.openbao_github_app_path = os.getenv(
             "OPENBAO_GITHUB_APP_PATH", "kv/data/platform/github-app"
         )
         self._github_app_creds_cache: Optional[Tuple[str, str]] = None
-        self._project_repo_secrets: Dict[str, Set[str]] = {}
 
         # Per-namespace provisioning status (see update_namespace_status).
         # Deliberately a point-in-time "did the last reconcile attempt for
@@ -614,27 +614,101 @@ class TeamsOperator:
         self._github_app_creds_cache = (str(app_id), str(private_key))
         return self._github_app_creds_cache
 
-    @staticmethod
-    def _repo_secret_name(slug: str, repo_url: str) -> str:
-        """Deterministic argocd repository-Secret name for a project's repo —
-        slug-prefixed (so it's greppable/prunable per project) + a short hash of
-        the URL (which itself isn't a valid k8s object name)."""
-        digest = hashlib.sha1(repo_url.encode()).hexdigest()[:10]
-        return f"{slug}-repo-{digest}"
+    def _github_installation_repos(self, installation_id: str) -> Optional[List[str]]:
+        """The HTTPS clone URLs an installation grants — the operator side of the
+        Option-B flow: teams-api records a pending connection (it has no App key),
+        the operator resolves it here using the App key from OpenBao. Mints an App
+        JWT -> installation token -> lists repos (paginated). Returns None (logging
+        why) on any failure so resolve_github_connections leaves the pending row
+        for a retry next cycle."""
+        creds = self._github_app_creds()
+        if creds is None:
+            return None
+        app_id, private_key = creds
+        try:
+            now = int(time.time())
+            app_jwt = jwt.encode(
+                {"iat": now - 60, "exp": now + 9 * 60, "iss": app_id},
+                private_key, algorithm="RS256",
+            )
+        except Exception as e:  # noqa: BLE001 - a bad key must not crash the loop
+            logger.error(f"❌ Could not sign GitHub App JWT: {e}")
+            return None
 
-    def ensure_argocd_repo_credentials(self, slug: str, repo_installations: List[dict]) -> bool:
-        """Materialize/prune Argo CD githubApp repository Secrets for project
-        `slug`. `repo_installations` is teams-api's list of the project's
-        connected repos ([{repo_url, installation_id}]). Creates/updates one
-        Secret per connected repo and deletes any this operator previously
-        created for the slug whose repo is no longer connected. Returns True if
-        everything reconciled (or there was nothing to do); False if the App
-        creds couldn't be read while there WAS work to do."""
-        desired: Dict[str, dict] = {
-            self._repo_secret_name(slug, r["repo_url"]): r
-            for r in repo_installations
-            if r.get("repo_url") and r.get("installation_id")
-        }
+        api = "https://api.github.com"
+        common = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+        try:
+            resp = requests.post(
+                f"{api}/app/installations/{installation_id}/access_tokens",
+                headers={**common, "Authorization": f"Bearer {app_jwt}"}, timeout=10,
+            )
+            if resp.status_code != 201:
+                logger.error(f"❌ GitHub installation token {resp.status_code}: {resp.text}")
+                return None
+            inst_token = resp.json().get("token")
+            if not inst_token:
+                logger.error("❌ GitHub installation token response had no token")
+                return None
+
+            urls: List[str] = []
+            page = 1
+            while True:
+                resp = requests.get(
+                    f"{api}/installation/repositories",
+                    headers={**common, "Authorization": f"token {inst_token}"},
+                    params={"per_page": 100, "page": page}, timeout=10,
+                )
+                if resp.status_code != 200:
+                    logger.error(f"❌ GitHub list repositories {resp.status_code}: {resp.text}")
+                    return None
+                repos = resp.json().get("repositories", [])
+                for r in repos:
+                    clone = r.get("clone_url") or (
+                        (r.get("html_url") or "") + ".git" if r.get("html_url") else None
+                    )
+                    if clone:
+                        urls.append(clone)
+                if len(repos) < 100:
+                    break
+                page += 1
+            return urls
+        except requests.RequestException as e:
+            logger.error(f"❌ GitHub API call failed (installation {installation_id}): {e}")
+            return None
+
+    @staticmethod
+    def _account_prefix(repo_url: str) -> Optional[str]:
+        """The owner/account URL prefix of a GitHub repo URL, e.g.
+        https://github.com/rkdutta/foo.git -> https://github.com/rkdutta. Argo CD
+        matches a repo-creds credential template by longest URL prefix, so one
+        credential per account (not per repo) covers every repo under it."""
+        try:
+            p = urlparse(repo_url)
+            owner = p.path.lstrip("/").split("/", 1)[0]
+            if not p.scheme or not p.netloc or not owner:
+                return None
+            return f"{p.scheme}://{p.netloc}/{owner}"
+        except Exception:  # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _repo_creds_name(prefix: str) -> str:
+        return f"github-app-creds-{hashlib.sha1(prefix.encode()).hexdigest()[:10]}"
+
+    def reconcile_github_repo_creds(self, current_teams: Dict[str, dict]) -> bool:
+        """Cluster-wide: one Argo CD githubApp `repo-creds` credential template per
+        (account-prefix, installation) across ALL projects' connected repos — a
+        SINGLE copy of the App key per account, not one per repo (the AppProject
+        sourceRepos + the admission guardrails are what authorize which repos each
+        project may actually use). Prunes any teams-operator-managed repo-creds no
+        longer desired. See docs/self-service-repos-github-app.md."""
+        # prefix -> installation_id, deduped across every project.
+        desired: Dict[str, str] = {}
+        for team in current_teams.values():
+            for r in team.get("repo_installations") or []:
+                prefix = self._account_prefix(r.get("repo_url", ""))
+                if prefix and r.get("installation_id"):
+                    desired[prefix] = str(r["installation_id"])
 
         ok = True
         creds = self._github_app_creds() if desired else None
@@ -642,48 +716,56 @@ class TeamsOperator:
             ok = False  # can't materialize this cycle; still prune below
         elif desired:
             app_id, private_key = creds
-            for name, r in desired.items():
+            for prefix, installation_id in desired.items():
+                name = self._repo_creds_name(prefix)
                 body = client.V1Secret(
                     metadata=client.V1ObjectMeta(
                         name=name,
                         namespace=self.ARGOCD_NAMESPACE,
                         labels={
-                            "argocd.argoproj.io/secret-type": "repository",
+                            "argocd.argoproj.io/secret-type": "repo-creds",
                             "app.kubernetes.io/managed-by": "teams-operator",
-                            "teams-operator/project": slug,
+                            "teams-operator/github-repo-creds": "true",
                         },
                     ),
                     string_data={
                         "type": "git",
-                        "url": r["repo_url"],
+                        "url": prefix,
                         "githubAppID": app_id,
-                        "githubAppInstallationID": str(r["installation_id"]),
+                        "githubAppInstallationID": installation_id,
                         "githubAppPrivateKey": private_key,
                     },
                 )
                 try:
                     self.k8s_core_v1.create_namespaced_secret(self.ARGOCD_NAMESPACE, body)
-                    logger.info(f"✅ Created Argo CD repo credential '{name}' for '{r['repo_url']}'")
+                    logger.info(f"✅ Created Argo CD repo-creds '{name}' for '{prefix}'")
                 except ApiException as e:
                     if e.status == 409:
                         try:
                             self.k8s_core_v1.replace_namespaced_secret(name, self.ARGOCD_NAMESPACE, body)
                         except ApiException as re:
-                            logger.error(f"❌ Failed to update repo credential '{name}': {re}")
+                            logger.error(f"❌ Failed to update repo-creds '{name}': {re}")
                             ok = False
                     else:
-                        logger.error(f"❌ Failed to create repo credential '{name}': {e}")
+                        logger.error(f"❌ Failed to create repo-creds '{name}': {e}")
                         ok = False
 
-        # Prune Secrets we made for this slug that are no longer desired.
-        previous = self._project_repo_secrets.get(slug, set())
-        for stale in previous - set(desired):
-            if self._delete_repo_secret(stale):
-                logger.info(f"🗑️ Pruned stale Argo CD repo credential '{stale}'")
-            else:
-                ok = False
-        if ok:
-            self._project_repo_secrets[slug] = set(desired)
+        # Prune our repo-creds no longer desired (label-scoped, so operator
+        # restarts don't need in-memory tracking).
+        desired_names = {self._repo_creds_name(p) for p in desired}
+        try:
+            existing = self.k8s_core_v1.list_namespaced_secret(
+                self.ARGOCD_NAMESPACE, label_selector="teams-operator/github-repo-creds=true"
+            )
+        except ApiException as e:
+            logger.error(f"❌ Could not list managed repo-creds for pruning: {e}")
+            return False
+        for s in existing.items:
+            if s.metadata.name not in desired_names:
+                if self._delete_repo_secret(s.metadata.name):
+                    logger.info(f"🗑️ Pruned stale Argo CD repo-creds '{s.metadata.name}'")
+                else:
+                    ok = False
         return ok
 
     def _delete_repo_secret(self, name: str) -> bool:
@@ -696,23 +778,46 @@ class TeamsOperator:
             logger.error(f"❌ Failed to delete Argo CD repo credential '{name}': {e}")
             return False
 
-    def delete_argocd_repo_credentials(self, slug: str) -> bool:
-        """Delete every Argo CD repository Secret this operator created for
-        project `slug` (project deletion). Lists by the teams-operator/project
-        label so it catches secrets even across an operator restart that cleared
-        the in-memory _project_repo_secrets tracking."""
-        ok = True
+    async def resolve_github_connections(self):
+        """Resolve pending GitHub App connections teams-api recorded: for each
+        {target, installation_id}, enumerate the installation's repos (App key)
+        and report them back so teams-api adds them. Runs at the top of a reconcile
+        so the freshly-added repos are included in this same cycle's fetch_teams.
+        Best-effort: a failure leaves the pending row for next cycle."""
         try:
-            secrets = self.k8s_core_v1.list_namespaced_secret(
-                self.ARGOCD_NAMESPACE, label_selector=f"teams-operator/project={slug}"
-            )
-        except ApiException as e:
-            logger.error(f"❌ Could not list repo credentials for project '{slug}': {e}")
-            return False
-        for s in secrets.items:
-            ok = self._delete_repo_secret(s.metadata.name) and ok
-        self._project_repo_secrets.pop(slug, None)
-        return ok
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self.teams_api_url}/internal/github-connections",
+                    headers=self._api_auth_headers(),
+                ) as resp:
+                    if resp.status != 200:
+                        logger.error(f"Failed to fetch pending github-connections: HTTP {resp.status}")
+                        return
+                    pending = await resp.json()
+
+                for conn in pending:
+                    target, installation_id = conn.get("target"), conn.get("installation_id")
+                    if not target or not installation_id:
+                        continue
+                    repos = self._github_installation_repos(installation_id)
+                    if repos is None:
+                        continue  # couldn't enumerate; leave pending for retry
+                    async with session.post(
+                        f"{self.teams_api_url}/internal/github-connections/resolve",
+                        headers=self._api_auth_headers(),
+                        json={"target": target, "installation_id": installation_id, "repos": repos},
+                    ) as rresp:
+                        if rresp.status == 200:
+                            logger.info(
+                                f"✅ Resolved GitHub connection for '{target}' "
+                                f"(installation {installation_id}, {len(repos)} repo(s))"
+                            )
+                        else:
+                            logger.error(f"Failed to resolve github-connection: HTTP {rresp.status}")
+        except aiohttp.ClientError as e:
+            logger.error(f"Error resolving github-connections: {e}")
+        except Exception as e:  # noqa: BLE001 - must not kill the reconcile loop
+            logger.error(f"Unexpected error resolving github-connections: {e}")
 
     def _emit_project_event(self, team_id: str, reason: str, message: str, healthy: bool = True) -> None:
         """Emit an Event for a project-level (not namespace-level) reconcile
@@ -1598,6 +1703,10 @@ class TeamsOperator:
     
     async def reconcile_teams(self):
         """Main reconciliation loop - sync teams with namespaces"""
+        # Resolve any pending GitHub App connections first, so repos a user just
+        # connected are already present in this cycle's fetch_teams below.
+        await self.resolve_github_connections()
+
         teams = await self.fetch_teams()
 
         # None => the API was unreachable/errored. Skip this cycle entirely so a
@@ -1658,9 +1767,10 @@ class TeamsOperator:
             # per-namespace teardown ran in delete_namespace as each namespace
             # went away; this covers the project-level objects and any residue).
             openbao_ok = self.delete_openbao_project_access(slug)
-            # Remove this project's Argo CD githubApp repository Secrets.
-            repo_creds_ok = self.delete_argocd_repo_credentials(slug)
-            if apps_ok and appproject_ok and rbac_ok and openbao_ok and repo_creds_ok:
+            # The shared githubApp repo-creds are cluster-wide, not per project —
+            # reconcile_github_repo_creds prunes any no longer referenced by any
+            # remaining project, so nothing project-specific to delete here.
+            if apps_ok and appproject_ok and rbac_ok and openbao_ok:
                 del self._project_slugs[team_id]
                 self._last_project_state.pop(team_id, None)
                 self._emit_project_event(team_id, "ProjectDeprovisioned", f"Argo CD project '{slug}' removed")
@@ -1728,14 +1838,13 @@ class TeamsOperator:
             # union in /internal/teams, so a change to the global whitelist
             # changes this tuple for every project and re-triggers the reconcile
             # below via state_key. No separate global fetch needed here.
+            # source_repos already includes GitHub-connected repos (teams-api adds
+            # them to the project's repos on resolve), so the existing state key
+            # covers connect/disconnect. The App CREDENTIAL is materialized once,
+            # cluster-wide, after this loop (reconcile_github_repo_creds) — a
+            # single repo-creds per account, not per project.
             source_repos = tuple(sorted(team.get('source_repos') or []))
-            # Connected-repo GitHub App installations, in the state key so a
-            # connect/disconnect re-triggers repo-credential reconciliation.
-            repo_installations = team.get('repo_installations') or []
-            repo_inst_key = tuple(sorted(
-                (r.get('repo_url'), r.get('installation_id')) for r in repo_installations
-            ))
-            state_key = (frozenset(namespaces), source_repos, repo_inst_key)
+            state_key = (frozenset(namespaces), source_repos)
             if self._last_project_state.get(team_id) == state_key:
                 continue  # nothing this operator manages has changed
 
@@ -1744,10 +1853,8 @@ class TeamsOperator:
             # Project-wide OpenBao owner tier (once per project — distinct from
             # the per-namespace maintainer access in the RBAC-part-1 loop above).
             openbao_proj_ok = self.ensure_openbao_project_access(argocd_project)
-            # Argo CD githubApp repo credentials for connected repos.
-            repo_creds_ok = self.ensure_argocd_repo_credentials(argocd_project, repo_installations)
 
-            if appproject_ok and rbac_ok and openbao_proj_ok and repo_creds_ok:
+            if appproject_ok and rbac_ok and openbao_proj_ok:
                 self._last_project_state[team_id] = state_key
                 self._emit_project_event(
                     team_id, "ProjectProvisioned",
@@ -1758,10 +1865,13 @@ class TeamsOperator:
                 self._emit_project_event(
                     team_id, "ProjectProvisionFailed",
                     f"Argo CD project '{argocd_project}' provisioning incomplete "
-                    f"(appproject={appproject_ok}, rbac={rbac_ok}, openbao={openbao_proj_ok}, "
-                    f"repo_creds={repo_creds_ok})",
+                    f"(appproject={appproject_ok}, rbac={rbac_ok}, openbao={openbao_proj_ok})",
                     healthy=False,
                 )
+
+        # Cluster-wide: one Argo CD githubApp repo-creds per account across all
+        # projects' connected repos (a single copy of the App key, not per repo).
+        self.reconcile_github_repo_creds(current_teams)
 
         # RBAC sync, part 2: the one binding that's still user-list-based —
         # cluster-admin for Keycloak `admin`-role holders. A single cluster-

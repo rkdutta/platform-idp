@@ -88,7 +88,6 @@ export class ProjectListComponent implements OnInit, OnDestroy {
   sourceReposExpanded: { [projectId: string]: boolean } = {};
   sourceRepos: { [projectId: string]: SourceRepoInfo[] } = {};
   loadingSourceRepos: { [projectId: string]: boolean } = {};
-  newRepoUrl: { [projectId: string]: string } = {};
 
   // public so the template can gate the Delete button on manage rights.
   constructor(
@@ -244,21 +243,6 @@ export class ProjectListComponent implements OnInit, OnDestroy {
     });
   }
 
-  addSourceRepo(project: Project) {
-    const repoUrl = (this.newRepoUrl[project.id] || "").trim();
-    if (!repoUrl) {
-      return;
-    }
-    this.actionError = "";
-    this.projectsService.addSourceRepo(project.id, repoUrl).subscribe({
-      next: (repos) => {
-        this.sourceRepos[project.id] = repos;
-        this.newRepoUrl[project.id] = "";
-      },
-      error: (error) => (this.actionError = error),
-    });
-  }
-
   removeSourceRepo(project: Project, repoUrl: string) {
     this.actionError = "";
     this.projectsService.removeSourceRepo(project.id, repoUrl).subscribe({
@@ -267,12 +251,12 @@ export class ProjectListComponent implements OnInit, OnDestroy {
     });
   }
 
-  /** Start the GitHub App connect flow: fetch the install URL, then send the
-   *  browser to GitHub. On return, the callback bounces back to the portal and
-   *  the repo shows as connected on the next source-repos load. */
-  connectRepo(project: Project, repoUrl: string) {
+  /** "Add repos from GitHub": fetch the install URL and send the browser to
+   *  GitHub, where the user picks the repositories. The operator resolves the
+   *  selection and adds them; they appear on the next source-repos load. */
+  addReposFromGithub(project: Project) {
     this.actionError = "";
-    this.projectsService.getGithubInstallUrl(project.id, repoUrl).subscribe({
+    this.projectsService.getGithubInstallUrl(project.id).subscribe({
       next: (res) => (window.location.href = res.install_url),
       error: (error) => (this.actionError = error),
     });

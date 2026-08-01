@@ -186,10 +186,12 @@ export class ProjectsService {
       .pipe(catchError(this.handleError));
   }
 
-  /** Start the GitHub App connect flow for a repo: returns the install/authorize
-   *  URL (carrying a signed state) to send the user's browser to. */
-  getGithubInstallUrl(projectId: string, repoUrl: string): Observable<{ install_url: string }> {
-    const params = new URLSearchParams({ project_id: projectId, repo_url: repoUrl });
+  /** Start the "add repos from GitHub" flow: returns the App install/configure
+   *  URL (carrying a signed state) to send the user's browser to. `target` is a
+   *  project id, or the literal 'global' for the admin whitelist. The user picks
+   *  the repos on GitHub; the operator resolves and adds them. */
+  getGithubInstallUrl(target: string): Observable<{ install_url: string }> {
+    const params = new URLSearchParams({ target });
     const url = `${this.apiUrl}/github/install-url?${params.toString()}`;
     return this.http.get<{ install_url: string }>(url).pipe(catchError(this.handleError));
   }

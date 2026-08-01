@@ -98,6 +98,20 @@ CREATE TABLE IF NOT EXISTS global_source_repos (
     repo_url    TEXT PRIMARY KEY
 );
 
+-- Pending GitHub App connections awaiting resolution (see
+-- docs/self-service-repos-github-app.md). When a user finishes the "pick repos
+-- on GitHub" flow, the callback records (target, installation_id) here — teams-api
+-- never holds the App key, so it cannot enumerate the repos itself. teams-operator
+-- (which does hold the key) polls these, resolves each installation to its repo
+-- list, and reports them back (/internal/github-connections/resolve), which adds
+-- the repos and deletes the row. `target` is a project id or the literal 'global'.
+CREATE TABLE IF NOT EXISTS github_connections (
+    target          TEXT NOT NULL,
+    installation_id TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    PRIMARY KEY (target, installation_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_ns_project ON project_namespaces(project_id);
 CREATE INDEX IF NOT EXISTS idx_owner_uid  ON project_owners(user_id);
 CREATE INDEX IF NOT EXISTS idx_grant_uid  ON namespace_grants(user_id);
@@ -499,6 +513,33 @@ def add_global_source_repo(repo_url: str) -> None:
 def remove_global_source_repo(repo_url: str) -> None:
     with _lock:
         _db().execute("DELETE FROM global_source_repos WHERE repo_url = ?", (repo_url,))
+        _db().commit()
+
+
+# --- Pending GitHub App connections (operator resolves these; see main.py) -----
+def add_github_connection(target: str, installation_id: str) -> None:
+    with _lock:
+        _db().execute(
+            "INSERT OR IGNORE INTO github_connections (target, installation_id, created_at) "
+            "VALUES (?,?,?)",
+            (target, installation_id, datetime.now().isoformat()),
+        )
+        _db().commit()
+
+
+def pending_github_connections() -> List[dict]:
+    rows = _db().execute(
+        "SELECT target, installation_id FROM github_connections ORDER BY created_at"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_github_connection(target: str, installation_id: str) -> None:
+    with _lock:
+        _db().execute(
+            "DELETE FROM github_connections WHERE target = ? AND installation_id = ?",
+            (target, installation_id),
+        )
         _db().commit()
 
 

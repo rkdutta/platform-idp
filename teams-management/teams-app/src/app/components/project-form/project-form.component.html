@@ -19,7 +19,9 @@
   <div class="form-group">
     <label>Source repositories <span class="required">*</span></label>
     <p class="field-hint">
-      At least one is required. Pick from the whitelist and/or add your own.
+      At least one is required. Pick from the whitelist below. Need a repo that
+      isn't listed? Connect it from GitHub on an existing project or the global
+      whitelist, then it becomes available here.
     </p>
 
     <!-- Selected repos (what will be submitted). -->
@@ -40,16 +42,10 @@
         + {{ repo }}
       </button>
     </div>
-
-    <!-- Add an ad-hoc repo. -->
-    <div class="adhoc-repo">
-      <input type="text" class="form-control" [(ngModel)]="newRepoUrl"
-             [ngModelOptions]="{ standalone: true }"
-             placeholder="https://github.com/org/repo.git"
-             (keyup.enter)="addAdHocRepo(); $event.preventDefault()">
-      <button type="button" class="btn btn-sm" (click)="addAdHocRepo()"
-              [disabled]="!newRepoUrl">+ Add repo</button>
-    </div>
+    <p class="field-hint" *ngIf="whitelist.length === 0">
+      No whitelisted repos yet — an admin needs to connect repos to the global
+      whitelist first.
+    </p>
   </div>
 
   <div class="error-message" *ngIf="errorMessage">

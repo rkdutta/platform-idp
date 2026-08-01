@@ -16,12 +16,12 @@ export class ProjectFormComponent implements OnInit {
   isSubmitting = false;
   errorMessage = '';
 
-  // Repos are mandatory at creation (>=1). A project manager may pick any number
-  // from the admin global whitelist and/or add ad-hoc URLs. `selectedRepos` is
-  // the working set the form submits; `whitelist` seeds the checkboxes.
+  // Repos are mandatory at creation (>=1). A project manager picks from the admin
+  // global whitelist (repos connected via the GitHub App). To use a brand-new
+  // repo, connect it on GitHub first (global whitelist, or the created project's
+  // "Add repos from GitHub"). `selectedRepos` is the working set the form submits.
   whitelist: string[] = [];
   selectedRepos: string[] = [];
-  newRepoUrl = '';
 
   constructor(
     private fb: FormBuilder,
@@ -52,22 +52,6 @@ export class ProjectFormComponent implements OnInit {
     }
   }
 
-  addAdHocRepo() {
-    const url = this.newRepoUrl.trim();
-    if (!url) {
-      return;
-    }
-    if (!/^(https?:\/\/|git@)/.test(url)) {
-      this.errorMessage = 'Repo URL must start with https:// or git@';
-      return;
-    }
-    if (!this.selectedRepos.includes(url)) {
-      this.selectedRepos.push(url);
-    }
-    this.newRepoUrl = '';
-    this.errorMessage = '';
-  }
-
   removeRepo(repo: string) {
     this.selectedRepos = this.selectedRepos.filter((r) => r !== repo);
   }
@@ -93,7 +77,6 @@ export class ProjectFormComponent implements OnInit {
       next: () => {
         this.projectForm.reset();
         this.selectedRepos = [];
-        this.newRepoUrl = '';
         this.projectCreated.emit();
         this.isSubmitting = false;
       },

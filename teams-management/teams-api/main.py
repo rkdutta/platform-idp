@@ -65,13 +65,15 @@ K8S_API_CA_CERT = os.getenv("K8S_API_CA_CERT", "")
 KEYCLOAK_CA_CERT = os.getenv("KEYCLOAK_CA_CERT", "")
 
 # GitHub App self-service repo connection (see docs/self-service-repos-github-app.md).
-# GITHUB_APP_SLUG is the App's URL slug (github.com/apps/<slug>). The App id +
-# private key are NOT here — they live in OpenBao (kv/platform/github-app/) and are
-# only ever read by teams-operator to mint Argo CD repo-creds. teams-api only
-# orchestrates the browser install/authorize handshake and records the resulting
-# installation_id (an identifier, not a secret). GITHUB_APP_STATE_SECRET signs the
-# OAuth `state` so a callback can be trusted without a bearer token; TEAMS_APP_URL
-# is where the callback bounces the user's browser back to.
+# GITHUB_APP_SLUG is the App's URL slug (github.com/apps/<slug>). The flow is
+# "click Add -> pick repos on GitHub -> they're added": GitHub's post-install
+# redirect gives us only an installation_id. teams-api deliberately does NOT hold
+# the App key, so it cannot enumerate the picked repos itself — instead the callback
+# records a pending connection (store.add_github_connection) and teams-operator
+# (which holds the key) resolves it to the repo list and reports it back via
+# /internal/github-connections/resolve. GITHUB_APP_STATE_SECRET signs the `state`
+# so the public callback is trustworthy without a bearer token; TEAMS_APP_URL is
+# where the callback bounces the browser back.
 GITHUB_APP_SLUG = os.getenv("GITHUB_APP_SLUG", "")
 GITHUB_APP_STATE_SECRET = os.getenv("GITHUB_APP_STATE_SECRET", "")
 GITHUB_APP_STATE_TTL = int(os.getenv("GITHUB_APP_STATE_TTL", "900"))  # seconds
@@ -1013,61 +1015,62 @@ def remove_source_repo(request: Request, project_id: str, body: SourceRepo):
 
 
 # --- GitHub App: self-service private-repo connection -------------------------
-# The user clicks "Connect" -> we hand back a GitHub install URL carrying a
-# signed `state` -> GitHub asks them to authorize the platform App on the repo ->
-# GitHub redirects the browser to /github/callback with an installation_id, which
-# we bind to the repo. teams-operator then materializes the Argo CD githubApp
-# repo-creds from the App key in OpenBao. No secret ever passes through here.
-# See docs/self-service-repos-github-app.md.
+# Flow: user clicks "Add repos from GitHub" -> we return the App install URL
+# carrying a signed `state` (which just remembers WHERE to add them: a project or
+# the global whitelist) -> GitHub lets them pick repositories -> GitHub redirects
+# the browser to /github/callback with an installation_id. teams-api has NO App
+# key, so it can't enumerate the picked repos; it records a pending connection and
+# teams-operator (which holds the key) resolves it to the repo list, reports it
+# back (/internal/github-connections/resolve), and materializes the Argo CD repo
+# credentials. See docs/self-service-repos-github-app.md.
+#
+# `state` carries a `target`: a project id, or the literal "global".
 
-def _sign_state(payload: str) -> str:
+def _sign_state(target: str) -> str:
+    payload = f"{target}.{time.time() + GITHUB_APP_STATE_TTL:.0f}"
     sig = hmac.new(GITHUB_APP_STATE_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    raw = f"{payload}.{sig}".encode()
-    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    return base64.urlsafe_b64encode(f"{payload}.{sig}".encode()).decode().rstrip("=")
 
 
-def _verify_state(state: str) -> Optional[dict]:
-    """Return {project_id, repo_url} if `state` is a valid, unexpired token we
-    signed, else None."""
+def _verify_state(state: str) -> Optional[str]:
+    """Return the `target` (project id or 'global') if `state` is a valid,
+    unexpired token we signed, else None."""
     try:
         padded = state + "=" * (-len(state) % 4)
         raw = base64.urlsafe_b64decode(padded.encode()).decode()
-        payload, sig = raw.rsplit(".", 1)
+        target, expiry_s, sig = raw.split(".", 2)
         expected = hmac.new(
-            GITHUB_APP_STATE_SECRET.encode(), payload.encode(), hashlib.sha256
+            GITHUB_APP_STATE_SECRET.encode(), f"{target}.{expiry_s}".encode(), hashlib.sha256
         ).hexdigest()
         if not hmac.compare_digest(sig, expected):
             return None
-        project_id, repo_b64, expiry_s = payload.split(".", 2)
         if time.time() > float(expiry_s):
             return None
-        # repo_b64 was emitted with its '=' padding stripped (see install-url) —
-        # re-pad before decoding or urlsafe_b64decode raises on bad padding.
-        repo_b64_padded = repo_b64 + "=" * (-len(repo_b64) % 4)
-        repo_url = base64.urlsafe_b64decode(repo_b64_padded.encode()).decode()
-        return {"project_id": project_id, "repo_url": repo_url}
+        return target
     except (ValueError, TypeError):
         return None
 
 
 @app.get("/github/install-url")
-def github_install_url(request: Request, project_id: str, repo_url: str):
-    """Return the GitHub App install/authorize URL for connecting `repo_url` to
-    `project_id` (admin or owner). The signed `state` lets the public callback
-    trust the result without a bearer token."""
+def github_install_url(request: Request, target: str):
+    """Return the GitHub App install/configure URL for adding repos to `target`
+    (a project id — admin or owner — or the literal 'global' — admin only). The
+    user picks the repositories on GitHub; the signed `state` just tells the
+    public callback where to add whatever they pick."""
     if not GITHUB_APP_SLUG or not GITHUB_APP_STATE_SECRET:
         raise HTTPException(
             status_code=503,
             detail="GitHub App not configured (GITHUB_APP_SLUG/GITHUB_APP_STATE_SECRET)",
         )
-    project = authz.require_project_owner(request, project_id)
-    if not store.repo_exists(project_id, repo_url):
-        raise HTTPException(status_code=404, detail="Repo not part of this project")
+    if target == "global":
+        require_admin(request)
+        label = "*"
+    else:
+        project = authz.require_project_owner(request, target)
+        label = project["name"]
 
-    repo_b64 = base64.urlsafe_b64encode(repo_url.encode()).decode().rstrip("=")
-    expiry = f"{time.time() + GITHUB_APP_STATE_TTL:.0f}"
-    state = _sign_state(f"{project_id}.{repo_b64}.{expiry}")
-    store.record(caller_name(request), "github.connect.start", project["name"], repo_url)
+    state = _sign_state(target)
+    store.record(caller_name(request), "github.connect.start", label, "")
     install_url = (
         f"https://github.com/apps/{GITHUB_APP_SLUG}/installations/new?"
         + urlencode({"state": state})
@@ -1078,21 +1081,24 @@ def github_install_url(request: Request, project_id: str, repo_url: str):
 @app.get("/github/callback")
 def github_callback(request: Request, state: str = "", installation_id: str = "", setup_action: str = ""):
     """Public (see auth.PUBLIC_PATHS): GitHub redirects the user's browser here
-    after they authorize the App. Trust comes from the signed `state`, not a
-    bearer token. Binds the installation to the repo and bounces the browser back
-    to the portal."""
-    parsed = _verify_state(state) if state else None
-    if not parsed:
+    after they pick repositories. Trust comes from the signed `state`, not a
+    bearer token. teams-api can't enumerate the picked repos (it has no App key),
+    so it records a PENDING connection; teams-operator resolves it to the repo list
+    on its next poll and reports it back. Bounces the browser back to the portal."""
+    target = _verify_state(state) if state else None
+    if not target:
         return RedirectResponse(url=f"{TEAMS_APP_URL}/?github=invalid_state")
-    project = store.get_project(parsed["project_id"])
-    if not project or not store.repo_exists(project["id"], parsed["repo_url"]):
-        return RedirectResponse(url=f"{TEAMS_APP_URL}/?github=repo_gone")
-    if installation_id:
-        store.set_repo_installation(project["id"], parsed["repo_url"], installation_id)
-        store.record("github-app", "github.connect.done", project["name"], parsed["repo_url"])
-        return RedirectResponse(url=f"{TEAMS_APP_URL}/?github=connected")
-    # setup_action=request (org owner must approve) or the user cancelled.
-    return RedirectResponse(url=f"{TEAMS_APP_URL}/?github={setup_action or 'cancelled'}")
+    if not installation_id:
+        # The org owner must approve the install first, or the user cancelled.
+        return RedirectResponse(url=f"{TEAMS_APP_URL}/?github={setup_action or 'cancelled'}")
+
+    # A stale/deleted project fails cleanly (global always valid).
+    if target != "global" and not store.get_project(target):
+        return RedirectResponse(url=f"{TEAMS_APP_URL}/?github=target_gone")
+
+    store.add_github_connection(target, installation_id)
+    store.record("github-app", "github.connect.pending", target, installation_id)
+    return RedirectResponse(url=f"{TEAMS_APP_URL}/?github=connecting")
 
 @app.get("/compliance", response_model=List[ComplianceSummary])
 def get_all_compliance(request: Request):
@@ -1372,6 +1378,42 @@ def internal_access():
             logger.error("Could not list admin role members: %s", e)
 
     return {"namespaces": namespaces, "admins": admins}
+
+
+class GithubConnectionResolve(BaseModel):
+    target: str                      # project id, or the literal "global"
+    installation_id: str
+    repos: List[str] = []            # HTTPS clone URLs the installation grants
+
+
+@app.get("/internal/github-connections", dependencies=[Depends(require_operator)])
+def internal_github_connections():
+    """Pending GitHub App connections for teams-operator to resolve. Each is
+    {target, installation_id}; the operator enumerates the installation's repos
+    (it holds the App key, teams-api does not) and POSTs them to
+    /internal/github-connections/resolve. See docs/self-service-repos-github-app.md."""
+    return store.pending_github_connections()
+
+
+@app.post("/internal/github-connections/resolve", dependencies=[Depends(require_operator)])
+def internal_resolve_github_connection(body: GithubConnectionResolve):
+    """teams-operator reports the repos an installation grants; teams-api adds them
+    to the target (a project's source repos, connected, or the global whitelist)
+    and clears the pending row. Idempotent — a repeated report just re-adds
+    already-present repos. A resolve for a since-deleted project still clears the
+    pending row (nothing to add)."""
+    if body.target == "global":
+        for url in body.repos:
+            store.add_global_source_repo(url)
+    else:
+        project = store.get_project(body.target)
+        if project:
+            for url in body.repos:
+                store.add_source_repo(project["id"], url)
+                store.set_repo_installation(project["id"], url, body.installation_id)
+    store.delete_github_connection(body.target, body.installation_id)
+    store.record("github-app", "github.connect.resolved", body.target, f"{len(body.repos)} repo(s)")
+    return {"resolved": True, "count": len(body.repos)}
 
 
 @app.get("/health")

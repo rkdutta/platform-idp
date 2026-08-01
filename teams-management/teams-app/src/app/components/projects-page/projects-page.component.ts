@@ -21,7 +21,6 @@ export class ProjectsPageComponent implements OnInit {
   @ViewChild("projectList") projectList!: ProjectListComponent;
 
   globalRepos: string[] = [];
-  newGlobalRepo = "";
   globalReposError = "";
 
   constructor(
@@ -43,17 +42,12 @@ export class ProjectsPageComponent implements OnInit {
     });
   }
 
-  addGlobalRepo() {
-    const url = this.newGlobalRepo.trim();
-    if (!url) {
-      return;
-    }
+  /** "Add repos from GitHub" for the global whitelist: send the browser to the
+   *  GitHub App to pick repositories; the operator resolves and adds them. */
+  addReposFromGithub() {
     this.globalReposError = "";
-    this.projectsService.addGlobalSourceRepo(url).subscribe({
-      next: (repos) => {
-        this.globalRepos = repos;
-        this.newGlobalRepo = "";
-      },
+    this.projectsService.getGithubInstallUrl("global").subscribe({
+      next: (res) => (window.location.href = res.install_url),
       error: (err) => (this.globalReposError = err),
     });
   }

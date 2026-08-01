@@ -535,14 +535,6 @@
                   {{ repo.connected ? "connected" : "not connected" }}
                 </span>
                 <button
-                  *ngIf="canManageProject(project) && !repo.connected"
-                  class="btn btn-sm"
-                  (click)="connectRepo(project, repo.url)"
-                  [title]="'Connect ' + repo.url + ' via GitHub'"
-                >
-                  Connect GitHub
-                </button>
-                <button
                   *ngIf="canManageProject(project) && repo.origin === 'project'"
                   class="btn btn-danger btn-sm btn-icon"
                   (click)="removeSourceRepo(project, repo.url)"
@@ -556,19 +548,8 @@
           </ng-container>
 
           <div class="order-ns" *ngIf="canManageProject(project)">
-            <input
-              type="text"
-              class="order-input"
-              [(ngModel)]="newRepoUrl[project.id]"
-              placeholder="https://github.com/org/repo.git"
-              (keyup.enter)="addSourceRepo(project)"
-            />
-            <button
-              class="btn btn-sm"
-              (click)="addSourceRepo(project)"
-              [disabled]="!newRepoUrl[project.id]"
-            >
-              + Add repo
+            <button class="btn btn-sm" (click)="addReposFromGithub(project)">
+              + Add repos from GitHub
             </button>
           </div>
         </div>

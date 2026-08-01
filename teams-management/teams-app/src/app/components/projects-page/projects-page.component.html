@@ -28,11 +28,8 @@
     </p>
 
     <div class="adhoc-repo">
-      <input type="text" class="form-control" [(ngModel)]="newGlobalRepo"
-             placeholder="https://github.com/org/repo.git"
-             (keyup.enter)="addGlobalRepo()">
-      <button class="btn btn-sm" (click)="addGlobalRepo()" [disabled]="!newGlobalRepo">
-        + Add to whitelist
+      <button class="btn btn-sm" (click)="addReposFromGithub()">
+        + Add repos from GitHub
       </button>
     </div>
     <div class="error-message" *ngIf="globalReposError">{{ globalReposError }}</div>
