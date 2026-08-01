@@ -10,6 +10,16 @@
   grid-template-columns: 1fr;
 }
 
+/* Left column: stacks the create-project form above the (admin-only) repo
+   whitelist. Being a single grid child, it keeps "Existing Projects" pinned
+   to the right column. */
+.form-column {
+  display: flex;
+  flex-direction: column;
+  gap: 30px;
+  min-width: 0;
+}
+
 .view-only-note {
   margin: 0 0 16px;
   padding: 10px 14px;
