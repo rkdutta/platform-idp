@@ -143,16 +143,22 @@ class TeamsOperator:
         self._openbao_oidc_accessor_cache: Optional[str] = None
 
         # GitHub App repo credentials (see docs/self-service-repos-github-app.md).
-        # The App id + private key live in OpenBao at OPENBAO_GITHUB_APP_PATH (a
-        # KV-v2 data path, so it includes the /data/ segment); this operator reads
-        # them (platform-operator-policy) and both (a) enumerate a connected
-        # installation's repos (resolve_github_connections) and (b) materialize a
-        # single Argo CD githubApp repo-creds per account (reconcile_github_repo_creds).
-        # _github_app_creds_cache caches the (id, key) pair for the process lifetime.
+        # The legacy single *platform* App id + private key live in OpenBao at
+        # OPENBAO_GITHUB_APP_PATH (a KV-v2 data path, so it includes /data/). Each
+        # per-project registered *connection* stores its own App key at
+        # kv/data/platform/github-apps/<connection-id> (see _openbao_github_app_path).
+        # This operator reads them (platform-operator-policy) to (a) enumerate a
+        # connected installation's repos and (b) materialize Argo CD githubApp repo
+        # credentials. _github_app_creds_cache caches (id, key) per connection key
+        # (None = the platform App) for the process lifetime.
         self.openbao_github_app_path = os.getenv(
             "OPENBAO_GITHUB_APP_PATH", "kv/data/platform/github-app"
         )
-        self._github_app_creds_cache: Optional[Tuple[str, str]] = None
+        # Per-connection App keys live under here (one KV entry per connection id).
+        self.openbao_github_apps_prefix = os.getenv(
+            "OPENBAO_GITHUB_APPS_PREFIX", "kv/data/platform/github-apps"
+        )
+        self._github_app_creds_cache: Dict[Optional[str], Tuple[str, str]] = {}
 
         # Per-namespace provisioning status (see update_namespace_status).
         # Deliberately a point-in-time "did the last reconcile attempt for
@@ -588,40 +594,53 @@ class TeamsOperator:
     # githubApp fields — Argo CD then mints its own short-lived installation
     # tokens. See docs/self-service-repos-github-app.md.
 
-    def _github_app_creds(self) -> Optional[Tuple[str, str]]:
-        """(app_id, private_key) from OpenBao, cached for the process lifetime.
-        Returns None — logging why — if the secret isn't present yet (the App
-        hasn't been registered/seeded) or OpenBao is unreachable; callers treat
-        that as "can't materialize this cycle", same as any transient failure."""
-        if self._github_app_creds_cache:
-            return self._github_app_creds_cache
-        resp = self._openbao_request("GET", self.openbao_github_app_path)
+    def _openbao_github_app_path(self, connection_id: Optional[str]) -> str:
+        """The KV-v2 data path holding an App key: the legacy platform App when
+        connection_id is falsy, else the per-connection entry."""
+        if not connection_id:
+            return self.openbao_github_app_path
+        return f"{self.openbao_github_apps_prefix}/{connection_id}"
+
+    def _github_app_creds(self, connection_id: Optional[str] = None) -> Optional[Tuple[str, str]]:
+        """(app_id, private_key) from OpenBao for a connection (None = the platform
+        App), cached per-connection for the process lifetime. Returns None —
+        logging why — if the secret isn't present yet (the App hasn't been
+        registered/seeded) or OpenBao is unreachable; callers treat that as
+        "can't materialize this cycle", same as any transient failure."""
+        key = connection_id or None
+        cached = self._github_app_creds_cache.get(key)
+        if cached:
+            return cached
+        path = self._openbao_github_app_path(connection_id)
+        resp = self._openbao_request("GET", path)
         if resp is None or not resp.ok:
             logger.error(
                 "❌ Could not read GitHub App creds from OpenBao "
-                f"({self.openbao_github_app_path}): "
-                f"{resp.status_code if resp is not None else 'no response'}"
+                f"({path}): {resp.status_code if resp is not None else 'no response'}"
             )
             return None
         data = (resp.json().get("data") or {}).get("data") or {}
         app_id, private_key = data.get("app_id"), data.get("private_key")
         if not app_id or not private_key:
             logger.error(
-                f"❌ GitHub App secret at {self.openbao_github_app_path} is missing "
-                "'app_id' and/or 'private_key' keys"
+                f"❌ GitHub App secret at {path} is missing 'app_id' and/or 'private_key' keys"
             )
             return None
-        self._github_app_creds_cache = (str(app_id), str(private_key))
-        return self._github_app_creds_cache
+        creds = (str(app_id), str(private_key))
+        self._github_app_creds_cache[key] = creds
+        return creds
 
-    def _github_installation_repos(self, installation_id: str) -> Optional[List[str]]:
+    def _github_installation_repos(
+        self, installation_id: str, connection_id: Optional[str] = None
+    ) -> Optional[List[str]]:
         """The HTTPS clone URLs an installation grants — the operator side of the
         Option-B flow: teams-api records a pending connection (it has no App key),
-        the operator resolves it here using the App key from OpenBao. Mints an App
-        JWT -> installation token -> lists repos (paginated). Returns None (logging
-        why) on any failure so resolve_github_connections leaves the pending row
-        for a retry next cycle."""
-        creds = self._github_app_creds()
+        the operator resolves it here using the App key from OpenBao for the
+        connection that minted it (None = the platform App). Mints an App JWT ->
+        installation token -> lists repos (paginated). Returns None (logging why)
+        on any failure so resolve_github_connections leaves the pending row for a
+        retry next cycle."""
+        creds = self._github_app_creds(connection_id)
         if creds is None:
             return None
         app_id, private_key = creds
@@ -697,15 +716,21 @@ class TeamsOperator:
 
     def reconcile_github_repo_creds(self, current_teams: Dict[str, dict]) -> bool:
         """Cluster-wide: one Argo CD githubApp `repo-creds` credential template per
-        (account-prefix, installation) across ALL projects' connected repos — a
-        SINGLE copy of the App key per account, not one per repo (the AppProject
-        sourceRepos + the admission guardrails are what authorize which repos each
-        project may actually use). Prunes any teams-operator-managed repo-creds no
-        longer desired. See docs/self-service-repos-github-app.md."""
-        # prefix -> installation_id, deduped across every project.
+        (account-prefix, installation) for repos connected through the legacy single
+        *platform* App (connection_id == '') — the global whitelist and any repo not
+        bound to a per-project connection. A single copy of the platform App key per
+        account, not one per repo. Repos bound to a registered per-project connection
+        are handled by ensure_connection_repo_credentials (per-repo `repository`
+        secrets), since two connections can cover the same account prefix and a
+        prefix template can't disambiguate them. Prunes managed repo-creds no longer
+        desired. See docs/self-service-repos-github-app.md."""
+        # prefix -> installation_id, deduped across every project. Platform-App
+        # (connection-less) repos only; connection-bound repos are per-repo.
         desired: Dict[str, str] = {}
         for team in current_teams.values():
             for r in team.get("repo_installations") or []:
+                if r.get("connection_id"):
+                    continue  # handled per-repo by ensure_connection_repo_credentials
                 prefix = self._account_prefix(r.get("repo_url", ""))
                 if prefix and r.get("installation_id"):
                     desired[prefix] = str(r["installation_id"])
@@ -778,6 +803,188 @@ class TeamsOperator:
             logger.error(f"❌ Failed to delete Argo CD repo credential '{name}': {e}")
             return False
 
+    @staticmethod
+    def _conn_repo_secret_name(repo_url: str) -> str:
+        """Deterministic name for a per-repo `repository` Secret (connection-bound
+        repos). Exact-URL match, so it beats any account-prefix `repo-creds`."""
+        return f"github-app-repo-{hashlib.sha1(repo_url.encode()).hexdigest()[:12]}"
+
+    def ensure_connection_repo_credentials(self, current_teams: Dict[str, dict]) -> bool:
+        """Per-repo Argo CD `repository` Secrets for repos connected through a
+        registered per-project connection. Unlike the account-level `repo-creds`
+        templates (reconcile_github_repo_creds), these match an EXACT repo URL, so
+        two projects' connections covering the same GitHub account never collide —
+        Argo CD prefers the exact-URL `repository` entry over any prefix template.
+        One Secret per connected repo, keyed by the repo URL; the App id + key come
+        from the repo's connection (app_id via /internal/teams, key from OpenBao
+        kv/platform/github-apps/<connection-id>). Prunes stale ones by label."""
+        # repo_url -> (installation_id, connection_id, app_id)
+        desired: Dict[str, Tuple[str, str, str]] = {}
+        for team in current_teams.values():
+            conn_app_id = {
+                c.get("id"): str(c.get("app_id", ""))
+                for c in (team.get("github_connections") or [])
+            }
+            for r in team.get("repo_installations") or []:
+                conn_id = r.get("connection_id")
+                url, inst = r.get("repo_url", ""), r.get("installation_id", "")
+                if not conn_id or not url or not inst:
+                    continue
+                app_id = conn_app_id.get(conn_id, "")
+                if not app_id:
+                    # Connection not ready yet (no app_id) — skip; a later cycle
+                    # materializes it once teams-operator has resolved the registration.
+                    continue
+                desired[url] = (str(inst), str(conn_id), app_id)
+
+        ok = True
+        # Cache keys per connection so we read each App key from OpenBao once.
+        for url, (installation_id, connection_id, app_id) in desired.items():
+            creds = self._github_app_creds(connection_id)
+            if creds is None:
+                ok = False  # key unreadable this cycle; leave for retry, still prune
+                continue
+            _, private_key = creds
+            name = self._conn_repo_secret_name(url)
+            body = client.V1Secret(
+                metadata=client.V1ObjectMeta(
+                    name=name,
+                    namespace=self.ARGOCD_NAMESPACE,
+                    labels={
+                        "argocd.argoproj.io/secret-type": "repository",
+                        "app.kubernetes.io/managed-by": "teams-operator",
+                        "teams-operator/github-conn-repo": "true",
+                    },
+                ),
+                string_data={
+                    "type": "git",
+                    "url": url,
+                    "githubAppID": app_id,
+                    "githubAppInstallationID": installation_id,
+                    "githubAppPrivateKey": private_key,
+                },
+            )
+            try:
+                self.k8s_core_v1.create_namespaced_secret(self.ARGOCD_NAMESPACE, body)
+                logger.info(f"✅ Created Argo CD repository secret '{name}' for '{url}'")
+            except ApiException as e:
+                if e.status == 409:
+                    try:
+                        self.k8s_core_v1.replace_namespaced_secret(name, self.ARGOCD_NAMESPACE, body)
+                    except ApiException as re:
+                        logger.error(f"❌ Failed to update repository secret '{name}': {re}")
+                        ok = False
+                else:
+                    logger.error(f"❌ Failed to create repository secret '{name}': {e}")
+                    ok = False
+
+        # Prune per-repo secrets no longer desired (label-scoped).
+        desired_names = {self._conn_repo_secret_name(u) for u in desired}
+        try:
+            existing = self.k8s_core_v1.list_namespaced_secret(
+                self.ARGOCD_NAMESPACE, label_selector="teams-operator/github-conn-repo=true"
+            )
+        except ApiException as e:
+            logger.error(f"❌ Could not list managed repository secrets for pruning: {e}")
+            return False
+        for s in existing.items:
+            if s.metadata.name not in desired_names:
+                if self._delete_repo_secret(s.metadata.name):
+                    logger.info(f"🗑️ Pruned stale Argo CD repository secret '{s.metadata.name}'")
+                else:
+                    ok = False
+        return ok
+
+    async def resolve_github_registrations(self):
+        """Convert pending GitHub App-Manifest registrations teams-api recorded:
+        for each {connection_id, code}, exchange the one-time code with GitHub for
+        the new App's id/slug/name + private key, write the key to OpenBao
+        (kv/platform/github-apps/<connection-id>), and report the non-secret
+        identifiers back so teams-api flips the connection to 'ready'. This is why
+        teams-api never holds an App key — the conversion response (which carries
+        the key) is received here, in the component that owns OpenBao writes.
+        Best-effort: a failure leaves the pending row for the next cycle."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self.teams_api_url}/internal/github-registrations",
+                    headers=self._api_auth_headers(),
+                ) as resp:
+                    if resp.status != 200:
+                        logger.error(f"Failed to fetch pending github-registrations: HTTP {resp.status}")
+                        return
+                    pending = await resp.json()
+
+                for reg in pending:
+                    connection_id, code = reg.get("connection_id"), reg.get("code")
+                    if not connection_id or not code:
+                        continue
+                    app = self._exchange_manifest_code(code)
+                    if app is None:
+                        continue  # leave pending for retry (code valid ~1h)
+                    if not self._store_connection_app_key(connection_id, app):
+                        continue  # OpenBao write failed; retry next cycle
+                    async with session.post(
+                        f"{self.teams_api_url}/internal/github-registrations/resolve",
+                        headers=self._api_auth_headers(),
+                        json={
+                            "connection_id": connection_id,
+                            "app_id": str(app.get("id", "")),
+                            "slug": app.get("slug", ""),
+                            "name": app.get("name", ""),
+                        },
+                    ) as rresp:
+                        if rresp.status == 200:
+                            logger.info(
+                                f"✅ Registered GitHub App connection '{connection_id}' "
+                                f"(app '{app.get('slug')}')"
+                            )
+                        else:
+                            logger.error(f"Failed to resolve github-registration: HTTP {rresp.status}")
+        except aiohttp.ClientError as e:
+            logger.error(f"Error resolving github-registrations: {e}")
+        except Exception as e:  # noqa: BLE001 - must not kill the reconcile loop
+            logger.error(f"Unexpected error resolving github-registrations: {e}")
+
+    def _exchange_manifest_code(self, code: str) -> Optional[dict]:
+        """POST GitHub's App-Manifest conversion: code -> {id, slug, name, pem,...}.
+        Returns None (logging why) on any failure. The `pem` in the response is the
+        new App's private key — handled only here, written straight to OpenBao."""
+        try:
+            resp = requests.post(
+                f"https://api.github.com/app-manifests/{code}/conversions",
+                headers={"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"},
+                timeout=15,
+            )
+            if resp.status_code != 201:
+                logger.error(f"❌ GitHub manifest conversion {resp.status_code}: {resp.text[:200]}")
+                return None
+            app = resp.json()
+            if not app.get("id") or not app.get("pem"):
+                logger.error("❌ GitHub manifest conversion response missing id/pem")
+                return None
+            return app
+        except requests.RequestException as e:
+            logger.error(f"❌ GitHub manifest conversion call failed: {e}")
+            return None
+
+    def _store_connection_app_key(self, connection_id: str, app: dict) -> bool:
+        """Write a newly-created connection App's id + private key to OpenBao at
+        kv/platform/github-apps/<connection-id> (KV-v2 data path). Returns False
+        (logging why) on failure so the caller retries next cycle."""
+        path = self._openbao_github_app_path(connection_id)
+        body = {"data": {"app_id": str(app.get("id", "")), "private_key": app.get("pem", "")}}
+        resp = self._openbao_request("POST", path, body)
+        if resp is None or not resp.ok:
+            logger.error(
+                f"❌ Could not write connection App key to OpenBao ({path}): "
+                f"{resp.status_code if resp is not None else 'no response'}"
+            )
+            return False
+        # A freshly-written key invalidates any cached miss for this connection.
+        self._github_app_creds_cache.pop(connection_id, None)
+        return True
+
     async def resolve_github_connections(self):
         """Resolve pending GitHub App connections teams-api recorded: for each
         {target, installation_id}, enumerate the installation's repos (App key)
@@ -797,15 +1004,21 @@ class TeamsOperator:
 
                 for conn in pending:
                     target, installation_id = conn.get("target"), conn.get("installation_id")
+                    connection_id = conn.get("connection_id") or None
                     if not target or not installation_id:
                         continue
-                    repos = self._github_installation_repos(installation_id)
+                    repos = self._github_installation_repos(installation_id, connection_id)
                     if repos is None:
                         continue  # couldn't enumerate; leave pending for retry
                     async with session.post(
                         f"{self.teams_api_url}/internal/github-connections/resolve",
                         headers=self._api_auth_headers(),
-                        json={"target": target, "installation_id": installation_id, "repos": repos},
+                        json={
+                            "target": target,
+                            "installation_id": installation_id,
+                            "connection_id": connection_id or "",
+                            "repos": repos,
+                        },
                     ) as rresp:
                         if rresp.status == 200:
                             logger.info(
@@ -1703,8 +1916,11 @@ class TeamsOperator:
     
     async def reconcile_teams(self):
         """Main reconciliation loop - sync teams with namespaces"""
-        # Resolve any pending GitHub App connections first, so repos a user just
-        # connected are already present in this cycle's fetch_teams below.
+        # Convert any pending GitHub App-Manifest registrations first (so a
+        # newly-registered connection is 'ready' with its key in OpenBao before
+        # anything downstream needs it), then resolve pending repo connections, so
+        # repos a user just connected are already present in this cycle's fetch_teams.
+        await self.resolve_github_registrations()
         await self.resolve_github_connections()
 
         teams = await self.fetch_teams()
@@ -1869,9 +2085,14 @@ class TeamsOperator:
                     healthy=False,
                 )
 
-        # Cluster-wide: one Argo CD githubApp repo-creds per account across all
-        # projects' connected repos (a single copy of the App key, not per repo).
+        # Cluster-wide GitHub App repo credentials. Two complementary paths:
+        #  - platform-App (connection-less) repos + the global whitelist: one
+        #    account-level repo-creds template each (reconcile_github_repo_creds).
+        #  - per-project-connection repos: one exact-URL repository secret each
+        #    (ensure_connection_repo_credentials), so multiple connections over the
+        #    same GitHub account don't collide on a shared prefix.
         self.reconcile_github_repo_creds(current_teams)
+        self.ensure_connection_repo_credentials(current_teams)
 
         # RBAC sync, part 2: the one binding that's still user-list-based —
         # cluster-admin for Keycloak `admin`-role holders. A single cluster-

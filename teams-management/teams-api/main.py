@@ -78,6 +78,12 @@ GITHUB_APP_SLUG = os.getenv("GITHUB_APP_SLUG", "")
 GITHUB_APP_STATE_SECRET = os.getenv("GITHUB_APP_STATE_SECRET", "")
 GITHUB_APP_STATE_TTL = int(os.getenv("GITHUB_APP_STATE_TTL", "900"))  # seconds
 TEAMS_APP_URL = os.getenv("TEAMS_APP_URL", "https://teams.127.0.0.1.sslip.io")
+# teams-api's OWN external base URL — where GitHub redirects the App-Manifest
+# creation flow back to (/github/manifest-callback). Distinct from TEAMS_APP_URL
+# (the UI). The browser-mediated redirect resolves this host to loopback locally.
+TEAMS_API_PUBLIC_URL = os.getenv(
+    "TEAMS_API_PUBLIC_URL", "https://teams-api.127.0.0.1.sslip.io:8443"
+)
 
 
 def _sanitize(value: str) -> str:
@@ -415,6 +421,18 @@ class SourceRepoInfo(BaseModel):
     url: str
     origin: str = "project"     # project | global
     connected: bool = False
+
+class GithubConnection(BaseModel):
+    """A registered GitHub App connection a project may connect repos through
+    (see docs/self-service-repos-github-app.md). `status` is 'pending' while the
+    App-Manifest exchange is still being resolved by teams-operator, then
+    'ready'. `app_id`/`slug` are identifiers, never secrets."""
+    id: str
+    name: str = ""
+    slug: str = ""
+    app_id: str = ""
+    status: str = "pending"     # pending | ready
+    created_by: str = ""
 
 class OwnerRef(BaseModel):
     user_id: str
@@ -1026,54 +1044,113 @@ def remove_source_repo(request: Request, project_id: str, body: SourceRepo):
 #
 # `state` carries a `target`: a project id, or the literal "global".
 
-def _sign_state(target: str) -> str:
-    payload = f"{target}.{time.time() + GITHUB_APP_STATE_TTL:.0f}"
+def _sign_state(**fields: str) -> str:
+    """Pack + HMAC-sign a state blob for the GitHub redirect flows. Carries
+    arbitrary string fields (target, connection_id, kind, project_id) plus an
+    expiry, so the public callbacks can trust it without a bearer token."""
+    fields["exp"] = f"{time.time() + GITHUB_APP_STATE_TTL:.0f}"
+    payload = (
+        base64.urlsafe_b64encode(json.dumps(fields, sort_keys=True).encode())
+        .decode()
+        .rstrip("=")
+    )
     sig = hmac.new(GITHUB_APP_STATE_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    return base64.urlsafe_b64encode(f"{payload}.{sig}".encode()).decode().rstrip("=")
+    return f"{payload}.{sig}"
 
 
-def _verify_state(state: str) -> Optional[str]:
-    """Return the `target` (project id or 'global') if `state` is a valid,
-    unexpired token we signed, else None."""
+def _verify_state(state: str) -> Optional[dict]:
+    """Return the signed fields (a dict) if `state` is a valid, unexpired token
+    we signed, else None."""
     try:
-        padded = state + "=" * (-len(state) % 4)
-        raw = base64.urlsafe_b64decode(padded.encode()).decode()
-        target, expiry_s, sig = raw.split(".", 2)
+        payload, _, sig = state.rpartition(".")
         expected = hmac.new(
-            GITHUB_APP_STATE_SECRET.encode(), f"{target}.{expiry_s}".encode(), hashlib.sha256
+            GITHUB_APP_STATE_SECRET.encode(), payload.encode(), hashlib.sha256
         ).hexdigest()
-        if not hmac.compare_digest(sig, expected):
+        if not sig or not hmac.compare_digest(sig, expected):
             return None
-        if time.time() > float(expiry_s):
+        padded = payload + "=" * (-len(payload) % 4)
+        fields = json.loads(base64.urlsafe_b64decode(padded.encode()).decode())
+        if time.time() > float(fields.get("exp", 0)):
             return None
-        return target
+        return fields
     except (ValueError, TypeError):
         return None
 
 
+@app.get("/projects/{project_id}/github/connections", response_model=List[GithubConnection])
+def get_github_connections(request: Request, project_id: str):
+    """The registered GitHub App connections for a project (owner/admin). Includes
+    ones still mid-registration (status 'pending') so the UI can show progress."""
+    project = authz.require_project_owner(request, project_id)
+    return store.github_app_connections_of(project["id"])
+
+
+@app.get("/github/register-url")
+def github_register_url(request: Request, project_id: str):
+    """Begin registering a NEW GitHub App connection for a project via GitHub's
+    App-Manifest flow. Returns the manifest JSON + the GitHub action URL + a
+    signed state; the UI POSTs an auto-submitting form. GitHub creates the App on
+    the account the user picks, then redirects to /github/manifest-callback with a
+    one-time `code`. teams-api never exchanges that code (it would return the App
+    private key) — teams-operator does, and writes the key straight to OpenBao."""
+    if not GITHUB_APP_STATE_SECRET:
+        raise HTTPException(status_code=503, detail="GitHub App state secret not configured")
+    project = authz.require_project_owner(request, project_id)
+    connection_id = uuid.uuid4().hex
+    store.add_github_app_connection(connection_id, project["id"], caller_name(request))
+    state = _sign_state(kind="register", project_id=project["id"], connection_id=connection_id)
+    manifest = {
+        "name": f"{_sanitize(project['name'])[:20]}-argo-{connection_id[:6]}",
+        "url": TEAMS_APP_URL,
+        "redirect_url": f"{TEAMS_API_PUBLIC_URL}/github/manifest-callback",
+        "public": False,
+        # Least privilege: read-only repo contents + metadata is all Argo CD needs
+        # to clone and to mint installation tokens.
+        "default_permissions": {"contents": "read", "metadata": "read"},
+        "default_events": [],
+    }
+    store.record(caller_name(request), "github.register.start", project["name"], connection_id)
+    return {
+        "action_url": f"https://github.com/settings/apps/new?state={state}",
+        "manifest": json.dumps(manifest),
+        "connection_id": connection_id,
+    }
+
+
 @app.get("/github/install-url")
-def github_install_url(request: Request, target: str):
-    """Return the GitHub App install/configure URL for adding repos to `target`
-    (a project id — admin or owner — or the literal 'global' — admin only). The
-    user picks the repositories on GitHub; the signed `state` just tells the
-    public callback where to add whatever they pick."""
-    if not GITHUB_APP_SLUG or not GITHUB_APP_STATE_SECRET:
-        raise HTTPException(
-            status_code=503,
-            detail="GitHub App not configured (GITHUB_APP_SLUG/GITHUB_APP_STATE_SECRET)",
-        )
+def github_install_url(request: Request, target: str, connection_id: str = ""):
+    """Return the GitHub App install/configure URL for adding repos to `target`.
+    For a project target the user must pick one of the project's registered
+    connections (`connection_id`) — the install goes to *that* App. The literal
+    'global' target (admin only) uses the single platform App. The user picks the
+    repositories on GitHub; the signed `state` tells the callback where to add
+    them and which connection minted the installation."""
+    if not GITHUB_APP_STATE_SECRET:
+        raise HTTPException(status_code=503, detail="GitHub App state secret not configured")
     if target == "global":
         require_admin(request)
-        label = "*"
+        if not GITHUB_APP_SLUG:
+            raise HTTPException(status_code=503, detail="Platform GitHub App not configured (GITHUB_APP_SLUG)")
+        slug, label, conn_id = GITHUB_APP_SLUG, "*", ""
     else:
         project = authz.require_project_owner(request, target)
         label = project["name"]
+        if not connection_id:
+            raise HTTPException(
+                status_code=400,
+                detail="connection_id is required for a project — register or pick a connection first",
+            )
+        conn = store.get_github_app_connection(connection_id)
+        if not conn or conn["project_id"] != target:
+            raise HTTPException(status_code=404, detail="unknown connection for this project")
+        if conn["status"] != "ready" or not conn["slug"]:
+            raise HTTPException(status_code=409, detail="connection is still being registered")
+        slug, conn_id = conn["slug"], connection_id
 
-    state = _sign_state(target)
-    store.record(caller_name(request), "github.connect.start", label, "")
+    state = _sign_state(target=target, connection_id=conn_id)
+    store.record(caller_name(request), "github.connect.start", label, conn_id)
     install_url = (
-        f"https://github.com/apps/{GITHUB_APP_SLUG}/installations/new?"
-        + urlencode({"state": state})
+        f"https://github.com/apps/{slug}/installations/new?" + urlencode({"state": state})
     )
     return {"install_url": install_url}
 
@@ -1085,9 +1162,11 @@ def github_callback(request: Request, state: str = "", installation_id: str = ""
     bearer token. teams-api can't enumerate the picked repos (it has no App key),
     so it records a PENDING connection; teams-operator resolves it to the repo list
     on its next poll and reports it back. Bounces the browser back to the portal."""
-    target = _verify_state(state) if state else None
-    if not target:
+    fields = _verify_state(state) if state else None
+    if not fields or "target" not in fields:
         return RedirectResponse(url=f"{TEAMS_APP_URL}/?github=invalid_state")
+    target = fields["target"]
+    connection_id = fields.get("connection_id", "")
     if not installation_id:
         # The org owner must approve the install first, or the user cancelled.
         return RedirectResponse(url=f"{TEAMS_APP_URL}/?github={setup_action or 'cancelled'}")
@@ -1096,9 +1175,30 @@ def github_callback(request: Request, state: str = "", installation_id: str = ""
     if target != "global" and not store.get_project(target):
         return RedirectResponse(url=f"{TEAMS_APP_URL}/?github=target_gone")
 
-    store.add_github_connection(target, installation_id)
+    store.add_github_connection(target, installation_id, connection_id)
     store.record("github-app", "github.connect.pending", target, installation_id)
     return RedirectResponse(url=f"{TEAMS_APP_URL}/?github=connecting")
+
+
+@app.get("/github/manifest-callback")
+def github_manifest_callback(request: Request, code: str = "", state: str = ""):
+    """Public: GitHub redirects here after the user creates a new App via the
+    Manifest flow. `code` is a one-time (~1h) conversion code. teams-api does NOT
+    exchange it (the conversion response contains the App private key, and
+    teams-api never holds key material) — it records the pending registration for
+    teams-operator, which converts it and writes the key to OpenBao."""
+    fields = _verify_state(state) if state else None
+    if not fields or fields.get("kind") != "register":
+        return RedirectResponse(url=f"{TEAMS_APP_URL}/?github=invalid_state")
+    if not code:
+        return RedirectResponse(url=f"{TEAMS_APP_URL}/?github=cancelled")
+    project_id = fields.get("project_id", "")
+    connection_id = fields.get("connection_id", "")
+    if not store.get_project(project_id):
+        return RedirectResponse(url=f"{TEAMS_APP_URL}/?github=target_gone")
+    store.add_github_app_registration(connection_id, project_id, code)
+    store.record("github-app", "github.register.pending", project_id, connection_id)
+    return RedirectResponse(url=f"{TEAMS_APP_URL}/?github=registering")
 
 @app.get("/compliance", response_model=List[ComplianceSummary])
 def get_all_compliance(request: Request):
@@ -1334,10 +1434,17 @@ def internal_teams():
             "name": p["name"],
             "namespaces": p["namespaces"],
             "source_repos": store.effective_source_repos(p["id"]),
-            # Repos connected via the GitHub App, for the operator to materialize
-            # Argo CD githubApp repo credentials. installation_id is an identifier,
-            # not a secret (the App private key stays in OpenBao).
+            # Repos connected via a GitHub App, for the operator to materialize
+            # Argo CD githubApp repo credentials. Each carries installation_id +
+            # connection_id (which registered App minted it; '' = platform App).
+            # Identifiers, not secrets (the App private key stays in OpenBao).
             "repo_installations": store.connected_repos_of(p["id"]),
+            # The project's registered connections (id -> app_id/slug), so the
+            # operator can map a repo's connection_id to the right App id + key.
+            "github_connections": [
+                {"id": c["id"], "app_id": c["app_id"], "slug": c["slug"], "status": c["status"]}
+                for c in store.github_app_connections_of(p["id"], ready_only=True)
+            ],
             "argocd_project": argocd_project_name(p["name"]),
         }
         for p in store.list_projects()
@@ -1383,15 +1490,26 @@ def internal_access():
 class GithubConnectionResolve(BaseModel):
     target: str                      # project id, or the literal "global"
     installation_id: str
+    connection_id: str = ""          # which registered connection minted it ('' = platform App)
     repos: List[str] = []            # HTTPS clone URLs the installation grants
+
+
+class GithubRegistrationResolve(BaseModel):
+    """teams-operator's report after exchanging a GitHub App-Manifest `code`:
+    the new App's non-secret identifiers. The private key it obtained is written
+    straight to OpenBao by the operator and never travels through here."""
+    connection_id: str
+    app_id: str
+    slug: str
+    name: str = ""
 
 
 @app.get("/internal/github-connections", dependencies=[Depends(require_operator)])
 def internal_github_connections():
     """Pending GitHub App connections for teams-operator to resolve. Each is
-    {target, installation_id}; the operator enumerates the installation's repos
-    (it holds the App key, teams-api does not) and POSTs them to
-    /internal/github-connections/resolve. See docs/self-service-repos-github-app.md."""
+    {target, installation_id, connection_id}; the operator enumerates the
+    installation's repos (it holds the App key, teams-api does not) and POSTs them
+    to /internal/github-connections/resolve. See docs/self-service-repos-github-app.md."""
     return store.pending_github_connections()
 
 
@@ -1410,10 +1528,36 @@ def internal_resolve_github_connection(body: GithubConnectionResolve):
         if project:
             for url in body.repos:
                 store.add_source_repo(project["id"], url)
-                store.set_repo_installation(project["id"], url, body.installation_id)
+                store.set_repo_installation(
+                    project["id"], url, body.installation_id, body.connection_id
+                )
     store.delete_github_connection(body.target, body.installation_id)
     store.record("github-app", "github.connect.resolved", body.target, f"{len(body.repos)} repo(s)")
     return {"resolved": True, "count": len(body.repos)}
+
+
+@app.get("/internal/github-registrations", dependencies=[Depends(require_operator)])
+def internal_github_registrations():
+    """Pending GitHub App-Manifest exchanges for teams-operator to convert. Each is
+    {connection_id, project_id, code}; the operator POSTs the code to GitHub's
+    /app-manifests/{code}/conversions (teams-api never holds the key), writes the
+    returned private key to OpenBao, and reports the non-secret id/slug/name back
+    to /internal/github-registrations/resolve."""
+    return store.pending_github_app_registrations()
+
+
+@app.post("/internal/github-registrations/resolve", dependencies=[Depends(require_operator)])
+def internal_resolve_github_registration(body: GithubRegistrationResolve):
+    """teams-operator reports a newly-created App's identifiers after writing its
+    key to OpenBao; teams-api flips the connection to 'ready' and clears the
+    pending registration. A resolve for a since-deleted connection is a no-op."""
+    if store.get_github_app_connection(body.connection_id):
+        store.set_github_app_connection_ready(
+            body.connection_id, body.name, body.slug, body.app_id
+        )
+    store.delete_github_app_registration(body.connection_id)
+    store.record("github-app", "github.register.resolved", body.connection_id, body.slug)
+    return {"resolved": True}
 
 
 @app.get("/health")

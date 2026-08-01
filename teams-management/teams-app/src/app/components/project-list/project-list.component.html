@@ -549,10 +549,57 @@
             </div>
           </ng-container>
 
-          <div class="order-ns" *ngIf="canManageProject(project)">
-            <button class="btn btn-sm" (click)="addReposFromGithub(project)">
+          <div class="repo-add" *ngIf="canManageProject(project)">
+            <button
+              class="btn btn-sm"
+              (click)="toggleConnPicker(project.id)"
+              [attr.aria-expanded]="connPickerOpen[project.id]"
+            >
               <span class="btn-plus">+</span> Add repos from GitHub
+              <span class="chevron">{{ connPickerOpen[project.id] ? "▲" : "▼" }}</span>
             </button>
+
+            <!-- Connection picker: choose which registered GitHub App to add repos
+                 through, or register a new one via GitHub's App-Manifest flow. -->
+            <div class="conn-picker" *ngIf="connPickerOpen[project.id]">
+              <div class="detail-loading" *ngIf="loadingConns[project.id] && !connections[project.id]">
+                Loading connections…
+              </div>
+
+              <ng-container *ngIf="connections[project.id] as conns">
+                <p class="picker-hint" *ngIf="conns.length > 0">
+                  Add repos through one of this project's GitHub App connections:
+                </p>
+                <div class="conn-list" *ngIf="conns.length > 0">
+                  <button
+                    class="conn-item"
+                    *ngFor="let c of conns"
+                    [disabled]="c.status !== 'ready'"
+                    (click)="addReposFromConnection(project, c)"
+                    [title]="
+                      c.status === 'ready'
+                        ? 'Add repos via ' + (c.name || c.slug)
+                        : 'Still registering — check back shortly'
+                    "
+                  >
+                    <span class="conn-name">{{ c.name || c.slug || c.id }}</span>
+                    <span class="conn-status" [class.is-pending]="c.status !== 'ready'">
+                      {{ c.status === "ready" ? "ready" : "registering…" }}
+                    </span>
+                  </button>
+                </div>
+                <p class="detail-empty" *ngIf="conns.length === 0">
+                  No connections yet — register one to connect this project's repos.
+                </p>
+              </ng-container>
+
+              <button class="btn btn-sm btn-register" (click)="registerConnection(project)">
+                <span class="btn-plus">+</span> Register new connection
+              </button>
+              <div class="error-message" *ngIf="connError[project.id]">
+                {{ connError[project.id] }}
+              </div>
+            </div>
           </div>
         </div>
       </div>

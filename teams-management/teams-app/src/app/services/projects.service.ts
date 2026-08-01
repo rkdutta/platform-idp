@@ -2,7 +2,7 @@ import { Injectable } from '@angular/core';
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { Observable, throwError } from 'rxjs';
 import { catchError } from 'rxjs/operators';
-import { Project, ProjectCreate, SourceRepoInfo, ComplianceSummary, ComplianceDetail, NamespaceProvisioningStatus, ProjectEvent, PriorityTier, ProjectApplications, UserRef, NamespaceAccess, NamespaceRole, OwnerRef, Me } from '../models/project.model';
+import { Project, ProjectCreate, SourceRepoInfo, GithubConnection, ComplianceSummary, ComplianceDetail, NamespaceProvisioningStatus, ProjectEvent, PriorityTier, ProjectApplications, UserRef, NamespaceAccess, NamespaceRole, OwnerRef, Me } from '../models/project.model';
 import { environment } from '../../environments/environment';
 import { AuthService } from './auth.service';
 
@@ -188,12 +188,37 @@ export class ProjectsService {
 
   /** Start the "add repos from GitHub" flow: returns the App install/configure
    *  URL (carrying a signed state) to send the user's browser to. `target` is a
-   *  project id, or the literal 'global' for the admin whitelist. The user picks
-   *  the repos on GitHub; the operator resolves and adds them. */
-  getGithubInstallUrl(target: string): Observable<{ install_url: string }> {
+   *  project id, or the literal 'global' for the admin whitelist. For a project a
+   *  `connectionId` (one of the project's registered connections) is required —
+   *  the install goes to that App. The user picks the repos on GitHub; the
+   *  operator resolves and adds them. */
+  getGithubInstallUrl(target: string, connectionId?: string): Observable<{ install_url: string }> {
     const params = new URLSearchParams({ target });
+    if (connectionId) {
+      params.set('connection_id', connectionId);
+    }
     const url = `${this.apiUrl}/github/install-url?${params.toString()}`;
     return this.http.get<{ install_url: string }>(url).pipe(catchError(this.handleError));
+  }
+
+  /** A project's registered GitHub App connections (owner/admin). Includes ones
+   *  still mid-registration (status 'pending'). */
+  getGithubConnections(projectId: string): Observable<GithubConnection[]> {
+    const url = `${this.apiUrl}/projects/${projectId}/github/connections`;
+    return this.http.get<GithubConnection[]>(url).pipe(catchError(this.handleError));
+  }
+
+  /** Begin registering a NEW GitHub App connection for a project via GitHub's
+   *  App-Manifest flow. Returns the GitHub action URL + the manifest JSON to POST
+   *  as an auto-submitting form (see project-list's registerConnection). */
+  getGithubRegisterUrl(
+    projectId: string,
+  ): Observable<{ action_url: string; manifest: string; connection_id: string }> {
+    const params = new URLSearchParams({ project_id: projectId });
+    const url = `${this.apiUrl}/github/register-url?${params.toString()}`;
+    return this.http
+      .get<{ action_url: string; manifest: string; connection_id: string }>(url)
+      .pipe(catchError(this.handleError));
   }
 
   /** Grant/revoke the `project-manager` realm role (admin-only server-side) —

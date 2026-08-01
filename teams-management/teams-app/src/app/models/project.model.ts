@@ -33,6 +33,18 @@ export interface SourceRepoInfo {
   connected: boolean; // linked through the platform GitHub App
 }
 
+/** A registered GitHub App connection a project may add repos through. `status`
+ *  is 'pending' while the App-Manifest registration is still being resolved by
+ *  teams-operator, then 'ready'. See docs/self-service-repos-github-app.md. */
+export interface GithubConnection {
+  id: string;
+  name: string;
+  slug: string;
+  app_id: string;
+  status: 'pending' | 'ready';
+  created_by: string;
+}
+
 /** A Keycloak realm user (the directory the pickers are populated from). */
 export interface UserRef {
   id: string; // Keycloak `sub` — what grants are keyed on

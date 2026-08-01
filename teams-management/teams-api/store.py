@@ -83,11 +83,44 @@ CREATE TABLE IF NOT EXISTS audit (
 -- through (see docs/self-service-repos-github-app.md); '' means "not connected"
 -- (public repo, or connection pending). It is an identifier, NOT a secret - the
 -- only secret (the App private key) lives in OpenBao, never here.
+-- `connection_id` is which registered GitHub App connection (github_app_connections)
+-- minted that installation; '' means the legacy single platform App (or a public
+-- repo). teams-operator uses it to pick the right App key + id per repo.
 CREATE TABLE IF NOT EXISTS project_source_repos (
     project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     repo_url        TEXT NOT NULL,
     installation_id TEXT NOT NULL DEFAULT '',
+    connection_id   TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (project_id, repo_url)
+);
+
+-- Registered GitHub App "connections" a project may connect repos through
+-- (see docs/self-service-repos-github-app.md). Per-project (a connection belongs
+-- to the project that registered it). Created via GitHub's App Manifest flow: a
+-- row is inserted 'pending' when the manifest-callback fires, then teams-operator
+-- exchanges the one-time code for the App's id/slug/private-key, writes the key
+-- to OpenBao (kv/platform/github-apps/<id>) and reports the non-secret metadata
+-- back, flipping the row to 'ready'. `app_id`/`slug` are identifiers, NOT secrets.
+CREATE TABLE IF NOT EXISTS github_app_connections (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL DEFAULT '',
+    slug        TEXT NOT NULL DEFAULT '',
+    app_id      TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'ready')),
+    created_by  TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL
+);
+
+-- Pending GitHub App Manifest exchanges awaiting teams-operator (which performs
+-- the code->key conversion so teams-api never holds the App key). One row per
+-- connection being registered; `code` is GitHub's single-use, ~1h manifest
+-- conversion code. Deleted once the operator resolves it.
+CREATE TABLE IF NOT EXISTS github_app_registrations (
+    connection_id TEXT PRIMARY KEY REFERENCES github_app_connections(id) ON DELETE CASCADE,
+    project_id    TEXT NOT NULL,
+    code          TEXT NOT NULL,
+    created_at    TEXT NOT NULL
 );
 
 -- Admin-curated global whitelist of repos available to EVERY project (see
@@ -108,6 +141,7 @@ CREATE TABLE IF NOT EXISTS global_source_repos (
 CREATE TABLE IF NOT EXISTS github_connections (
     target          TEXT NOT NULL,
     installation_id TEXT NOT NULL,
+    connection_id   TEXT NOT NULL DEFAULT '',
     created_at      TEXT NOT NULL,
     PRIMARY KEY (target, installation_id)
 );
@@ -139,6 +173,7 @@ def connect(path: Optional[Path] = None) -> sqlite3.Connection:
         conn.commit()
         _migrate_stale_namespace_grants_fk(conn)
         _migrate_add_repo_installation_column(conn)
+        _migrate_add_connection_id_columns(conn)
         _conn = conn
         log.info("SQLite store ready at %s", db_path)
         return _conn
@@ -201,6 +236,28 @@ def _migrate_add_repo_installation_column(conn: sqlite3.Connection) -> None:
     conn.execute(
         "ALTER TABLE project_source_repos ADD COLUMN installation_id TEXT NOT NULL DEFAULT ''"
     )
+    conn.commit()
+
+
+def _migrate_add_connection_id_columns(conn: sqlite3.Connection) -> None:
+    """Add the `connection_id` columns introduced with multi-connection GitHub
+    App support (see docs/self-service-repos-github-app.md) to DBs created before
+    it. `CREATE TABLE IF NOT EXISTS` never adds a column to an existing table.
+    Idempotent: checks PRAGMA per table first. The github_app_connections /
+    github_app_registrations tables themselves are handled by CREATE IF NOT
+    EXISTS in the schema, so they need no migration here."""
+    repo_cols = {r["name"] for r in conn.execute("PRAGMA table_info(project_source_repos)")}
+    if "connection_id" not in repo_cols:
+        log.warning("Migrating project_source_repos: adding connection_id column")
+        conn.execute(
+            "ALTER TABLE project_source_repos ADD COLUMN connection_id TEXT NOT NULL DEFAULT ''"
+        )
+    conn_cols = {r["name"] for r in conn.execute("PRAGMA table_info(github_connections)")}
+    if "connection_id" not in conn_cols:
+        log.warning("Migrating github_connections: adding connection_id column")
+        conn.execute(
+            "ALTER TABLE github_connections ADD COLUMN connection_id TEXT NOT NULL DEFAULT ''"
+        )
     conn.commit()
 
 
@@ -461,25 +518,28 @@ def remove_source_repo(project_id: str, repo_url: str) -> None:
         _db().commit()
 
 
-def set_repo_installation(project_id: str, repo_url: str, installation_id: str) -> None:
+def set_repo_installation(
+    project_id: str, repo_url: str, installation_id: str, connection_id: str = ""
+) -> None:
     """Record (or clear, with '') the GitHub App installation a repo was
-    connected through. The repo must already exist for this project."""
+    connected through, and which registered connection minted it. The repo must
+    already exist for this project."""
     with _lock:
         _db().execute(
-            "UPDATE project_source_repos SET installation_id = ? "
+            "UPDATE project_source_repos SET installation_id = ?, connection_id = ? "
             "WHERE project_id = ? AND repo_url = ?",
-            (installation_id, project_id, repo_url),
+            (installation_id, connection_id, project_id, repo_url),
         )
         _db().commit()
 
 
 def connected_repos_of(project_id: str) -> List[dict]:
-    """The project's repos that have been connected through the GitHub App
-    (installation_id set): [{repo_url, installation_id}]. This is what
-    teams-operator needs to materialize Argo CD githubApp repo credentials
-    (see /internal/teams)."""
+    """The project's repos that have been connected through a GitHub App
+    (installation_id set): [{repo_url, installation_id, connection_id}]. This is
+    what teams-operator needs to materialize Argo CD githubApp repo credentials
+    (see /internal/teams). connection_id '' means the legacy platform App."""
     rows = _db().execute(
-        "SELECT repo_url, installation_id FROM project_source_repos "
+        "SELECT repo_url, installation_id, connection_id FROM project_source_repos "
         "WHERE project_id = ? AND installation_id != '' ORDER BY repo_url",
         (project_id,),
     ).fetchall()
@@ -517,19 +577,20 @@ def remove_global_source_repo(repo_url: str) -> None:
 
 
 # --- Pending GitHub App connections (operator resolves these; see main.py) -----
-def add_github_connection(target: str, installation_id: str) -> None:
+def add_github_connection(target: str, installation_id: str, connection_id: str = "") -> None:
     with _lock:
         _db().execute(
-            "INSERT OR IGNORE INTO github_connections (target, installation_id, created_at) "
-            "VALUES (?,?,?)",
-            (target, installation_id, datetime.now().isoformat()),
+            "INSERT INTO github_connections (target, installation_id, connection_id, created_at) "
+            "VALUES (?,?,?,?) "
+            "ON CONFLICT(target, installation_id) DO UPDATE SET connection_id = excluded.connection_id",
+            (target, installation_id, connection_id, datetime.now().isoformat()),
         )
         _db().commit()
 
 
 def pending_github_connections() -> List[dict]:
     rows = _db().execute(
-        "SELECT target, installation_id FROM github_connections ORDER BY created_at"
+        "SELECT target, installation_id, connection_id FROM github_connections ORDER BY created_at"
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -539,6 +600,88 @@ def delete_github_connection(target: str, installation_id: str) -> None:
         _db().execute(
             "DELETE FROM github_connections WHERE target = ? AND installation_id = ?",
             (target, installation_id),
+        )
+        _db().commit()
+
+
+# --- Registered GitHub App connections (per-project) ---------------------------
+def add_github_app_connection(
+    connection_id: str, project_id: str, created_by: str, status: str = "pending"
+) -> None:
+    """Insert a connection row (status 'pending' until the operator resolves the
+    manifest exchange). name/slug/app_id are filled in at resolve time."""
+    with _lock:
+        _db().execute(
+            "INSERT OR IGNORE INTO github_app_connections "
+            "(id, project_id, status, created_by, created_at) VALUES (?,?,?,?,?)",
+            (connection_id, project_id, status, created_by, datetime.now().isoformat()),
+        )
+        _db().commit()
+
+
+def set_github_app_connection_ready(
+    connection_id: str, name: str, slug: str, app_id: str
+) -> None:
+    """Flip a connection to 'ready' with the App metadata the operator resolved."""
+    with _lock:
+        _db().execute(
+            "UPDATE github_app_connections SET name = ?, slug = ?, app_id = ?, status = 'ready' "
+            "WHERE id = ?",
+            (name, slug, app_id, connection_id),
+        )
+        _db().commit()
+
+
+def github_app_connections_of(project_id: str, ready_only: bool = False) -> List[dict]:
+    """A project's registered GitHub App connections, newest first. When
+    ready_only, omit ones still mid-registration (no App key materialized yet)."""
+    q = (
+        "SELECT id, project_id, name, slug, app_id, status, created_by, created_at "
+        "FROM github_app_connections WHERE project_id = ?"
+    )
+    if ready_only:
+        q += " AND status = 'ready'"
+    q += " ORDER BY created_at DESC"
+    return [dict(r) for r in _db().execute(q, (project_id,)).fetchall()]
+
+
+def get_github_app_connection(connection_id: str) -> Optional[dict]:
+    row = _db().execute(
+        "SELECT id, project_id, name, slug, app_id, status, created_by, created_at "
+        "FROM github_app_connections WHERE id = ?",
+        (connection_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def delete_github_app_connection(connection_id: str) -> None:
+    with _lock:
+        _db().execute("DELETE FROM github_app_connections WHERE id = ?", (connection_id,))
+        _db().commit()
+
+
+# --- Pending GitHub App Manifest exchanges (operator performs the conversion) ---
+def add_github_app_registration(connection_id: str, project_id: str, code: str) -> None:
+    with _lock:
+        _db().execute(
+            "INSERT OR REPLACE INTO github_app_registrations "
+            "(connection_id, project_id, code, created_at) VALUES (?,?,?,?)",
+            (connection_id, project_id, code, datetime.now().isoformat()),
+        )
+        _db().commit()
+
+
+def pending_github_app_registrations() -> List[dict]:
+    rows = _db().execute(
+        "SELECT connection_id, project_id, code FROM github_app_registrations ORDER BY created_at"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_github_app_registration(connection_id: str) -> None:
+    with _lock:
+        _db().execute(
+            "DELETE FROM github_app_registrations WHERE connection_id = ?", (connection_id,)
         )
         _db().commit()
 

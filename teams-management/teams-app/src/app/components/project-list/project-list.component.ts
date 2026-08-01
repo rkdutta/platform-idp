@@ -5,6 +5,7 @@ import { environment } from "../../../environments/environment";
 import {
   Project,
   SourceRepoInfo,
+  GithubConnection,
   ComplianceStatus,
   ComplianceSummary,
   ComplianceDetail,
@@ -88,6 +89,15 @@ export class ProjectListComponent implements OnInit, OnDestroy {
   sourceReposExpanded: { [projectId: string]: boolean } = {};
   sourceRepos: { [projectId: string]: SourceRepoInfo[] } = {};
   loadingSourceRepos: { [projectId: string]: boolean } = {};
+
+  // GitHub App connection picker (per project). "Add repos from GitHub" no longer
+  // redirects straight to one platform App — it opens this picker so the user can
+  // choose one of the project's registered connections, or register a new one via
+  // GitHub's App-Manifest flow. See docs/self-service-repos-github-app.md.
+  connPickerOpen: { [projectId: string]: boolean } = {};
+  connections: { [projectId: string]: GithubConnection[] } = {};
+  loadingConns: { [projectId: string]: boolean } = {};
+  connError: { [projectId: string]: string } = {};
 
   // public so the template can gate the Delete button on manage rights.
   constructor(
@@ -251,15 +261,68 @@ export class ProjectListComponent implements OnInit, OnDestroy {
     });
   }
 
-  /** "Add repos from GitHub": fetch the install URL and send the browser to
-   *  GitHub, where the user picks the repositories. The operator resolves the
-   *  selection and adds them; they appear on the next source-repos load. */
-  addReposFromGithub(project: Project) {
-    this.actionError = "";
-    this.projectsService.getGithubInstallUrl(project.id).subscribe({
-      next: (res) => (window.location.href = res.install_url),
-      error: (error) => (this.actionError = error),
+  /** Toggle the connection picker for a project; lazy-load its connections on
+   *  first open so we don't fetch for every card up front. */
+  toggleConnPicker(projectId: string) {
+    this.connPickerOpen[projectId] = !this.connPickerOpen[projectId];
+    if (this.connPickerOpen[projectId] && !this.connections[projectId]) {
+      this.loadConnections(projectId);
+    }
+  }
+
+  loadConnections(projectId: string) {
+    this.loadingConns[projectId] = true;
+    this.connError[projectId] = "";
+    this.projectsService.getGithubConnections(projectId).subscribe({
+      next: (conns) => {
+        this.connections[projectId] = conns;
+        this.loadingConns[projectId] = false;
+      },
+      error: (error) => {
+        this.connError[projectId] = error;
+        this.loadingConns[projectId] = false;
+      },
     });
+  }
+
+  /** Add repos through a specific (ready) connection: fetch that connection's
+   *  install URL and send the browser to GitHub to pick repositories. The
+   *  operator resolves the selection and adds them on the next source-repos load. */
+  addReposFromConnection(project: Project, conn: GithubConnection) {
+    if (conn.status !== "ready") {
+      return;
+    }
+    this.connError[project.id] = "";
+    this.projectsService.getGithubInstallUrl(project.id, conn.id).subscribe({
+      next: (res) => (window.location.href = res.install_url),
+      error: (error) => (this.connError[project.id] = error),
+    });
+  }
+
+  /** Register a NEW GitHub App connection via GitHub's App-Manifest flow: fetch
+   *  the manifest + action URL, then POST an auto-submitting form so GitHub
+   *  creates the App on the account the user picks. GitHub redirects back to
+   *  teams-api, the operator converts the code to a key, and the connection turns
+   *  'ready' on a later poll. */
+  registerConnection(project: Project) {
+    this.connError[project.id] = "";
+    this.projectsService.getGithubRegisterUrl(project.id).subscribe({
+      next: (res) => this.submitManifestForm(res.action_url, res.manifest),
+      error: (error) => (this.connError[project.id] = error),
+    });
+  }
+
+  private submitManifestForm(actionUrl: string, manifest: string) {
+    const form = document.createElement("form");
+    form.method = "POST";
+    form.action = actionUrl;
+    const input = document.createElement("input");
+    input.type = "hidden";
+    input.name = "manifest";
+    input.value = manifest;
+    form.appendChild(input);
+    document.body.appendChild(form);
+    form.submit();
   }
 
   loadCompliance() {
