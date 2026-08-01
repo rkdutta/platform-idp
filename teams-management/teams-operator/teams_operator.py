@@ -5,12 +5,13 @@ Teams Operator - Creates Kubernetes namespaces when teams are created in the Tea
 
 import asyncio
 import glob
+import hashlib
 import json
 import logging
 import os
 import time
 from datetime import datetime, timezone
-from typing import Set, Dict, Any, Optional
+from typing import Set, Dict, Any, List, Optional, Tuple
 import aiohttp
 import requests
 import yaml
@@ -138,6 +139,20 @@ class TeamsOperator:
         # runs (bootstrap/README.md) and would otherwise need updating here
         # by hand after every storage wipe.
         self._openbao_oidc_accessor_cache: Optional[str] = None
+
+        # GitHub App repo credentials (see docs/self-service-repos-github-app.md).
+        # The App id + private key live in OpenBao at OPENBAO_GITHUB_APP_PATH (a
+        # KV-v2 data path, so it includes the /data/ segment); this operator reads
+        # them (platform-operator-policy) and materializes Argo CD githubApp
+        # repository Secrets from them. _github_app_creds_cache caches the (id,
+        # key) pair for the process lifetime; _project_repo_secrets tracks which
+        # repository Secret names this operator created per project slug, so it
+        # can prune ones whose repo was disconnected/removed.
+        self.openbao_github_app_path = os.getenv(
+            "OPENBAO_GITHUB_APP_PATH", "kv/data/platform/github-app"
+        )
+        self._github_app_creds_cache: Optional[Tuple[str, str]] = None
+        self._project_repo_secrets: Dict[str, Set[str]] = {}
 
         # Per-namespace provisioning status (see update_namespace_status).
         # Deliberately a point-in-time "did the last reconcile attempt for
@@ -563,6 +578,142 @@ class TeamsOperator:
             logger.error(f"❌ Unexpected error deleting AppProject '{argocd_project}': {e}")
             return False
 
+    # --- GitHub App repo credentials -----------------------------------------
+    # Argo CD has no native OpenBao integration for repo creds; it reads them
+    # only from k8s Secrets in the argocd namespace labelled
+    # argocd.argoproj.io/secret-type: repository. For each repo a project
+    # connected through the platform GitHub App (teams-api records the
+    # installation_id), this operator reads the App id + private key from OpenBao
+    # (kv/platform/github-app) and materializes such a Secret with Argo CD's
+    # githubApp fields — Argo CD then mints its own short-lived installation
+    # tokens. See docs/self-service-repos-github-app.md.
+
+    def _github_app_creds(self) -> Optional[Tuple[str, str]]:
+        """(app_id, private_key) from OpenBao, cached for the process lifetime.
+        Returns None — logging why — if the secret isn't present yet (the App
+        hasn't been registered/seeded) or OpenBao is unreachable; callers treat
+        that as "can't materialize this cycle", same as any transient failure."""
+        if self._github_app_creds_cache:
+            return self._github_app_creds_cache
+        resp = self._openbao_request("GET", self.openbao_github_app_path)
+        if resp is None or not resp.ok:
+            logger.error(
+                "❌ Could not read GitHub App creds from OpenBao "
+                f"({self.openbao_github_app_path}): "
+                f"{resp.status_code if resp is not None else 'no response'}"
+            )
+            return None
+        data = (resp.json().get("data") or {}).get("data") or {}
+        app_id, private_key = data.get("app_id"), data.get("private_key")
+        if not app_id or not private_key:
+            logger.error(
+                f"❌ GitHub App secret at {self.openbao_github_app_path} is missing "
+                "'app_id' and/or 'private_key' keys"
+            )
+            return None
+        self._github_app_creds_cache = (str(app_id), str(private_key))
+        return self._github_app_creds_cache
+
+    @staticmethod
+    def _repo_secret_name(slug: str, repo_url: str) -> str:
+        """Deterministic argocd repository-Secret name for a project's repo —
+        slug-prefixed (so it's greppable/prunable per project) + a short hash of
+        the URL (which itself isn't a valid k8s object name)."""
+        digest = hashlib.sha1(repo_url.encode()).hexdigest()[:10]
+        return f"{slug}-repo-{digest}"
+
+    def ensure_argocd_repo_credentials(self, slug: str, repo_installations: List[dict]) -> bool:
+        """Materialize/prune Argo CD githubApp repository Secrets for project
+        `slug`. `repo_installations` is teams-api's list of the project's
+        connected repos ([{repo_url, installation_id}]). Creates/updates one
+        Secret per connected repo and deletes any this operator previously
+        created for the slug whose repo is no longer connected. Returns True if
+        everything reconciled (or there was nothing to do); False if the App
+        creds couldn't be read while there WAS work to do."""
+        desired: Dict[str, dict] = {
+            self._repo_secret_name(slug, r["repo_url"]): r
+            for r in repo_installations
+            if r.get("repo_url") and r.get("installation_id")
+        }
+
+        ok = True
+        creds = self._github_app_creds() if desired else None
+        if desired and creds is None:
+            ok = False  # can't materialize this cycle; still prune below
+        elif desired:
+            app_id, private_key = creds
+            for name, r in desired.items():
+                body = client.V1Secret(
+                    metadata=client.V1ObjectMeta(
+                        name=name,
+                        namespace=self.ARGOCD_NAMESPACE,
+                        labels={
+                            "argocd.argoproj.io/secret-type": "repository",
+                            "app.kubernetes.io/managed-by": "teams-operator",
+                            "teams-operator/project": slug,
+                        },
+                    ),
+                    string_data={
+                        "type": "git",
+                        "url": r["repo_url"],
+                        "githubAppID": app_id,
+                        "githubAppInstallationID": str(r["installation_id"]),
+                        "githubAppPrivateKey": private_key,
+                    },
+                )
+                try:
+                    self.k8s_core_v1.create_namespaced_secret(self.ARGOCD_NAMESPACE, body)
+                    logger.info(f"✅ Created Argo CD repo credential '{name}' for '{r['repo_url']}'")
+                except ApiException as e:
+                    if e.status == 409:
+                        try:
+                            self.k8s_core_v1.replace_namespaced_secret(name, self.ARGOCD_NAMESPACE, body)
+                        except ApiException as re:
+                            logger.error(f"❌ Failed to update repo credential '{name}': {re}")
+                            ok = False
+                    else:
+                        logger.error(f"❌ Failed to create repo credential '{name}': {e}")
+                        ok = False
+
+        # Prune Secrets we made for this slug that are no longer desired.
+        previous = self._project_repo_secrets.get(slug, set())
+        for stale in previous - set(desired):
+            if self._delete_repo_secret(stale):
+                logger.info(f"🗑️ Pruned stale Argo CD repo credential '{stale}'")
+            else:
+                ok = False
+        if ok:
+            self._project_repo_secrets[slug] = set(desired)
+        return ok
+
+    def _delete_repo_secret(self, name: str) -> bool:
+        try:
+            self.k8s_core_v1.delete_namespaced_secret(name, self.ARGOCD_NAMESPACE)
+            return True
+        except ApiException as e:
+            if e.status == 404:
+                return True
+            logger.error(f"❌ Failed to delete Argo CD repo credential '{name}': {e}")
+            return False
+
+    def delete_argocd_repo_credentials(self, slug: str) -> bool:
+        """Delete every Argo CD repository Secret this operator created for
+        project `slug` (project deletion). Lists by the teams-operator/project
+        label so it catches secrets even across an operator restart that cleared
+        the in-memory _project_repo_secrets tracking."""
+        ok = True
+        try:
+            secrets = self.k8s_core_v1.list_namespaced_secret(
+                self.ARGOCD_NAMESPACE, label_selector=f"teams-operator/project={slug}"
+            )
+        except ApiException as e:
+            logger.error(f"❌ Could not list repo credentials for project '{slug}': {e}")
+            return False
+        for s in secrets.items:
+            ok = self._delete_repo_secret(s.metadata.name) and ok
+        self._project_repo_secrets.pop(slug, None)
+        return ok
+
     def _emit_project_event(self, team_id: str, reason: str, message: str, healthy: bool = True) -> None:
         """Emit an Event for a project-level (not namespace-level) reconcile
         action — Keycloak groups, the AppProject, or the argocd-rbac-cm
@@ -966,35 +1117,39 @@ class TeamsOperator:
         )
         return False
 
-    def ensure_openbao_access(self, namespace: str) -> bool:
-        """Ensure `namespace` has everything both a tenant pod's
-        openbao-agent sidecar AND a human logging in via OIDC SSO need to
-        reach this namespace's slice of kv: a maintainer (full CRUD)
-        ACL policy, a read-only viewer ACL policy, a jwt auth role mapping
-        this namespace's SPIFFE IDs to the maintainer policy (workloads
-        always get full access — they need to write their own secrets),
-        and identity group-aliases mapping the "{namespace}-maintainer" /
-        "{namespace}-viewer" Keycloak groups (the same groups already used
-        for k8s RBAC and Argo CD's RBAC — see _rbac_policy_block) to those
-        same two policies. Plus the agent-config ConfigMap the sidecars
-        mount (see apps/security/tenant-guardrails's
-        openbao-spiffe-volume-*.yaml). Create-if-missing/leave-as-is-on-
-        conflict, same semantics as _apply_namespaced_templates — no drift
-        reconciliation of an already-created policy/role/ConfigMap (the
-        group-aliases are the one exception, since OpenBao itself 400s on
-        a re-create — see _ensure_openbao_group_alias). Returns True only
-        if everything is confirmed OK this cycle — a partial success is
-        exactly the kind of broken-but-not-obvious state that motivated
-        surfacing this as a per-namespace "OpenBaoAccess" condition in the
-        first place, so it's reported as not-ready, not silently
-        swallowed."""
+    def ensure_openbao_access(self, slug: str, namespace: str) -> bool:
+        """Ensure `namespace` (of project `slug`) has everything both a tenant
+        pod's openbao-agent sidecar AND a human logging in via OIDC SSO need to
+        reach this namespace's slice of the layered kv mount: a maintainer
+        (full CRUD) ACL policy scoped to this namespace's subtree plus the
+        project's shared bucket (see project-maintainer.hcl — path layout in
+        docs/self-service-repos-github-app.md), a jwt auth role mapping this
+        namespace's SPIFFE IDs to that policy (workloads always get maintainer —
+        they need to write their own secrets), and an identity group-alias
+        mapping the "{namespace}-maintainer" Keycloak group (the same group
+        already used for k8s RBAC and Argo CD's RBAC — see _rbac_policy_block)
+        to it. Plus the agent-config ConfigMap the sidecars mount (see
+        apps/security/tenant-guardrails's openbao-spiffe-volume-*.yaml).
+
+        No OpenBao viewer policy/alias is created: ns viewers get no OpenBao
+        access at all (the viewer Keycloak group still drives k8s/Argo RBAC).
+        Project-WIDE owner access is a separate concern — see
+        ensure_openbao_project_access, called once per project.
+
+        Create-if-missing/leave-as-is-on-conflict, same semantics as
+        _apply_namespaced_templates (the group-alias is the one exception, since
+        OpenBao 400s on a re-create — see _ensure_openbao_group_alias). Returns
+        True only if everything is confirmed OK this cycle — a partial success
+        is exactly the broken-but-not-obvious state that motivated surfacing
+        this as a per-namespace "OpenBaoAccess" condition, so it's reported as
+        not-ready, not silently swallowed."""
         ok = True
 
         try:
             with open(os.path.join(self.OPENBAO_POLICY_TEMPLATES_DIR, "project-maintainer.hcl")) as f:
-                maintainer_policy_hcl = f.read().replace("{{ NAMESPACE }}", namespace)
-            with open(os.path.join(self.OPENBAO_POLICY_TEMPLATES_DIR, "project-viewer.hcl")) as f:
-                viewer_policy_hcl = f.read().replace("{{ NAMESPACE }}", namespace)
+                maintainer_policy_hcl = (
+                    f.read().replace("{{ SLUG }}", slug).replace("{{ NAMESPACE }}", namespace)
+                )
         except OSError as e:
             logger.error(f"❌ Could not read OpenBao policy templates: {e}")
             return False
@@ -1009,18 +1164,6 @@ class TeamsOperator:
         else:
             logger.error(
                 f"❌ Failed to write OpenBao maintainer policy for '{namespace}': HTTP {resp.status_code} {resp.text}"
-            )
-            ok = False
-
-        resp = self._openbao_request(
-            "PUT", f"sys/policies/acl/{namespace}-viewer-policy", {"policy": viewer_policy_hcl}
-        )
-        if resp is not None and resp.ok:
-            logger.info(f"✅ Ensured OpenBao policy '{namespace}-viewer-policy'")
-        else:
-            logger.error(
-                f"❌ Failed to write OpenBao viewer policy for '{namespace}': "
-                f"HTTP {resp.status_code if resp is not None else 'no response'} {resp.text if resp is not None else ''}"
             )
             ok = False
 
@@ -1039,8 +1182,6 @@ class TeamsOperator:
             ok = False
 
         if not self._ensure_openbao_group_alias(f"{namespace}-maintainer", f"{namespace}-maintainer-policy"):
-            ok = False
-        if not self._ensure_openbao_group_alias(f"{namespace}-viewer", f"{namespace}-viewer-policy"):
             ok = False
 
         try:
@@ -1066,6 +1207,43 @@ class TeamsOperator:
             logger.error(f"❌ Unexpected error creating ConfigMap '{self.OPENBAO_AGENT_CONFIGMAP}' in '{namespace}': {e}")
             ok = False
 
+        return ok
+
+    def ensure_openbao_project_access(self, slug: str) -> bool:
+        """Ensure the PROJECT-wide owner tier for project `slug`: an ACL policy
+        granting CRUD over the whole `kv/…/projects/<slug>/*` subtree (the
+        project-management level, the shared bucket, and every namespace —
+        present and future; see project-owner.hcl), plus an identity group-alias
+        mapping the "project-<slug>-owner" Keycloak group to it. teams-api syncs
+        the project's DB owners into that Keycloak group (the human side of the
+        binding), the same way it syncs per-namespace maintainer membership.
+
+        Distinct from ensure_openbao_access (per-namespace, maintainer-scoped):
+        this runs once per project. Create-if-missing/idempotent; the alias is
+        the usual re-create exception (see _ensure_openbao_group_alias)."""
+        try:
+            with open(os.path.join(self.OPENBAO_POLICY_TEMPLATES_DIR, "project-owner.hcl")) as f:
+                owner_policy_hcl = f.read().replace("{{ SLUG }}", slug)
+        except OSError as e:
+            logger.error(f"❌ Could not read OpenBao project-owner policy template: {e}")
+            return False
+
+        ok = True
+        policy_name = f"project-{slug}-owner-policy"
+        resp = self._openbao_request(
+            "PUT", f"sys/policies/acl/{policy_name}", {"policy": owner_policy_hcl}
+        )
+        if resp is not None and resp.ok:
+            logger.info(f"✅ Ensured OpenBao policy '{policy_name}'")
+        else:
+            logger.error(
+                f"❌ Failed to write OpenBao owner policy for project '{slug}': "
+                f"HTTP {resp.status_code if resp is not None else 'no response'} {resp.text if resp is not None else ''}"
+            )
+            ok = False
+
+        if not self._ensure_openbao_group_alias(f"project-{slug}-owner", policy_name):
+            ok = False
         return ok
 
     def _delete_kv_tree(self, path: str) -> bool:
@@ -1104,19 +1282,19 @@ class TeamsOperator:
                 ok = False
         return ok
 
-    def delete_openbao_access(self, namespace: str) -> bool:
+    def delete_openbao_access(self, slug: str, namespace: str) -> bool:
         """Tear down everything ensure_openbao_access ever created for
-        `namespace`, once its project is deleted: every secret actually
-        stored under kv/<namespace>/*, the two ACL policies, the workload
-        jwt auth role, and the two identity groups (deleting a group also
-        removes its group-alias - there's no separate alias cleanup call).
-        Without this, a deleted project's secrets and the access-control
-        objects around them linger in OpenBao forever with no UI path back
-        to them - the exact gap namespace deletion left for every other
-        OpenBao object until now. Best-effort like every other OpenBao call
-        here: a transient failure is logged and reported, not raised, so it
-        never blocks the k8s namespace deletion itself."""
-        ok = self._delete_kv_tree(namespace)
+        `namespace` (of project `slug`) when a single namespace is removed:
+        every secret under kv/…/projects/<slug>/namespaces/<namespace>/*, the
+        maintainer ACL policy, the workload jwt auth role, and the maintainer
+        identity group (deleting a group also removes its group-alias - there's
+        no separate alias cleanup call). The project-wide owner tier and the
+        shared bucket are NOT touched here - they belong to the project, not
+        this namespace, and are cleaned by delete_openbao_project_access on full
+        project deletion. Best-effort like every other OpenBao call here: a
+        transient failure is logged and reported, not raised, so it never blocks
+        the k8s namespace deletion itself."""
+        ok = self._delete_kv_tree(f"projects/{slug}/namespaces/{namespace}")
 
         resp = self._openbao_request("DELETE", f"auth/jwt/role/{namespace}")
         if resp is not None and (resp.ok or resp.status_code == 404):
@@ -1128,28 +1306,61 @@ class TeamsOperator:
             )
             ok = False
 
-        for suffix in ("maintainer", "viewer"):
-            resp = self._openbao_request("DELETE", f"sys/policies/acl/{namespace}-{suffix}-policy")
-            if resp is not None and (resp.ok or resp.status_code == 404):
-                logger.info(f"✅ Deleted OpenBao policy '{namespace}-{suffix}-policy'")
-            else:
-                logger.error(
-                    f"❌ Failed to delete OpenBao policy '{namespace}-{suffix}-policy': "
-                    f"HTTP {resp.status_code if resp is not None else 'no response'} "
-                    f"{resp.text if resp is not None else ''}"
-                )
-                ok = False
+        resp = self._openbao_request("DELETE", f"sys/policies/acl/{namespace}-maintainer-policy")
+        if resp is not None and (resp.ok or resp.status_code == 404):
+            logger.info(f"✅ Deleted OpenBao policy '{namespace}-maintainer-policy'")
+        else:
+            logger.error(
+                f"❌ Failed to delete OpenBao policy '{namespace}-maintainer-policy': "
+                f"HTTP {resp.status_code if resp is not None else 'no response'} "
+                f"{resp.text if resp is not None else ''}"
+            )
+            ok = False
 
-            resp = self._openbao_request("DELETE", f"identity/group/name/{namespace}-{suffix}")
-            if resp is not None and (resp.ok or resp.status_code == 404):
-                logger.info(f"✅ Deleted OpenBao identity group '{namespace}-{suffix}'")
-            else:
-                logger.error(
-                    f"❌ Failed to delete OpenBao identity group '{namespace}-{suffix}': "
-                    f"HTTP {resp.status_code if resp is not None else 'no response'} "
-                    f"{resp.text if resp is not None else ''}"
-                )
-                ok = False
+        resp = self._openbao_request("DELETE", f"identity/group/name/{namespace}-maintainer")
+        if resp is not None and (resp.ok or resp.status_code == 404):
+            logger.info(f"✅ Deleted OpenBao identity group '{namespace}-maintainer'")
+        else:
+            logger.error(
+                f"❌ Failed to delete OpenBao identity group '{namespace}-maintainer': "
+                f"HTTP {resp.status_code if resp is not None else 'no response'} "
+                f"{resp.text if resp is not None else ''}"
+            )
+            ok = False
+
+        return ok
+
+    def delete_openbao_project_access(self, slug: str) -> bool:
+        """Tear down the whole project subtree in OpenBao on project deletion:
+        every secret under kv/…/projects/<slug>/* (platform + shared + all
+        namespaces), the project-wide owner ACL policy, and the owner identity
+        group (its alias goes with it). Per-namespace teardown
+        (delete_openbao_access) already removed each namespace's policy/role/
+        group; this cleans the project-level objects and guarantees the KV tree
+        is fully gone even if a namespace teardown was skipped. Best-effort."""
+        ok = self._delete_kv_tree(f"projects/{slug}")
+
+        resp = self._openbao_request("DELETE", f"sys/policies/acl/project-{slug}-owner-policy")
+        if resp is not None and (resp.ok or resp.status_code == 404):
+            logger.info(f"✅ Deleted OpenBao policy 'project-{slug}-owner-policy'")
+        else:
+            logger.error(
+                f"❌ Failed to delete OpenBao policy 'project-{slug}-owner-policy': "
+                f"HTTP {resp.status_code if resp is not None else 'no response'} "
+                f"{resp.text if resp is not None else ''}"
+            )
+            ok = False
+
+        resp = self._openbao_request("DELETE", f"identity/group/name/project-{slug}-owner")
+        if resp is not None and (resp.ok or resp.status_code == 404):
+            logger.info(f"✅ Deleted OpenBao identity group 'project-{slug}-owner'")
+        else:
+            logger.error(
+                f"❌ Failed to delete OpenBao identity group 'project-{slug}-owner': "
+                f"HTTP {resp.status_code if resp is not None else 'no response'} "
+                f"{resp.text if resp is not None else ''}"
+            )
+            ok = False
 
         return ok
 
@@ -1350,7 +1561,19 @@ class TeamsOperator:
         cleanup, e.g. a transient OpenBao outage) - only the two real k8s
         error paths short-circuit past it, since retrying next cycle covers
         both halves anyway."""
-        openbao_ok = self.delete_openbao_access(namespace_name)
+        # The slug is tracked in _project_slugs (populated even for projects
+        # whose DB record is already gone — that's its purpose). Without it we
+        # can't build the layered kv path, so skip per-namespace OpenBao cleanup
+        # and rely on delete_openbao_project_access to wipe the whole subtree.
+        slug = self._project_slugs.get(team_id)
+        if slug:
+            openbao_ok = self.delete_openbao_access(slug, namespace_name)
+        else:
+            logger.warning(
+                f"⚠️ No slug known for team '{team_id}'; skipping per-namespace OpenBao "
+                f"cleanup of '{namespace_name}' (project-level teardown will cover it)"
+            )
+            openbao_ok = True
         try:
             self.k8s_core_v1.delete_namespace(name=namespace_name)
             logger.info(f"🗑️ Deleted namespace '{namespace_name}' for removed team '{team_name}'")
@@ -1431,7 +1654,13 @@ class TeamsOperator:
             apps_ok = self.delete_argocd_applications(slug)
             appproject_ok = self.delete_argocd_appproject(slug)
             rbac_ok = self._remove_rbac_policy_block(slug)
-            if apps_ok and appproject_ok and rbac_ok:
+            # Wipe the whole project subtree in OpenBao + the owner tier (the
+            # per-namespace teardown ran in delete_namespace as each namespace
+            # went away; this covers the project-level objects and any residue).
+            openbao_ok = self.delete_openbao_project_access(slug)
+            # Remove this project's Argo CD githubApp repository Secrets.
+            repo_creds_ok = self.delete_argocd_repo_credentials(slug)
+            if apps_ok and appproject_ok and rbac_ok and openbao_ok and repo_creds_ok:
                 del self._project_slugs[team_id]
                 self._last_project_state.pop(team_id, None)
                 self._emit_project_event(team_id, "ProjectDeprovisioned", f"Argo CD project '{slug}' removed")
@@ -1455,7 +1684,18 @@ class TeamsOperator:
                 quotas_ok = self.ensure_priority_quotas(namespace_name)
                 limits_ok = self.ensure_limit_ranges(namespace_name)
                 netpol_ok = self.ensure_network_policies(namespace_name)
-                openbao_ok = self.ensure_openbao_access(namespace_name)
+                # The layered kv path needs the project slug; take it from the
+                # live team record (or the slug-tracking map as a fallback).
+                slug = (current_teams.get(team_id) or {}).get("argocd_project") \
+                    or self._project_slugs.get(team_id)
+                if slug:
+                    openbao_ok = self.ensure_openbao_access(slug, namespace_name)
+                else:
+                    logger.warning(
+                        f"⚠️ No slug known for team '{team_id}'; skipping OpenBao access "
+                        f"provisioning for '{namespace_name}' this cycle"
+                    )
+                    openbao_ok = False
                 # Surfaced in the Teams portal as a per-namespace status badge
                 # (teams-api reads this annotation directly) — see
                 # update_namespace_status's docstring for why this is a
@@ -1483,15 +1723,31 @@ class TeamsOperator:
             self._project_slugs[team_id] = argocd_project
 
             namespaces = set(team.get('namespaces') or [])
+            # source_repos is already the effective list (per-project repos
+            # UNIONed with the admin global whitelist) — teams-api computes the
+            # union in /internal/teams, so a change to the global whitelist
+            # changes this tuple for every project and re-triggers the reconcile
+            # below via state_key. No separate global fetch needed here.
             source_repos = tuple(sorted(team.get('source_repos') or []))
-            state_key = (frozenset(namespaces), source_repos)
+            # Connected-repo GitHub App installations, in the state key so a
+            # connect/disconnect re-triggers repo-credential reconciliation.
+            repo_installations = team.get('repo_installations') or []
+            repo_inst_key = tuple(sorted(
+                (r.get('repo_url'), r.get('installation_id')) for r in repo_installations
+            ))
+            state_key = (frozenset(namespaces), source_repos, repo_inst_key)
             if self._last_project_state.get(team_id) == state_key:
                 continue  # nothing this operator manages has changed
 
             appproject_ok = self.ensure_argocd_appproject(argocd_project, namespaces, list(source_repos))
             rbac_ok = self.ensure_argocd_rbac_policy(argocd_project, namespaces)
+            # Project-wide OpenBao owner tier (once per project — distinct from
+            # the per-namespace maintainer access in the RBAC-part-1 loop above).
+            openbao_proj_ok = self.ensure_openbao_project_access(argocd_project)
+            # Argo CD githubApp repo credentials for connected repos.
+            repo_creds_ok = self.ensure_argocd_repo_credentials(argocd_project, repo_installations)
 
-            if appproject_ok and rbac_ok:
+            if appproject_ok and rbac_ok and openbao_proj_ok and repo_creds_ok:
                 self._last_project_state[team_id] = state_key
                 self._emit_project_event(
                     team_id, "ProjectProvisioned",
@@ -1502,7 +1758,8 @@ class TeamsOperator:
                 self._emit_project_event(
                     team_id, "ProjectProvisionFailed",
                     f"Argo CD project '{argocd_project}' provisioning incomplete "
-                    f"(appproject={appproject_ok}, rbac={rbac_ok})",
+                    f"(appproject={appproject_ok}, rbac={rbac_ok}, openbao={openbao_proj_ok}, "
+                    f"repo_creds={repo_creds_ok})",
                     healthy=False,
                 )
 

@@ -524,13 +524,30 @@
             </p>
             <ul class="repo-list" *ngIf="repos.length > 0">
               <li class="repo-item" *ngFor="let repo of repos">
-                <code class="repo-url">{{ repo }}</code>
+                <code class="repo-url">{{ repo.url }}</code>
+                <span class="repo-badge" [class.badge-global]="repo.origin === 'global'"
+                      [class.badge-project]="repo.origin === 'project'">
+                  {{ repo.origin }}
+                </span>
+                <span class="repo-badge"
+                      [class.badge-connected]="repo.connected"
+                      [class.badge-disconnected]="!repo.connected">
+                  {{ repo.connected ? "connected" : "not connected" }}
+                </span>
                 <button
-                  *ngIf="canManageProject(project)"
+                  *ngIf="canManageProject(project) && !repo.connected"
+                  class="btn btn-sm"
+                  (click)="connectRepo(project, repo.url)"
+                  [title]="'Connect ' + repo.url + ' via GitHub'"
+                >
+                  Connect GitHub
+                </button>
+                <button
+                  *ngIf="canManageProject(project) && repo.origin === 'project'"
                   class="btn btn-danger btn-sm btn-icon"
-                  (click)="removeSourceRepo(project, repo)"
-                  [title]="'Remove ' + repo"
-                  [attr.aria-label]="'Remove ' + repo"
+                  (click)="removeSourceRepo(project, repo.url)"
+                  [title]="'Remove ' + repo.url"
+                  [attr.aria-label]="'Remove ' + repo.url"
                 >
                   ✕
                 </button>

@@ -57,7 +57,11 @@ JWKS_CACHE_TTL = int(os.getenv("OIDC_JWKS_CACHE_TTL", "3600"))
 OPERATOR_CLIENT_ID = os.getenv("OPERATOR_CLIENT_ID", "teams-operator-sa")
 
 # Paths served without authentication (probes, root, API docs).
-PUBLIC_PATHS = {"/", "/health", "/docs", "/redoc", "/openapi.json"}
+# /github/callback is public because GitHub redirects the user's browser to it
+# with no bearer token — it authenticates the request by verifying the signed
+# `state` it issued at /github/install-url instead (see main.py). Everything
+# else stays protected.
+PUBLIC_PATHS = {"/", "/health", "/docs", "/redoc", "/openapi.json", "/github/callback"}
 
 # Cache of kid -> public key, refreshed on TTL or on an unknown kid (rotation).
 _jwks: dict = {"keys": {}, "fetched_at": 0.0}

@@ -4,6 +4,7 @@ import { AuthService } from "../../services/auth.service";
 import { environment } from "../../../environments/environment";
 import {
   Project,
+  SourceRepoInfo,
   ComplianceStatus,
   ComplianceSummary,
   ComplianceDetail,
@@ -85,7 +86,7 @@ export class ProjectListComponent implements OnInit, OnDestroy {
   // scope of the project can view; only an owner/admin (canManageProject) may
   // add/remove one.
   sourceReposExpanded: { [projectId: string]: boolean } = {};
-  sourceRepos: { [projectId: string]: string[] } = {};
+  sourceRepos: { [projectId: string]: SourceRepoInfo[] } = {};
   loadingSourceRepos: { [projectId: string]: boolean } = {};
   newRepoUrl: { [projectId: string]: string } = {};
 
@@ -262,6 +263,17 @@ export class ProjectListComponent implements OnInit, OnDestroy {
     this.actionError = "";
     this.projectsService.removeSourceRepo(project.id, repoUrl).subscribe({
       next: (repos) => (this.sourceRepos[project.id] = repos),
+      error: (error) => (this.actionError = error),
+    });
+  }
+
+  /** Start the GitHub App connect flow: fetch the install URL, then send the
+   *  browser to GitHub. On return, the callback bounces back to the portal and
+   *  the repo shows as connected on the next source-repos load. */
+  connectRepo(project: Project, repoUrl: string) {
+    this.actionError = "";
+    this.projectsService.getGithubInstallUrl(project.id, repoUrl).subscribe({
+      next: (res) => (window.location.href = res.install_url),
       error: (error) => (this.actionError = error),
     });
   }

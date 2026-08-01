@@ -2,7 +2,7 @@ import { Injectable } from '@angular/core';
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { Observable, throwError } from 'rxjs';
 import { catchError } from 'rxjs/operators';
-import { Project, ProjectCreate, ComplianceSummary, ComplianceDetail, NamespaceProvisioningStatus, ProjectEvent, PriorityTier, ProjectApplications, UserRef, NamespaceAccess, NamespaceRole, OwnerRef, Me } from '../models/project.model';
+import { Project, ProjectCreate, SourceRepoInfo, ComplianceSummary, ComplianceDetail, NamespaceProvisioningStatus, ProjectEvent, PriorityTier, ProjectApplications, UserRef, NamespaceAccess, NamespaceRole, OwnerRef, Me } from '../models/project.model';
 import { environment } from '../../environments/environment';
 import { AuthService } from './auth.service';
 
@@ -143,26 +143,55 @@ export class ProjectsService {
       .pipe(catchError(this.handleError));
   }
 
-  /** Argo CD AppProject.spec.sourceRepos entries teams-operator reconciles onto
-   *  the cluster. Any caller in scope of the project (viewer or owner) may read
-   *  these; only the owner/admin may add or remove one. */
-  getSourceRepos(projectId: string): Observable<string[]> {
+  /** The project's effective source repos (project repos ∪ the admin global
+   *  whitelist), each annotated with origin + GitHub App connection state.
+   *  teams-operator reconciles these into the AppProject's sourceRepos. Any
+   *  caller in scope may read; only the owner/admin may add or remove one. */
+  getSourceRepos(projectId: string): Observable<SourceRepoInfo[]> {
     const url = `${this.apiUrl}/projects/${projectId}/source-repos`;
-    return this.http.get<string[]>(url)
+    return this.http.get<SourceRepoInfo[]>(url)
       .pipe(catchError(this.handleError));
   }
 
-  addSourceRepo(projectId: string, repoUrl: string): Observable<string[]> {
+  addSourceRepo(projectId: string, repoUrl: string): Observable<SourceRepoInfo[]> {
     const url = `${this.apiUrl}/projects/${projectId}/source-repos`;
+    return this.http.post<SourceRepoInfo[]>(url, { repo_url: repoUrl })
+      .pipe(catchError(this.handleError));
+  }
+
+  removeSourceRepo(projectId: string, repoUrl: string): Observable<SourceRepoInfo[]> {
+    const url = `${this.apiUrl}/projects/${projectId}/source-repos`;
+    // teams-api reads the repo to remove from the request body on DELETE.
+    return this.http.request<SourceRepoInfo[]>('delete', url, { body: { repo_url: repoUrl } })
+      .pipe(catchError(this.handleError));
+  }
+
+  /** Admin-curated global whitelist of repos available to every project. Any
+   *  authenticated user may read it (project managers pick from it at creation);
+   *  only admins may add/remove. */
+  getGlobalSourceRepos(): Observable<string[]> {
+    const url = `${this.apiUrl}/source-repos/global`;
+    return this.http.get<string[]>(url).pipe(catchError(this.handleError));
+  }
+
+  addGlobalSourceRepo(repoUrl: string): Observable<string[]> {
+    const url = `${this.apiUrl}/source-repos/global`;
     return this.http.post<string[]>(url, { repo_url: repoUrl })
       .pipe(catchError(this.handleError));
   }
 
-  removeSourceRepo(projectId: string, repoUrl: string): Observable<string[]> {
-    const url = `${this.apiUrl}/projects/${projectId}/source-repos`;
-    // teams-api reads the repo to remove from the request body on DELETE.
+  removeGlobalSourceRepo(repoUrl: string): Observable<string[]> {
+    const url = `${this.apiUrl}/source-repos/global`;
     return this.http.request<string[]>('delete', url, { body: { repo_url: repoUrl } })
       .pipe(catchError(this.handleError));
+  }
+
+  /** Start the GitHub App connect flow for a repo: returns the install/authorize
+   *  URL (carrying a signed state) to send the user's browser to. */
+  getGithubInstallUrl(projectId: string, repoUrl: string): Observable<{ install_url: string }> {
+    const params = new URLSearchParams({ project_id: projectId, repo_url: repoUrl });
+    const url = `${this.apiUrl}/github/install-url?${params.toString()}`;
+    return this.http.get<{ install_url: string }>(url).pipe(catchError(this.handleError));
   }
 
   /** Grant/revoke the `project-manager` realm role (admin-only server-side) —

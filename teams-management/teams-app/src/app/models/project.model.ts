@@ -20,6 +20,17 @@ export interface Project {
 
 export interface ProjectCreate {
   name: string;
+  /** Mandatory at creation now: at least one repo URL (from the admin global
+   *  whitelist and/or ad-hoc). See docs/self-service-repos-github-app.md. */
+  source_repos: string[];
+}
+
+/** A repo in a project's effective source-repo set (project repos ∪ the admin
+ *  global whitelist), annotated for the UI listing. */
+export interface SourceRepoInfo {
+  url: string;
+  origin: 'project' | 'global';
+  connected: boolean; // linked through the platform GitHub App
 }
 
 /** A Keycloak realm user (the directory the pickers are populated from). */

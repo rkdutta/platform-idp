@@ -79,10 +79,23 @@ CREATE TABLE IF NOT EXISTS audit (
 -- reconciles them into the AppProject's sourceRepos - see
 -- ensure_argocd_appproject in teams_operator.py). Deliberately its own table
 -- rather than a column on `projects`: a project can have any number of repos.
+-- `installation_id` is the GitHub App installation this repo was connected
+-- through (see docs/self-service-repos-github-app.md); '' means "not connected"
+-- (public repo, or connection pending). It is an identifier, NOT a secret - the
+-- only secret (the App private key) lives in OpenBao, never here.
 CREATE TABLE IF NOT EXISTS project_source_repos (
-    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    repo_url    TEXT NOT NULL,
+    project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    repo_url        TEXT NOT NULL,
+    installation_id TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (project_id, repo_url)
+);
+
+-- Admin-curated global whitelist of repos available to EVERY project (see
+-- docs/self-service-repos-github-app.md). teams-api unions these with each
+-- project's own repos in /internal/teams, so the operator reconciles the
+-- effective set into every AppProject's sourceRepos.
+CREATE TABLE IF NOT EXISTS global_source_repos (
+    repo_url    TEXT PRIMARY KEY
 );
 
 CREATE INDEX IF NOT EXISTS idx_ns_project ON project_namespaces(project_id);
@@ -111,6 +124,7 @@ def connect(path: Optional[Path] = None) -> sqlite3.Connection:
         conn.executescript(SCHEMA)
         conn.commit()
         _migrate_stale_namespace_grants_fk(conn)
+        _migrate_add_repo_installation_column(conn)
         _conn = conn
         log.info("SQLite store ready at %s", db_path)
         return _conn
@@ -158,6 +172,21 @@ def _migrate_stale_namespace_grants_fk(conn: sqlite3.Connection) -> None:
     # either. Drop them rather than leave dead, confusing tables behind.
     for legacy_table in ("team_namespaces", "team_owners", "teams"):
         conn.execute(f"DROP TABLE IF EXISTS {legacy_table}")
+    conn.commit()
+
+
+def _migrate_add_repo_installation_column(conn: sqlite3.Connection) -> None:
+    """Add project_source_repos.installation_id to a DB created before the
+    GitHub App feature. `CREATE TABLE IF NOT EXISTS` never adds a column to an
+    existing table, so a pre-feature DB is missing it; every repo insert/read
+    that references the column would then fail. Idempotent: checks PRAGMA first."""
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(project_source_repos)")}
+    if "installation_id" in cols:
+        return
+    log.warning("Migrating project_source_repos: adding installation_id column")
+    conn.execute(
+        "ALTER TABLE project_source_repos ADD COLUMN installation_id TEXT NOT NULL DEFAULT ''"
+    )
     conn.commit()
 
 
@@ -231,7 +260,14 @@ def project_name_exists(name: str) -> bool:
     return row is not None
 
 
-def create_project(project_id: str, name: str, namespace: str, created_at: str = "") -> dict:
+def create_project(
+    project_id: str, name: str, namespace: str, created_at: str = "",
+    source_repos: Optional[List[str]] = None,
+) -> dict:
+    """Create a project + its default namespace, and (optionally) its initial
+    source repos — all in one transaction, so a repo insert failing can't leave
+    a half-created project behind (source repos are mandatory at creation now;
+    see main.py create_project / docs/self-service-repos-github-app.md)."""
     with _lock:
         _db().execute(
             "INSERT INTO projects (id, name, created_at) VALUES (?,?,?)",
@@ -241,6 +277,11 @@ def create_project(project_id: str, name: str, namespace: str, created_at: str =
             "INSERT INTO project_namespaces (namespace, project_id, is_default) VALUES (?,?,1)",
             (namespace, project_id),
         )
+        for repo_url in source_repos or []:
+            _db().execute(
+                "INSERT OR IGNORE INTO project_source_repos (project_id, repo_url) VALUES (?,?)",
+                (project_id, repo_url),
+            )
         _db().commit()
     return get_project(project_id)  # type: ignore[return-value]
 
@@ -377,6 +418,17 @@ def source_repos_of(project_id: str) -> List[str]:
     return [r["repo_url"] for r in rows]
 
 
+def source_repos_detail_of(project_id: str) -> List[dict]:
+    """Each of the project's own repos with its GitHub App connection state:
+    [{repo_url, installation_id}]. installation_id '' means not connected."""
+    rows = _db().execute(
+        "SELECT repo_url, installation_id FROM project_source_repos "
+        "WHERE project_id = ? ORDER BY repo_url",
+        (project_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def add_source_repo(project_id: str, repo_url: str) -> None:
     with _lock:
         _db().execute(
@@ -393,6 +445,70 @@ def remove_source_repo(project_id: str, repo_url: str) -> None:
             (project_id, repo_url),
         )
         _db().commit()
+
+
+def set_repo_installation(project_id: str, repo_url: str, installation_id: str) -> None:
+    """Record (or clear, with '') the GitHub App installation a repo was
+    connected through. The repo must already exist for this project."""
+    with _lock:
+        _db().execute(
+            "UPDATE project_source_repos SET installation_id = ? "
+            "WHERE project_id = ? AND repo_url = ?",
+            (installation_id, project_id, repo_url),
+        )
+        _db().commit()
+
+
+def connected_repos_of(project_id: str) -> List[dict]:
+    """The project's repos that have been connected through the GitHub App
+    (installation_id set): [{repo_url, installation_id}]. This is what
+    teams-operator needs to materialize Argo CD githubApp repo credentials
+    (see /internal/teams)."""
+    rows = _db().execute(
+        "SELECT repo_url, installation_id FROM project_source_repos "
+        "WHERE project_id = ? AND installation_id != '' ORDER BY repo_url",
+        (project_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def repo_exists(project_id: str, repo_url: str) -> bool:
+    row = _db().execute(
+        "SELECT 1 FROM project_source_repos WHERE project_id = ? AND repo_url = ?",
+        (project_id, repo_url),
+    ).fetchone()
+    return row is not None
+
+
+# --- Global source-repo whitelist (admin-curated, available to every project) --
+def global_source_repos() -> List[str]:
+    rows = _db().execute(
+        "SELECT repo_url FROM global_source_repos ORDER BY repo_url"
+    ).fetchall()
+    return [r["repo_url"] for r in rows]
+
+
+def add_global_source_repo(repo_url: str) -> None:
+    with _lock:
+        _db().execute(
+            "INSERT OR IGNORE INTO global_source_repos (repo_url) VALUES (?)", (repo_url,)
+        )
+        _db().commit()
+
+
+def remove_global_source_repo(repo_url: str) -> None:
+    with _lock:
+        _db().execute("DELETE FROM global_source_repos WHERE repo_url = ?", (repo_url,))
+        _db().commit()
+
+
+def effective_source_repos(project_id: str) -> List[str]:
+    """The repos the project's AppProject should allow: the project's own repos
+    UNIONed with the admin global whitelist. This is what teams-operator
+    reconciles into sourceRepos (see /internal/teams) — computing the union here
+    means a global-whitelist change is reflected for every project on the
+    operator's next poll with no operator-side global logic."""
+    return sorted(set(source_repos_of(project_id)) | set(global_source_repos()))
 
 
 # --------------------------------------------------------------------------- #

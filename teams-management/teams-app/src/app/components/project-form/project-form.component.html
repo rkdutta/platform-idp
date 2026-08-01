@@ -16,6 +16,42 @@
     </div>
   </div>
 
+  <div class="form-group">
+    <label>Source repositories <span class="required">*</span></label>
+    <p class="field-hint">
+      At least one is required. Pick from the whitelist and/or add your own.
+    </p>
+
+    <!-- Selected repos (what will be submitted). -->
+    <ul class="selected-repos" *ngIf="selectedRepos.length > 0">
+      <li *ngFor="let repo of selectedRepos" class="selected-repo">
+        <code>{{ repo }}</code>
+        <button type="button" class="btn btn-danger btn-sm btn-icon"
+                (click)="removeRepo(repo)" [attr.aria-label]="'Remove ' + repo">✕</button>
+      </li>
+    </ul>
+
+    <!-- Pick from the admin global whitelist. -->
+    <div class="whitelist-picker" *ngIf="availableWhitelist.length > 0">
+      <span class="picker-label">Whitelisted:</span>
+      <button type="button" class="btn btn-sm btn-chip"
+              *ngFor="let repo of availableWhitelist"
+              (click)="addFromWhitelist(repo)" [title]="'Add ' + repo">
+        + {{ repo }}
+      </button>
+    </div>
+
+    <!-- Add an ad-hoc repo. -->
+    <div class="adhoc-repo">
+      <input type="text" class="form-control" [(ngModel)]="newRepoUrl"
+             [ngModelOptions]="{ standalone: true }"
+             placeholder="https://github.com/org/repo.git"
+             (keyup.enter)="addAdHocRepo(); $event.preventDefault()">
+      <button type="button" class="btn btn-sm" (click)="addAdHocRepo()"
+              [disabled]="!newRepoUrl">+ Add repo</button>
+    </div>
+  </div>
+
   <div class="error-message" *ngIf="errorMessage">
     {{ errorMessage }}
   </div>
@@ -23,7 +59,7 @@
   <button
     type="submit"
     class="btn btn-primary"
-    [disabled]="projectForm.invalid || isSubmitting"
+    [disabled]="projectForm.invalid || selectedRepos.length === 0 || isSubmitting"
   >
     <span *ngIf="isSubmitting">Creating...</span>
     <span *ngIf="!isSubmitting">Create Project</span>

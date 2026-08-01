@@ -1,16 +1,21 @@
 from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, field_validator
 from typing import List, Dict, Optional, Set
 import asyncio
 import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
 import re
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlencode
 
 import store
 import authz
@@ -58,6 +63,19 @@ K8S_API_CA_CERT = os.getenv("K8S_API_CA_CERT", "")
 # Secret already mounted for that (no new out-of-band step — see
 # bootstrap/README.md's existing platform-tls section).
 KEYCLOAK_CA_CERT = os.getenv("KEYCLOAK_CA_CERT", "")
+
+# GitHub App self-service repo connection (see docs/self-service-repos-github-app.md).
+# GITHUB_APP_SLUG is the App's URL slug (github.com/apps/<slug>). The App id +
+# private key are NOT here — they live in OpenBao (kv/platform/github-app/) and are
+# only ever read by teams-operator to mint Argo CD repo-creds. teams-api only
+# orchestrates the browser install/authorize handshake and records the resulting
+# installation_id (an identifier, not a secret). GITHUB_APP_STATE_SECRET signs the
+# OAuth `state` so a callback can be trusted without a bearer token; TEAMS_APP_URL
+# is where the callback bounces the user's browser back to.
+GITHUB_APP_SLUG = os.getenv("GITHUB_APP_SLUG", "")
+GITHUB_APP_STATE_SECRET = os.getenv("GITHUB_APP_STATE_SECRET", "")
+GITHUB_APP_STATE_TTL = int(os.getenv("GITHUB_APP_STATE_TTL", "900"))  # seconds
+TEAMS_APP_URL = os.getenv("TEAMS_APP_URL", "https://teams.127.0.0.1.sslip.io")
 
 
 def _sanitize(value: str) -> str:
@@ -208,6 +226,47 @@ def _delete_k8s_groups(namespace: str) -> None:
         except KeycloakAdminError as e:
             logger.error("Could not delete k8s RBAC group for %s/%s: %s", namespace, role, e)
 
+
+# --- Project-owner OpenBao access via a project-level Keycloak group ----------
+# teams-operator binds an OpenBao identity group-alias for "project-<slug>-owner"
+# to the project-wide owner policy (ensure_openbao_project_access). Membership of
+# that Keycloak group is the human side of the binding: a project's DB owners are
+# mirrored into it here, so an owner logging in to OpenBao via OIDC gets CRUD over
+# the whole kv/…/projects/<slug>/* subtree. Mirrors _sync_group_membership but at
+# project granularity (see docs/self-service-repos-github-app.md).
+
+def _project_owner_group_name(project_name: str) -> str:
+    return f"project-{argocd_project_name(project_name)}-owner"
+
+
+def _sync_owner_group(project_name: str, username: str, add: bool) -> None:
+    """Best-effort mirror of one project-ownership into the OpenBao owner group.
+    Never raises — the DB is the source of truth and the reconciliation loop is
+    the self-healing backstop for any transient Keycloak failure here."""
+    if not keycloak.enabled or not username:
+        return
+    group = _project_owner_group_name(project_name)
+    try:
+        if add:
+            keycloak.add_user_to_group(username, group)
+        else:
+            keycloak.remove_user_from_group(username, group)
+    except KeycloakAdminError as e:
+        logger.error(
+            "project-owner group sync failed (%s %s %s %s): %s",
+            "add" if add else "remove", username, "->" if add else "<-", group, e,
+        )
+
+
+def _delete_owner_group(project_name: str) -> None:
+    """Delete a project's owner Keycloak group once the project is gone."""
+    if not keycloak.enabled:
+        return
+    try:
+        keycloak.delete_group(_project_owner_group_name(project_name))
+    except KeycloakAdminError as e:
+        logger.error("Could not delete project-owner group for %s: %s", project_name, e)
+
 GROUP_RECONCILE_INTERVAL = int(os.getenv("GROUP_RECONCILE_INTERVAL", "60"))
 
 
@@ -236,6 +295,21 @@ def _reconcile_k8s_groups_once() -> None:
                     _sync_group_membership(ns, role, username, add=True)
                 for username in have - want:
                     _sync_group_membership(ns, role, username, add=False)
+
+        # Self-heal the project-owner OpenBao groups the same way: desired
+        # membership is exactly each project's DB owners.
+        for project in store.list_projects():
+            group = _project_owner_group_name(project["name"])
+            want = {o["username"] for o in store.owners_of(project["id"]) if o["username"]}
+            try:
+                have = set(keycloak.group_members(group))
+            except KeycloakAdminError as e:
+                logger.error("Could not read project-owner group members for %s: %s", group, e)
+                continue
+            for username in want - have:
+                _sync_owner_group(project["name"], username, add=True)
+            for username in have - want:
+                _sync_owner_group(project["name"], username, add=False)
     except Exception as e:  # noqa: BLE001 - a bad cycle must not kill the loop
         logger.error("k8s RBAC group reconciliation cycle failed: %s", e)
 
@@ -295,8 +369,50 @@ async def _startup() -> None:
     logger.info("Store migration: %s", summary)
 
 # Pydantic models
+def _valid_repo_url(url: str) -> str:
+    """Normalize + sanity-check a git repo URL. Accepts https:// and SSH
+    (git@host:org/repo.git) forms — all repos are on GitHub, but we don't
+    hard-code the host so a GitHub Enterprise/self-hosted URL still validates."""
+    url = (url or "").strip()
+    if not url:
+        raise ValueError("repo URL must not be empty")
+    if not (url.startswith("https://") or url.startswith("http://") or url.startswith("git@")):
+        raise ValueError(f"repo URL must be https:// or git@ (got: {url!r})")
+    return url
+
+
 class ProjectCreate(BaseModel):
     name: str
+    # Mandatory at creation now (>=1) — see docs/self-service-repos-github-app.md.
+    source_repos: List[str] = []
+
+    @field_validator("source_repos")
+    @classmethod
+    def _at_least_one_valid_repo(cls, v: List[str]) -> List[str]:
+        cleaned = [_valid_repo_url(u) for u in (v or [])]
+        if not cleaned:
+            raise ValueError("at least one source repo URL is required")
+        # de-dupe preserving order
+        seen: Set[str] = set()
+        out: List[str] = []
+        for u in cleaned:
+            if u not in seen:
+                seen.add(u)
+                out.append(u)
+        return out
+
+
+class SourceRepoInfo(BaseModel):
+    """A repo in a project's effective source-repo set, for the UI listing.
+
+    `origin` is 'project' (added to this project) or 'global' (from the admin
+    whitelist, inherited by every project). `connected` is True once the repo
+    has been linked through the platform GitHub App (see the /github/* flow);
+    global repos report the project's own connection state if it also holds the
+    same URL, else False."""
+    url: str
+    origin: str = "project"     # project | global
+    connected: bool = False
 
 class OwnerRef(BaseModel):
     user_id: str
@@ -644,16 +760,23 @@ async def create_project(request: Request, project: ProjectCreate):
 
     project_id = str(uuid.uuid4())
     ns = default_namespace(project.name)
+    # source_repos is validated (>=1, normalized, de-duped) by ProjectCreate.
     created = store.create_project(
-        project_id, project.name, ns, created_at=datetime.now().isoformat()
+        project_id, project.name, ns, created_at=datetime.now().isoformat(),
+        source_repos=project.source_repos,
     )
-    store.record(caller_name(request), "project.create", project.name, ns)
+    store.record(
+        caller_name(request), "project.create", project.name,
+        f"{ns}; repos={','.join(project.source_repos)}",
+    )
 
     if not is_admin(request):
         creator_id = caller_id(request)
         if creator_id:
             store.add_owner(project_id, creator_id, caller_name(request))
             _sync_group_membership(ns, "maintainer", caller_name(request), add=True)
+            # The creator also becomes an OpenBao project owner (project-wide kv).
+            _sync_owner_group(project.name, caller_name(request), add=True)
             created = store.get_project(project_id)
 
     return Project(**_with_owners(created))
@@ -687,6 +810,11 @@ async def delete_project(request: Request, project_id: str):
     store.record(caller_name(request), "project.delete", project["name"])
     for ns in namespaces:
         _delete_k8s_groups(ns)
+    # The project-wide owner Keycloak group has no namespace to hang off, so it
+    # isn't covered by _delete_k8s_groups above — drop it here. (The OpenBao
+    # owner policy/group + kv subtree are torn down by teams-operator's
+    # delete_openbao_project_access on its next poll.)
+    _delete_owner_group(project["name"])
     return {"message": f"Project '{project['name']}' deleted successfully"}
 
 
@@ -725,6 +853,8 @@ def add_owner(request: Request, project_id: str, body: OwnerAdd):
     # reconciliation cycle.
     for ns in store.namespaces_of(project_id):
         _sync_group_membership(ns, "maintainer", user["username"], add=True)
+    # …and into the project-wide OpenBao owner group.
+    _sync_owner_group(project["name"], user["username"], add=True)
 
     return store.owners_of(project_id)
 
@@ -753,6 +883,8 @@ def remove_owner(request: Request, project_id: str, user_id: str):
             # explicit grant on this namespace still justifies it.
             if store.grant_role(ns, user_id) != "maintainer":
                 _sync_group_membership(ns, "maintainer", username, add=False)
+        # No longer an owner -> drop project-wide OpenBao access.
+        _sync_owner_group(project["name"], username, add=False)
 
     return store.owners_of(project_id)
 
@@ -806,32 +938,161 @@ async def delete_namespace(request: Request, project_id: str, namespace: str):
     return Project(**_with_owners(store.get_project(project_id)))
 
 
+# --- Global source-repo whitelist (admin-curated) ----------------------------
+# Available to EVERY project: teams-api unions these with each project's own
+# repos in /internal/teams, so teams-operator reconciles the effective set into
+# every AppProject's sourceRepos. Read by any authenticated user (project
+# managers pick from it at creation); mutated by admins only.
+
+@app.get("/source-repos/global", response_model=List[str])
+def get_global_source_repos(request: Request):
+    """The admin-curated repos available to every project."""
+    return store.global_source_repos()
+
+@app.post("/source-repos/global", response_model=List[str], dependencies=[Depends(require_admin)])
+def add_global_source_repo(request: Request, body: SourceRepo):
+    """Add a repo to the global whitelist (admin only)."""
+    url = _valid_repo_url(body.repo_url)
+    store.add_global_source_repo(url)
+    store.record(caller_name(request), "global_source_repo.add", "*", url)
+    return store.global_source_repos()
+
+@app.delete("/source-repos/global", response_model=List[str], dependencies=[Depends(require_admin)])
+def remove_global_source_repo(request: Request, body: SourceRepo):
+    """Remove a repo from the global whitelist (admin only)."""
+    store.remove_global_source_repo(body.repo_url)
+    store.record(caller_name(request), "global_source_repo.remove", "*", body.repo_url)
+    return store.global_source_repos()
+
+
 # --- Source repos (admin or project owner) -----------------------------------
-# Self-service: teams-operator reconciles this list into the project's Argo CD
-# AppProject `sourceRepos` on its next poll (ensure_argocd_appproject) - not
-# applied to the cluster directly by this API.
+# Self-service: teams-operator reconciles the EFFECTIVE list (project repos ∪ the
+# global whitelist) into the project's Argo CD AppProject `sourceRepos` on its
+# next poll (ensure_argocd_appproject) - not applied to the cluster directly by
+# this API. The listing endpoints return the effective set annotated with each
+# repo's origin (project|global) and GitHub App connection state.
 
-@app.get("/projects/{project_id}/source-repos", response_model=List[str])
+def _source_repo_infos(project_id: str) -> List[SourceRepoInfo]:
+    project_detail = {
+        r["repo_url"]: r["installation_id"] for r in store.source_repos_detail_of(project_id)
+    }
+    global_repos = set(store.global_source_repos())
+    infos: List[SourceRepoInfo] = []
+    for url in sorted(set(project_detail) | global_repos):
+        infos.append(SourceRepoInfo(
+            url=url,
+            origin="global" if url in global_repos else "project",
+            connected=bool(project_detail.get(url)),
+        ))
+    return infos
+
+@app.get("/projects/{project_id}/source-repos", response_model=List[SourceRepoInfo])
 def get_source_repos(request: Request, project_id: str):
-    """Source repos allowed for this project's Argo CD AppProject (in scope)."""
+    """The effective source repos for this project's AppProject (in scope),
+    annotated with origin + GitHub App connection state."""
     project = authz.require_visible_project(request, project_id)
-    return store.source_repos_of(project["id"])
+    return _source_repo_infos(project["id"])
 
-@app.post("/projects/{project_id}/source-repos", response_model=List[str])
+@app.post("/projects/{project_id}/source-repos", response_model=List[SourceRepoInfo])
 def add_source_repo(request: Request, project_id: str, body: SourceRepo):
-    """Add a source repo to this project (admin or owner)."""
+    """Add an ad-hoc source repo to this project (admin or owner)."""
     project = authz.require_project_owner(request, project_id)
-    store.add_source_repo(project_id, body.repo_url)
-    store.record(caller_name(request), "source_repo.add", project["name"], body.repo_url)
-    return store.source_repos_of(project_id)
+    url = _valid_repo_url(body.repo_url)
+    store.add_source_repo(project_id, url)
+    store.record(caller_name(request), "source_repo.add", project["name"], url)
+    return _source_repo_infos(project_id)
 
-@app.delete("/projects/{project_id}/source-repos", response_model=List[str])
+@app.delete("/projects/{project_id}/source-repos", response_model=List[SourceRepoInfo])
 def remove_source_repo(request: Request, project_id: str, body: SourceRepo):
-    """Remove a source repo from this project (admin or owner)."""
+    """Remove a source repo from this project (admin or owner). Only removes it
+    from THIS project; a globally-whitelisted repo stays available."""
     project = authz.require_project_owner(request, project_id)
     store.remove_source_repo(project_id, body.repo_url)
     store.record(caller_name(request), "source_repo.remove", project["name"], body.repo_url)
-    return store.source_repos_of(project_id)
+    return _source_repo_infos(project_id)
+
+
+# --- GitHub App: self-service private-repo connection -------------------------
+# The user clicks "Connect" -> we hand back a GitHub install URL carrying a
+# signed `state` -> GitHub asks them to authorize the platform App on the repo ->
+# GitHub redirects the browser to /github/callback with an installation_id, which
+# we bind to the repo. teams-operator then materializes the Argo CD githubApp
+# repo-creds from the App key in OpenBao. No secret ever passes through here.
+# See docs/self-service-repos-github-app.md.
+
+def _sign_state(payload: str) -> str:
+    sig = hmac.new(GITHUB_APP_STATE_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    raw = f"{payload}.{sig}".encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _verify_state(state: str) -> Optional[dict]:
+    """Return {project_id, repo_url} if `state` is a valid, unexpired token we
+    signed, else None."""
+    try:
+        padded = state + "=" * (-len(state) % 4)
+        raw = base64.urlsafe_b64decode(padded.encode()).decode()
+        payload, sig = raw.rsplit(".", 1)
+        expected = hmac.new(
+            GITHUB_APP_STATE_SECRET.encode(), payload.encode(), hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(sig, expected):
+            return None
+        project_id, repo_b64, expiry_s = payload.split(".", 2)
+        if time.time() > float(expiry_s):
+            return None
+        # repo_b64 was emitted with its '=' padding stripped (see install-url) —
+        # re-pad before decoding or urlsafe_b64decode raises on bad padding.
+        repo_b64_padded = repo_b64 + "=" * (-len(repo_b64) % 4)
+        repo_url = base64.urlsafe_b64decode(repo_b64_padded.encode()).decode()
+        return {"project_id": project_id, "repo_url": repo_url}
+    except (ValueError, TypeError):
+        return None
+
+
+@app.get("/github/install-url")
+def github_install_url(request: Request, project_id: str, repo_url: str):
+    """Return the GitHub App install/authorize URL for connecting `repo_url` to
+    `project_id` (admin or owner). The signed `state` lets the public callback
+    trust the result without a bearer token."""
+    if not GITHUB_APP_SLUG or not GITHUB_APP_STATE_SECRET:
+        raise HTTPException(
+            status_code=503,
+            detail="GitHub App not configured (GITHUB_APP_SLUG/GITHUB_APP_STATE_SECRET)",
+        )
+    project = authz.require_project_owner(request, project_id)
+    if not store.repo_exists(project_id, repo_url):
+        raise HTTPException(status_code=404, detail="Repo not part of this project")
+
+    repo_b64 = base64.urlsafe_b64encode(repo_url.encode()).decode().rstrip("=")
+    expiry = f"{time.time() + GITHUB_APP_STATE_TTL:.0f}"
+    state = _sign_state(f"{project_id}.{repo_b64}.{expiry}")
+    store.record(caller_name(request), "github.connect.start", project["name"], repo_url)
+    install_url = (
+        f"https://github.com/apps/{GITHUB_APP_SLUG}/installations/new?"
+        + urlencode({"state": state})
+    )
+    return {"install_url": install_url}
+
+
+@app.get("/github/callback")
+def github_callback(request: Request, state: str = "", installation_id: str = "", setup_action: str = ""):
+    """Public (see auth.PUBLIC_PATHS): GitHub redirects the user's browser here
+    after they authorize the App. Trust comes from the signed `state`, not a
+    bearer token. Binds the installation to the repo and bounces the browser back
+    to the portal."""
+    parsed = _verify_state(state) if state else None
+    if not parsed:
+        return RedirectResponse(url=f"{TEAMS_APP_URL}/?github=invalid_state")
+    project = store.get_project(parsed["project_id"])
+    if not project or not store.repo_exists(project["id"], parsed["repo_url"]):
+        return RedirectResponse(url=f"{TEAMS_APP_URL}/?github=repo_gone")
+    if installation_id:
+        store.set_repo_installation(project["id"], parsed["repo_url"], installation_id)
+        store.record("github-app", "github.connect.done", project["name"], parsed["repo_url"])
+        return RedirectResponse(url=f"{TEAMS_APP_URL}/?github=connected")
+    # setup_action=request (org owner must approve) or the user cancelled.
+    return RedirectResponse(url=f"{TEAMS_APP_URL}/?github={setup_action or 'cancelled'}")
 
 @app.get("/compliance", response_model=List[ComplianceSummary])
 def get_all_compliance(request: Request):
@@ -1055,13 +1316,22 @@ def internal_teams():
     Projects. Requires the teams-operator service identity (see
     auth.require_operator) — replaces the previous fully-open design. Returns
     id/name/namespaces/source_repos (never compliance/apps/access), unscoped
-    (the operator provisions every project)."""
+    (the operator provisions every project).
+
+    `source_repos` is the EFFECTIVE set — the project's own repos UNIONed with the
+    admin global whitelist (store.effective_source_repos) — so the operator
+    reconciles global-whitelist changes into every AppProject with no operator-side
+    global logic (see docs/self-service-repos-github-app.md)."""
     return [
         {
             "id": p["id"],
             "name": p["name"],
             "namespaces": p["namespaces"],
-            "source_repos": store.source_repos_of(p["id"]),
+            "source_repos": store.effective_source_repos(p["id"]),
+            # Repos connected via the GitHub App, for the operator to materialize
+            # Argo CD githubApp repo credentials. installation_id is an identifier,
+            # not a secret (the App private key stays in OpenBao).
+            "repo_installations": store.connected_repos_of(p["id"]),
             "argocd_project": argocd_project_name(p["name"]),
         }
         for p in store.list_projects()
