@@ -920,10 +920,23 @@ class TeamsOperator:
                     if not connection_id or not code:
                         continue
                     app = self._exchange_manifest_code(code)
+                    if app == self._MANIFEST_TERMINAL:
+                        # Dead code (invalid/expired/consumed) — abandon so we don't
+                        # retry it forever; the user must re-register.
+                        await self._abandon_registration(session, connection_id)
+                        continue
                     if app is None:
-                        continue  # leave pending for retry (code valid ~1h)
+                        continue  # transient; leave pending for retry (code valid ~1h)
                     if not self._store_connection_app_key(connection_id, app):
-                        continue  # OpenBao write failed; retry next cycle
+                        # The single-use code was already consumed by the conversion
+                        # above, so the key is unrecoverable — abandon rather than
+                        # loop on a code that will now only 404.
+                        logger.error(
+                            f"❌ App key store failed after conversion for '{connection_id}'; "
+                            "abandoning (re-registration required)"
+                        )
+                        await self._abandon_registration(session, connection_id)
+                        continue
                     async with session.post(
                         f"{self.teams_api_url}/internal/github-registrations/resolve",
                         headers=self._api_auth_headers(),
@@ -946,44 +959,82 @@ class TeamsOperator:
         except Exception as e:  # noqa: BLE001 - must not kill the reconcile loop
             logger.error(f"Unexpected error resolving github-registrations: {e}")
 
-    def _exchange_manifest_code(self, code: str) -> Optional[dict]:
+    # Sentinel: the manifest code can't be converted and never will (invalid,
+    # expired, or already consumed). Distinct from None (a transient failure worth
+    # retrying) because a manifest code is SINGLE-USE — re-POSTing a consumed one
+    # just 404s forever, so the registration must be abandoned, not retried.
+    _MANIFEST_TERMINAL = "terminal"
+
+    def _exchange_manifest_code(self, code: str):
         """POST GitHub's App-Manifest conversion: code -> {id, slug, name, pem,...}.
-        Returns None (logging why) on any failure. The `pem` in the response is the
-        new App's private key — handled only here, written straight to OpenBao."""
+        Returns the App dict on success, `_MANIFEST_TERMINAL` when the code is
+        invalid/expired/consumed (a 4xx that won't change on retry), or None on a
+        transient error (retry next cycle). The `pem` is the new App's private key
+        — handled only here, written straight to OpenBao."""
         try:
             resp = requests.post(
                 f"https://api.github.com/app-manifests/{code}/conversions",
                 headers={"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"},
                 timeout=15,
             )
-            if resp.status_code != 201:
-                logger.error(f"❌ GitHub manifest conversion {resp.status_code}: {resp.text[:200]}")
-                return None
-            app = resp.json()
-            if not app.get("id") or not app.get("pem"):
-                logger.error("❌ GitHub manifest conversion response missing id/pem")
-                return None
-            return app
+            if resp.status_code == 201:
+                app = resp.json()
+                if not app.get("id") or not app.get("pem"):
+                    logger.error("❌ GitHub manifest conversion 201 but missing id/pem; abandoning")
+                    return self._MANIFEST_TERMINAL
+                return app
+            if resp.status_code in (404, 410, 422):
+                logger.error(
+                    f"❌ GitHub manifest code invalid/expired/already-used "
+                    f"({resp.status_code}); abandoning registration"
+                )
+                return self._MANIFEST_TERMINAL
+            # 5xx / rate-limit / auth blips: transient, retry next cycle.
+            logger.error(f"❌ GitHub manifest conversion {resp.status_code}: {resp.text[:200]}")
+            return None
         except requests.RequestException as e:
             logger.error(f"❌ GitHub manifest conversion call failed: {e}")
             return None
 
     def _store_connection_app_key(self, connection_id: str, app: dict) -> bool:
         """Write a newly-created connection App's id + private key to OpenBao at
-        kv/platform/github-apps/<connection-id> (KV-v2 data path). Returns False
-        (logging why) on failure so the caller retries next cycle."""
+        kv/platform/github-apps/<connection-id> (KV-v2 data path). Retries a few
+        times in-cycle: the manifest code is already consumed by the time we get
+        here, so the key exists only in memory this cycle — a transient OpenBao
+        blip must be ridden out now, not deferred (a next-cycle retry would only
+        re-404 the dead code). Returns False (logging why) if it ultimately fails,
+        so the caller abandons the registration."""
         path = self._openbao_github_app_path(connection_id)
         body = {"data": {"app_id": str(app.get("id", "")), "private_key": app.get("pem", "")}}
-        resp = self._openbao_request("POST", path, body)
-        if resp is None or not resp.ok:
+        for attempt in range(3):
+            resp = self._openbao_request("POST", path, body)
+            if resp is not None and resp.ok:
+                # A freshly-written key invalidates any cached miss for this connection.
+                self._github_app_creds_cache.pop(connection_id, None)
+                return True
             logger.error(
-                f"❌ Could not write connection App key to OpenBao ({path}): "
-                f"{resp.status_code if resp is not None else 'no response'}"
+                f"❌ Could not write connection App key to OpenBao ({path}) "
+                f"[attempt {attempt + 1}/3]: {resp.status_code if resp is not None else 'no response'}"
             )
-            return False
-        # A freshly-written key invalidates any cached miss for this connection.
-        self._github_app_creds_cache.pop(connection_id, None)
-        return True
+            if attempt < 2:
+                time.sleep(2)
+        return False
+
+    async def _abandon_registration(self, session, connection_id: str) -> None:
+        """Tell teams-api to drop a registration the operator can't complete (dead
+        code, or key store failed post-conversion), so it stops being re-served and
+        the picker shows no stuck 'pending' connection. Best-effort."""
+        try:
+            async with session.delete(
+                f"{self.teams_api_url}/internal/github-registrations/{connection_id}",
+                headers=self._api_auth_headers(),
+            ) as resp:
+                if resp.status == 200:
+                    logger.info(f"🗑️ Abandoned unrecoverable GitHub registration '{connection_id}'")
+                else:
+                    logger.error(f"Failed to abandon github-registration: HTTP {resp.status}")
+        except aiohttp.ClientError as e:
+            logger.error(f"Error abandoning github-registration: {e}")
 
     async def resolve_github_connections(self):
         """Resolve pending GitHub App connections teams-api recorded: for each

@@ -1560,6 +1560,22 @@ def internal_resolve_github_registration(body: GithubRegistrationResolve):
     return {"resolved": True}
 
 
+@app.delete("/internal/github-registrations/{connection_id}", dependencies=[Depends(require_operator)])
+def internal_abandon_github_registration(connection_id: str):
+    """teams-operator abandons a registration it can't complete: GitHub's one-time
+    manifest code was invalid/expired/already-consumed, or the App key couldn't be
+    persisted after the (single-use) conversion. Drops the pending registration and
+    its still-'pending' connection so the operator stops retrying a dead code and
+    the picker shows no stuck entry. Any half-created App on GitHub must be deleted
+    there by the user — its key is unrecoverable (returned only once, at conversion)."""
+    store.delete_github_app_registration(connection_id)
+    conn = store.get_github_app_connection(connection_id)
+    if conn and conn["status"] != "ready":
+        store.delete_github_app_connection(connection_id)
+    store.record("github-app", "github.register.abandoned", connection_id, "")
+    return {"abandoned": True}
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint for Kubernetes"""
