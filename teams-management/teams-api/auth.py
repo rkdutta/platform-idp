@@ -25,12 +25,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 import time
 
 import jwt
 import requests
 from fastapi import HTTPException, Request
-from jwt.algorithms import RSAAlgorithm
+from jwt.algorithms import ECAlgorithm, RSAAlgorithm
 
 log = logging.getLogger("teams-api.auth")
 
@@ -55,6 +56,35 @@ JWKS_CACHE_TTL = int(os.getenv("OIDC_JWKS_CACHE_TTL", "3600"))
 # grant) to call this API's /internal/* control-plane endpoints - see
 # require_operator. Replaces the previous fully-open /internal/* design.
 OPERATOR_CLIENT_ID = os.getenv("OPERATOR_CLIENT_ID", "teams-operator-sa")
+
+# --- Operator /internal auth mode (A1) -------------------------------------
+# How the /internal/* control-plane endpoints authenticate teams-operator:
+#   "keycloak" (default) — teams-operator-sa Keycloak token; require_operator
+#                          checks the `azp` claim (the legacy path).
+#   "svid"               — teams-operator's SPIRE JWT-SVID, validated against
+#                          SPIRE's JWKS (no Keycloak, no static secret). Flip
+#                          this together with the operator's TEAMS_API_AUTH.
+# In "svid" mode the USER token path (_decode/Keycloak) is untouched — only
+# /internal/* switches to SVID validation, so there is no dual-accept anywhere.
+INTERNAL_AUTH_MODE = os.getenv("INTERNAL_AUTH_MODE", "keycloak").strip().lower()
+SPIRE_JWKS_URL = os.getenv(
+    "SPIRE_JWKS_URL",
+    "https://spire-spiffe-oidc-discovery-provider.spire-server.svc.cluster.local/keys",
+)
+SPIRE_ISSUER = os.getenv(
+    "SPIRE_ISSUER",
+    "https://spire-spiffe-oidc-discovery-provider.spire-server.svc.cluster.local",
+)
+# CA that signs the SPIRE OIDC endpoint's TLS — platform-tls (the same wildcard
+# CA that signs Keycloak), which teams-api already mounts as KEYCLOAK_CA_CERT.
+# Reuse it so the JWKS pull is TLS-verified — never skip verification, a MITM'd
+# JWKS could forge SVIDs. Empty falls back to system CAs.
+SPIRE_TLS_CA_PEM = os.getenv("SPIRE_TLS_CA_PEM", os.getenv("KEYCLOAK_CA_CERT", ""))
+OPERATOR_SPIFFE_ID = os.getenv(
+    "OPERATOR_SPIFFE_ID",
+    "spiffe://platform.local/ns/engineering-platform/sa/teams-operator",
+)
+TEAMS_API_SVID_AUDIENCE = os.getenv("TEAMS_API_SVID_AUDIENCE", "teams-api")
 
 # Paths served without authentication (probes, root, API docs).
 # /github/callback and /github/manifest-callback are public because GitHub
@@ -87,6 +117,81 @@ def _signing_key(kid: str):
     if kid not in _jwks["keys"]:  # possible key rotation since last fetch
         _refresh_keys()
     return _jwks["keys"].get(kid)
+
+
+# --- SPIRE JWT-SVID validation for /internal (A1, svid mode) ----------------
+_spire_jwks: dict = {"keys": {}, "fetched_at": 0.0}
+_spire_ca_path_cache: str | None = None
+
+
+def _spire_ca():
+    """`verify` value for the SPIRE JWKS pull: a temp file holding the platform-tls
+    CA (written once) so TLS is verified, or True (system CAs) if none configured."""
+    global _spire_ca_path_cache
+    if not SPIRE_TLS_CA_PEM:
+        return True
+    if _spire_ca_path_cache is None:
+        f = tempfile.NamedTemporaryFile("w", suffix=".pem", delete=False)
+        f.write(SPIRE_TLS_CA_PEM)
+        f.close()
+        _spire_ca_path_cache = f.name
+    return _spire_ca_path_cache
+
+
+def _refresh_spire_keys() -> None:
+    resp = requests.get(SPIRE_JWKS_URL, verify=_spire_ca(), timeout=10)
+    resp.raise_for_status()
+    # Keep the raw JWK: SPIRE JWT-SVIDs may be EC (ES256) or RSA (RS256); the
+    # algorithm is picked per-key from `kty` at validation time.
+    _spire_jwks["keys"] = {k["kid"]: k for k in resp.json()["keys"]}
+    _spire_jwks["fetched_at"] = time.time()
+
+
+def _spire_key(kid: str):
+    stale = time.time() - _spire_jwks["fetched_at"] > JWKS_CACHE_TTL
+    if kid not in _spire_jwks["keys"] or stale:
+        _refresh_spire_keys()
+    if kid not in _spire_jwks["keys"]:
+        _refresh_spire_keys()
+    return _spire_jwks["keys"].get(kid)
+
+
+def _validate_operator_svid(request: Request) -> None:
+    """Validate teams-operator's SPIRE JWT-SVID on /internal/* (svid mode):
+    signature against SPIRE's JWKS, issuer, audience, expiry, and the exact
+    operator SPIFFE ID. No Keycloak, no static secret."""
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing operator SVID")
+    token = header.split(" ", 1)[1].strip()
+    try:
+        kid = jwt.get_unverified_header(token).get("kid")
+        jwk = _spire_key(kid)
+    except requests.RequestException as e:  # SPIRE JWKS unreachable
+        log.error("SPIRE JWKS fetch failed: %s", e)
+        raise HTTPException(status_code=503, detail="Auth backend unavailable")
+    except jwt.PyJWTError as e:
+        raise HTTPException(status_code=401, detail=f"Invalid operator SVID: {e}")
+    if jwk is None:
+        raise HTTPException(status_code=403, detail="operator SVID: no matching SPIRE key")
+    algo = ECAlgorithm if jwk.get("kty") == "EC" else RSAAlgorithm
+    try:
+        claims = jwt.decode(
+            token,
+            algo.from_jwk(json.dumps(jwk)),
+            algorithms=["ES256", "RS256"],
+            issuer=SPIRE_ISSUER,
+            audience=TEAMS_API_SVID_AUDIENCE,
+            options={"require": ["exp", "iss", "aud", "sub"]},
+        )
+    except jwt.PyJWTError as e:
+        raise HTTPException(status_code=403, detail=f"operator SVID invalid: {e}")
+    if claims.get("sub") != OPERATOR_SPIFFE_ID:
+        raise HTTPException(status_code=403, detail="operator SVID: unexpected SPIFFE ID")
+
+
+def _is_internal(request: Request) -> bool:
+    return request.url.path.startswith("/internal/")
 
 
 def _decode(token: str) -> dict:
@@ -139,6 +244,11 @@ async def authenticate(request: Request) -> None:
     """App-level dependency: require a valid bearer token on non-public paths and
     stash the verified claims on request.state for downstream role checks."""
     if not AUTH_ENABLED or _is_public(request):
+        return
+    # In svid mode, /internal/* is authenticated by require_operator against
+    # SPIRE's JWKS (the SVID is not a Keycloak token), so skip the Keycloak
+    # decode here. The user-token path below is unchanged in both modes.
+    if INTERNAL_AUTH_MODE == "svid" and _is_internal(request):
         return
 
     header = request.headers.get("Authorization", "")
@@ -240,6 +350,9 @@ def require_operator(request: Request) -> None:
     request.state.claims by the time this runs.
     """
     if not AUTH_ENABLED:
+        return
+    if INTERNAL_AUTH_MODE == "svid":
+        _validate_operator_svid(request)
         return
     claims = getattr(request.state, "claims", None) or {}
     if claims.get("azp") != OPERATOR_CLIENT_ID:

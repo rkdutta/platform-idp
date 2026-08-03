@@ -60,6 +60,18 @@ export class ProjectListComponent implements OnInit, OnDestroy {
   private eventsPollHandle: { [projectId: string]: ReturnType<typeof setInterval> } = {};
   private static readonly EVENTS_POLL_INTERVAL_MS = 15000;
 
+  // Namespace provisioning-status poll. The badges (RBAC / image-pull / quota /
+  // limits / network-policy / OpenBao access) are a snapshot of teams-operator's
+  // last reconcile, so after a self-service action (a new project or namespace)
+  // they flip pending -> ready on the operator's own ~15s cycle. This lightweight
+  // background poll refreshes just that status so it becomes current without a
+  // manual reload. It updates only the `namespaceStatus` map — never reassigns
+  // `this.projects` — so it can't churn the project-card DOM or steal input focus
+  // mid-edit. Structural changes (order/delete a namespace) still refresh the
+  // whole list via loadProjects() in their own action handlers.
+  private statusPollHandle?: ReturnType<typeof setInterval>;
+  private static readonly STATUS_POLL_INTERVAL_MS = 15000;
+
   // Applications running in each project's namespace, keyed by project id, already
   // grouped by app.kubernetes.io/part-of into application cards.
   appGroups: { [projectId: string]: ApplicationGroup[] } = {};
@@ -119,6 +131,12 @@ export class ProjectListComponent implements OnInit, OnDestroy {
       // Supplementary info popover; a failure here must not blank the project list.
       error: (error) => console.error("Failed to load priority tiers:", error),
     });
+    // Keep the namespace provisioning-status badges fresh (see statusPollHandle):
+    // pending -> ready flips as teams-operator reconciles, without a manual reload.
+    this.statusPollHandle = setInterval(
+      () => this.loadNamespaceStatus(),
+      ProjectListComponent.STATUS_POLL_INTERVAL_MS,
+    );
   }
 
   loadProjects() {
@@ -656,6 +674,9 @@ export class ProjectListComponent implements OnInit, OnDestroy {
   ngOnDestroy() {
     for (const projectId of Object.keys(this.eventsPollHandle)) {
       this.stopEventsPoll(projectId);
+    }
+    if (this.statusPollHandle) {
+      clearInterval(this.statusPollHandle);
     }
   }
 

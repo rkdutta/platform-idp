@@ -240,6 +240,13 @@ class TeamsOperator:
         self.operator_client_secret = os.getenv("OPERATOR_CLIENT_SECRET", "")
         self._api_token: Optional[str] = None
         self._api_token_expiry: float = 0.0
+        # --- How we authenticate to teams-api /internal/* (A1) ----------------
+        # "keycloak" (default): teams-operator-sa client-credentials token.
+        # "svid": present this pod's SPIRE JWT-SVID (audience "teams-api",
+        #   written by the spiffe-helper sidecar) — no Keycloak, no static
+        #   secret. Flip together with teams-api's INTERNAL_AUTH_MODE.
+        self.teams_api_auth = os.getenv("TEAMS_API_AUTH", "keycloak").strip().lower()
+        self.teams_api_svid_path = os.getenv("TEAMS_API_SVID_PATH", "/operator-shared/teams-api-jwt")
 
         # Argo CD self-service Project reconciliation (ensure_argocd_appproject
         # / ensure_argocd_rbac_policy below). Argo CD itself runs in
@@ -294,7 +301,26 @@ class TeamsOperator:
         self._api_token_expiry = time.time() + int(body.get("expires_in", 60))
         return self._api_token
 
+    def _teams_api_svid(self) -> Optional[str]:
+        """This pod's SPIRE JWT-SVID for calling teams-api /internal/* (audience
+        "teams-api", written by the spiffe-helper sidecar — see the operator
+        deployment). None (logging why) if it's missing/empty, so callers skip
+        this cycle and retry, same as the Keycloak-token path."""
+        try:
+            with open(self.teams_api_svid_path) as f:
+                svid = f.read().strip()
+        except OSError as e:
+            logger.warning(f"⚠️ Could not read teams-api JWT-SVID from {self.teams_api_svid_path}: {e}")
+            return None
+        if not svid:
+            logger.warning(f"⚠️ teams-api JWT-SVID at {self.teams_api_svid_path} is empty (spiffe-helper not ready yet?)")
+            return None
+        return svid
+
     def _api_auth_headers(self) -> Dict[str, str]:
+        if self.teams_api_auth == "svid":
+            svid = self._teams_api_svid()
+            return {"Authorization": f"Bearer {svid}"} if svid else {}
         token = self._teams_api_token()
         return {"Authorization": f"Bearer {token}"} if token else {}
 
