@@ -71,10 +71,10 @@ SPIRE_JWKS_URL = os.getenv(
     "SPIRE_JWKS_URL",
     "https://spire-spiffe-oidc-discovery-provider.spire-server.svc.cluster.local/keys",
 )
-SPIRE_ISSUER = os.getenv(
-    "SPIRE_ISSUER",
-    "https://spire-spiffe-oidc-discovery-provider.spire-server.svc.cluster.local",
-)
+# The `iss` claim SPIRE stamps on the JWT-SVID — the trust-domain OIDC issuer
+# (oidc-discovery.<trust domain>), which is NOT the svc.cluster.local URL used to
+# FETCH the keys (SPIRE_JWKS_URL). They are legitimately different.
+SPIRE_ISSUER = os.getenv("SPIRE_ISSUER", "https://oidc-discovery.platform.local")
 # CA that signs the SPIRE OIDC endpoint's TLS — platform-tls (the same wildcard
 # CA that signs Keycloak), which teams-api already mounts as KEYCLOAK_CA_CERT.
 # Reuse it so the JWKS pull is TLS-verified — never skip verification, a MITM'd
