@@ -160,6 +160,12 @@ class TeamsAPI:
         print(f"✅ Created team: {result['name']}")
         print(f"🆔 Team ID: {result['id']}")
         print(f"📅 Created: {result['created_at']}")
+        # The intent is recorded immediately; the platform (teams-operator)
+        # reconciles the namespace, RBAC, secrets and access-group membership
+        # on its next cycle (~15s). kubectl access needs a fresh login to pick
+        # up the new group, so fetch the kubeconfig after a moment.
+        print("⏳ Provisioning access — reconciles within ~15s.")
+        print("   Then run: teams-cli get-kubeconfig  (a fresh login picks up your access)")
 
     def list_teams(self):
         """List all teams"""

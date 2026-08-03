@@ -172,6 +172,14 @@ app_compliance_reader = AppComplianceReader(compliance_checker)
 # says, so hand-editing group membership in Keycloak wouldn't stick.
 keycloak = KeycloakAdmin()
 
+# Cutover switch: when false, teams-api stops WRITING to Keycloak (groups,
+# memberships, the project-manager role) and teams-operator becomes the sole
+# writer (reconcile_keycloak, gated by KC_RECONCILE_ENABLED). READS stay on —
+# _lookup_user / list_users / role_members still resolve the realm directory for
+# validation and the assignment picker. Flip this to "false" in the same release
+# that flips the operator's KC_RECONCILE_ENABLED to "true"; rollback flips both.
+KC_WRITES_ENABLED = os.getenv("KC_WRITES_ENABLED", "true").lower() == "true"
+
 
 def _lookup_user(identifier: str) -> Optional[dict]:
     """Find a realm user by id or username. Grants are keyed on the Keycloak `sub`,
@@ -207,7 +215,7 @@ def _sync_group_membership(namespace: str, role: str, username: str, add: bool) 
     self-healing backstop for whatever a transient Keycloak failure here
     misses — the same tolerance teams-operator's own poll loop already has
     for a transient teams-api outage."""
-    if not keycloak.enabled:
+    if not keycloak.enabled or not KC_WRITES_ENABLED:
         return
     group = _k8s_group_name(namespace, role)
     try:
@@ -226,7 +234,7 @@ def _delete_k8s_groups(namespace: str) -> None:
     """Best-effort cleanup of a namespace's two k8s RBAC groups once the
     namespace/project is gone — otherwise Keycloak accumulates orphaned groups
     forever. Never raises."""
-    if not keycloak.enabled:
+    if not keycloak.enabled or not KC_WRITES_ENABLED:
         return
     for role in store.ROLES:
         try:
@@ -251,7 +259,7 @@ def _sync_owner_group(project_name: str, username: str, add: bool) -> None:
     """Best-effort mirror of one project-ownership into the OpenBao owner group.
     Never raises — the DB is the source of truth and the reconciliation loop is
     the self-healing backstop for any transient Keycloak failure here."""
-    if not keycloak.enabled or not username:
+    if not keycloak.enabled or not username or not KC_WRITES_ENABLED:
         return
     group = _project_owner_group_name(project_name)
     try:
@@ -268,7 +276,7 @@ def _sync_owner_group(project_name: str, username: str, add: bool) -> None:
 
 def _delete_owner_group(project_name: str) -> None:
     """Delete a project's owner Keycloak group once the project is gone."""
-    if not keycloak.enabled:
+    if not keycloak.enabled or not KC_WRITES_ENABLED:
         return
     try:
         keycloak.delete_group(_project_owner_group_name(project_name))
@@ -285,7 +293,7 @@ def _reconcile_k8s_groups_once() -> None:
     itself) — and correct any drift against live Keycloak group membership.
     Split out from _group_reconciliation_loop so a single cycle is directly
     callable/testable without dealing with the sleep loop around it."""
-    if not keycloak.enabled:
+    if not keycloak.enabled or not KC_WRITES_ENABLED:
         return
     try:
         desired = internal_access()["namespaces"]
@@ -342,12 +350,15 @@ async def _startup() -> None:
     """
     store.connect()
 
-    # Started unconditionally, before the (unrelated) migration below can
-    # early-return: the reconciliation loop already tolerates Keycloak being
-    # down at any given cycle (see _group_reconciliation_loop) by skipping
-    # and retrying next interval — it must still get that chance even if
-    # Keycloak also happened to be down at this exact startup instant.
-    asyncio.create_task(_group_reconciliation_loop())
+    # Only while teams-api still owns the Keycloak-group projection (pre-cutover).
+    # Once KC_WRITES_ENABLED is false, teams-operator's reconcile_keycloak is the
+    # single writer and this loop must NOT also run, or the two fight over the same
+    # groups. Started before the (unrelated) migration below can early-return: the
+    # loop already tolerates Keycloak being down at any given cycle (see
+    # _group_reconciliation_loop) — it must still get that chance even if Keycloak
+    # happened to be down at this exact startup instant.
+    if KC_WRITES_ENABLED:
+        asyncio.create_task(_group_reconciliation_loop())
 
     users_by_name: Dict[str, dict] = {}
     leaders: Set[str] = set()
@@ -1267,14 +1278,15 @@ def grant_project_manager(request: Request, user_id: str):
     user = _lookup_user(user_id)
     if not user:
         raise HTTPException(status_code=400, detail="No such user in Keycloak")
-    try:
-        keycloak.assign_realm_role(user["username"], "project-manager")
-    except KeycloakAdminError as e:
-        logger.error("grant project-manager failed: %s", e)
-        raise HTTPException(status_code=503, detail="Keycloak unavailable")
-    # Also record in the DB — the future source of truth that teams-operator
-    # reconciles into Keycloak. Dual-write during the transition; once the
-    # operator owns the Keycloak write, the assign_realm_role call above is removed.
+    # DB is the source of truth (teams-operator reconciles it into the Keycloak
+    # role). Pre-cutover we also write Keycloak directly; once KC_WRITES_ENABLED
+    # is false the operator is the sole writer and this block is skipped.
+    if KC_WRITES_ENABLED:
+        try:
+            keycloak.assign_realm_role(user["username"], "project-manager")
+        except KeycloakAdminError as e:
+            logger.error("grant project-manager failed: %s", e)
+            raise HTTPException(status_code=503, detail="Keycloak unavailable")
     store.add_project_manager(user_id, user["username"], datetime.now().isoformat())
     store.record(caller_name(request), "project_manager.grant", user["username"])
     return {"message": f"Granted project-manager to '{user['username']}'"}
@@ -1285,12 +1297,13 @@ def revoke_project_manager(request: Request, user_id: str):
     user = _lookup_user(user_id)
     if not user:
         raise HTTPException(status_code=400, detail="No such user in Keycloak")
-    try:
-        keycloak.remove_realm_role(user["username"], "project-manager")
-    except KeycloakAdminError as e:
-        logger.error("revoke project-manager failed: %s", e)
-        raise HTTPException(status_code=503, detail="Keycloak unavailable")
-    store.remove_project_manager(user_id)  # dual-write (see grant_project_manager)
+    if KC_WRITES_ENABLED:  # see grant_project_manager
+        try:
+            keycloak.remove_realm_role(user["username"], "project-manager")
+        except KeycloakAdminError as e:
+            logger.error("revoke project-manager failed: %s", e)
+            raise HTTPException(status_code=503, detail="Keycloak unavailable")
+    store.remove_project_manager(user_id)
     store.record(caller_name(request), "project_manager.revoke", user["username"])
     return {"message": f"Revoked project-manager from '{user['username']}'"}
 
