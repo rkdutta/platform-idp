@@ -160,6 +160,27 @@ class TeamsOperator:
         )
         self._github_app_creds_cache: Dict[Optional[str], Tuple[str, str]] = {}
 
+        # --- Keycloak realm-write reconcile (GATED OFF by default) ------------
+        # When KC_RECONCILE_ENABLED=true, teams-operator becomes the SOLE writer
+        # of the Keycloak {ns}-viewer/-maintainer groups, project-<slug>-owner
+        # groups, and the project-manager realm role — reconciled from
+        # /internal/access (see reconcile_keycloak). Until cutover it stays off
+        # and teams-api keeps doing those writes. The admin client_secret is read
+        # from OpenBao via this pod's SPIFFE identity (no static k8s secret).
+        self.kc_reconcile_enabled = os.getenv("KC_RECONCILE_ENABLED", "false").lower() == "true"
+        self.kc_base_url = os.getenv(
+            "KEYCLOAK_ADMIN_BASE_URL", "http://keycloak-keycloakx-http.keycloak.svc/auth"
+        ).rstrip("/")
+        self.kc_realm = os.getenv("KEYCLOAK_REALM", "teams")
+        self.kc_client_id = os.getenv("KEYCLOAK_ADMIN_CLIENT_ID", "teams-operator-kc-admin")
+        self.kc_secret_openbao_path = os.getenv(
+            "KEYCLOAK_ADMIN_OPENBAO_PATH", "kv/data/platform/keycloak-admin"
+        )
+        self.kc_pm_role = os.getenv("KEYCLOAK_PM_ROLE", "project-manager")
+        self._kc_token: Optional[str] = None
+        self._kc_token_expiry: float = 0.0
+        self._kc_group_ids: Dict[str, str] = {}
+
         # Per-namespace provisioning status (see update_namespace_status).
         # Deliberately a point-in-time "did the last reconcile attempt for
         # each concern succeed" snapshot, not continuous health monitoring
@@ -1415,6 +1436,200 @@ class TeamsOperator:
             logger.error(f"❌ OpenBao request {method} {path} failed: {e}")
             return None
 
+    # ------------------------------------------------------------------ #
+    # Keycloak realm-write (gated by KC_RECONCILE_ENABLED — see __init__).
+    # Admin client_secret comes from OpenBao (read via this pod's SPIFFE
+    # identity), so there is no static Keycloak secret on the pod.
+    # ------------------------------------------------------------------ #
+    def _kc_client_secret(self) -> Optional[str]:
+        resp = self._openbao_request("GET", self.kc_secret_openbao_path)
+        if resp is None or resp.status_code != 200:
+            code = getattr(resp, "status_code", "no response")
+            logger.error(f"❌ Keycloak-admin secret unreadable from OpenBao "
+                         f"({self.kc_secret_openbao_path}): {code}")
+            return None
+        try:
+            return resp.json()["data"]["data"]["client-secret"]
+        except (KeyError, ValueError) as e:
+            logger.error(f"❌ Malformed Keycloak-admin secret at {self.kc_secret_openbao_path}: {e}")
+            return None
+
+    def _kc_token_get(self) -> Optional[str]:
+        if self._kc_token and time.time() < self._kc_token_expiry - 15:
+            return self._kc_token
+        secret = self._kc_client_secret()
+        if not secret:
+            return None
+        try:
+            resp = requests.post(
+                f"{self.kc_base_url}/realms/{self.kc_realm}/protocol/openid-connect/token",
+                data={"grant_type": "client_credentials",
+                      "client_id": self.kc_client_id, "client_secret": secret},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+        except (requests.RequestException, ValueError) as e:
+            logger.error(f"❌ Keycloak admin token failed (client_id={self.kc_client_id}): {e}")
+            return None
+        self._kc_token = body["access_token"]
+        self._kc_token_expiry = time.time() + int(body.get("expires_in", 60))
+        return self._kc_token
+
+    def _kc_request(self, method: str, path: str, **kw) -> Optional[requests.Response]:
+        token = self._kc_token_get()
+        if not token:
+            return None
+        try:
+            return requests.request(
+                method, f"{self.kc_base_url}/admin/realms/{self.kc_realm}{path}",
+                headers={"Authorization": f"Bearer {token}"}, timeout=10, **kw,
+            )
+        except requests.RequestException as e:
+            logger.error(f"❌ Keycloak admin {method} {path} failed: {e}")
+            return None
+
+    def _kc_group_id(self, name: str) -> Optional[str]:
+        if name in self._kc_group_ids:
+            return self._kc_group_ids[name]
+        resp = self._kc_request("GET", "/groups", params={"search": name, "max": 100})
+        if resp is None or resp.status_code != 200:
+            return None
+        for g in resp.json():
+            if g.get("name") == name:
+                self._kc_group_ids[name] = g["id"]
+                return g["id"]
+        return None
+
+    def _kc_ensure_group(self, name: str) -> Optional[str]:
+        gid = self._kc_group_id(name)
+        if gid:
+            return gid
+        # `managed-by` marks operator-owned groups so prune only ever touches ours.
+        resp = self._kc_request("POST", "/groups",
+                                json={"name": name, "attributes": {"managed-by": ["teams-operator"]}})
+        if resp is None or resp.status_code not in (201, 409):
+            logger.error(f"❌ create Keycloak group '{name}': {getattr(resp,'status_code','no response')}")
+            return None
+        return self._kc_group_id(name)
+
+    def _kc_delete_group(self, name: str) -> bool:
+        gid = self._kc_group_id(name)
+        if not gid:
+            return True
+        resp = self._kc_request("DELETE", f"/groups/{gid}")
+        ok = resp is not None and resp.status_code in (204, 404)
+        if ok:
+            self._kc_group_ids.pop(name, None)
+        else:
+            logger.error(f"❌ delete Keycloak group '{name}': {getattr(resp,'status_code','no response')}")
+        return ok
+
+    def _kc_group_members(self, name: str) -> Optional[List[str]]:
+        gid = self._kc_group_id(name)
+        if not gid:
+            return []
+        resp = self._kc_request("GET", f"/groups/{gid}/members", params={"max": 1000})
+        if resp is None or resp.status_code != 200:
+            return None
+        return [u["username"] for u in resp.json()]
+
+    def _kc_user_id(self, username: str) -> Optional[str]:
+        resp = self._kc_request("GET", "/users", params={"username": username, "exact": "true"})
+        if resp is None or resp.status_code != 200:
+            return None
+        users = resp.json()
+        return users[0]["id"] if users else None
+
+    def _kc_set_group_membership(self, name: str, username: str, add: bool) -> bool:
+        gid = self._kc_ensure_group(name) if add else self._kc_group_id(name)
+        if not gid:
+            return not add  # removing from a group that doesn't exist: nothing to do
+        uid = self._kc_user_id(username)
+        if not uid:
+            logger.warning(f"⚠️ Keycloak user '{username}' not found; skipping group '{name}'")
+            return False
+        resp = self._kc_request("PUT" if add else "DELETE", f"/users/{uid}/groups/{gid}")
+        return resp is not None and resp.status_code in (204, 404)
+
+    def _kc_role_repr(self, role: str) -> Optional[dict]:
+        resp = self._kc_request("GET", f"/roles/{role}")
+        if resp is None or resp.status_code != 200:
+            return None
+        r = resp.json()
+        return {"id": r["id"], "name": r["name"]}
+
+    def _kc_role_members(self, role: str) -> Optional[List[str]]:
+        resp = self._kc_request("GET", f"/roles/{role}/users", params={"max": 1000})
+        if resp is None or resp.status_code != 200:
+            return None
+        return [u["username"] for u in resp.json()]
+
+    def _kc_set_realm_role(self, username: str, role: str, add: bool) -> bool:
+        uid = self._kc_user_id(username)
+        if not uid:
+            logger.warning(f"⚠️ Keycloak user '{username}' not found; skipping role '{role}'")
+            return False
+        rep = self._kc_role_repr(role)
+        if not rep:
+            return False
+        resp = self._kc_request("POST" if add else "DELETE",
+                                f"/users/{uid}/role-mappings/realm", json=[rep])
+        return resp is not None and resp.status_code in (204, 409)
+
+    def reconcile_keycloak(self, access: dict) -> None:
+        """SOLE Keycloak writer (when enabled): reconcile the k8s-access groups,
+        project-owner groups, and the project-manager realm role to teams-api's
+        desired state (/internal/access). Best-effort per item; a transient
+        Keycloak failure just retries next cycle. Fully isolated so it can never
+        stall the k8s/OpenBao/Argo reconcile."""
+        try:
+            namespaces = access.get("namespaces") or {}
+            owner_groups = access.get("owner_groups") or {}
+            project_managers = access.get("project_managers")  # None => not reported
+
+            desired_groups: Dict[str, Set[str]] = {}
+            for ns, roles in namespaces.items():
+                desired_groups[f"{ns}-viewer"] = set(roles.get("viewer", []))
+                desired_groups[f"{ns}-maintainer"] = set(roles.get("maintainer", []))
+            for gname, members in owner_groups.items():
+                desired_groups[gname] = set(members)
+
+            # 1) Converge each desired group's membership.
+            for gname, want in desired_groups.items():
+                have = self._kc_group_members(gname)
+                if have is None:
+                    continue  # read failed this cycle; leave as-is, retry later
+                have = set(have)
+                for u in want - have:
+                    self._kc_set_group_membership(gname, u, add=True)
+                for u in have - want:
+                    self._kc_set_group_membership(gname, u, add=False)
+
+            # 2) Prune operator-managed groups no longer desired (only groups we
+            #    created carry the managed-by attribute, so we never touch others).
+            resp = self._kc_request("GET", "/groups",
+                                    params={"max": 2000, "briefRepresentation": "false"})
+            if resp is not None and resp.status_code == 200:
+                for g in resp.json():
+                    name = g.get("name", "")
+                    ours = (g.get("attributes") or {}).get("managed-by") == ["teams-operator"]
+                    if ours and name not in desired_groups:
+                        self._kc_delete_group(name)
+
+            # 3) project-manager realm role. None => teams-api didn't report it
+            #    (mid-rollout) — leave it alone rather than revoke everyone.
+            if project_managers is not None:
+                have_pm = self._kc_role_members(self.kc_pm_role)
+                if have_pm is not None:
+                    want_pm, have_pm = set(project_managers), set(have_pm)
+                    for u in want_pm - have_pm:
+                        self._kc_set_realm_role(u, self.kc_pm_role, add=True)
+                    for u in have_pm - want_pm:
+                        self._kc_set_realm_role(u, self.kc_pm_role, add=False)
+        except Exception as e:  # noqa: BLE001 — a Keycloak hiccup must not stall the cycle
+            logger.error(f"❌ Keycloak reconcile cycle failed: {e}")
+
     def _openbao_oidc_accessor(self) -> Optional[str]:
         """The oidc/ auth mount's accessor (cached for the process lifetime).
         Returns None — logging why — if the oidc method isn't enabled yet
@@ -2160,6 +2375,13 @@ class TeamsOperator:
             logger.warning("Skipping admin ClusterRoleBinding sync: admin list unknown (Keycloak unreachable?)")
         else:
             self.sync_admin_binding(admins)
+
+        # Keycloak realm-write reconcile (k8s-access groups, project-owner groups,
+        # project-manager role). GATED OFF until cutover (KC_RECONCILE_ENABLED);
+        # teams-api still owns these writes until then. Reuses this cycle's
+        # already-fetched `access`, so it costs no extra teams-api call.
+        if self.kc_reconcile_enabled:
+            self.reconcile_keycloak(access)
 
     async def run(self):
         """Main operator loop"""

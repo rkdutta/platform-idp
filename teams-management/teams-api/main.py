@@ -376,6 +376,20 @@ async def _startup() -> None:
     )
     logger.info("Store migration: %s", summary)
 
+    # One-time backfill: seed the project_managers table from the Keycloak
+    # realm role so /internal/access can expose current holders for teams-operator
+    # to reconcile. Best-effort and idempotent — the DB is the source of truth
+    # going forward (grant/revoke dual-write into it), this only captures any
+    # holders that predate the DB table. Only runs while the table is empty.
+    if keycloak.enabled and not store.list_project_managers():
+        try:
+            for uname in keycloak.role_members("project-manager"):
+                u = users_by_name.get(uname)
+                if u:
+                    store.add_project_manager(u["id"], uname, datetime.now().isoformat())
+        except KeycloakAdminError as e:
+            logger.error("project-manager backfill skipped (will retry next start): %s", e)
+
 # Pydantic models
 def _valid_repo_url(url: str) -> str:
     """Normalize + sanity-check a git repo URL. Accepts https:// and SSH
@@ -1258,6 +1272,10 @@ def grant_project_manager(request: Request, user_id: str):
     except KeycloakAdminError as e:
         logger.error("grant project-manager failed: %s", e)
         raise HTTPException(status_code=503, detail="Keycloak unavailable")
+    # Also record in the DB — the future source of truth that teams-operator
+    # reconciles into Keycloak. Dual-write during the transition; once the
+    # operator owns the Keycloak write, the assign_realm_role call above is removed.
+    store.add_project_manager(user_id, user["username"], datetime.now().isoformat())
     store.record(caller_name(request), "project_manager.grant", user["username"])
     return {"message": f"Granted project-manager to '{user['username']}'"}
 
@@ -1272,6 +1290,7 @@ def revoke_project_manager(request: Request, user_id: str):
     except KeycloakAdminError as e:
         logger.error("revoke project-manager failed: %s", e)
         raise HTTPException(status_code=503, detail="Keycloak unavailable")
+    store.remove_project_manager(user_id)  # dual-write (see grant_project_manager)
     store.record(caller_name(request), "project_manager.revoke", user["username"])
     return {"message": f"Revoked project-manager from '{user['username']}'"}
 
@@ -1426,9 +1445,16 @@ def internal_access():
     admins over a transient outage.
     """
     namespaces: Dict[str, Dict[str, List[str]]] = {}
+    # project-<slug>-owner group -> owner usernames (the human side of the
+    # project-wide OpenBao owner tier). teams-operator reconciles these Keycloak
+    # groups from here (formerly _sync_owner_group did it inline).
+    owner_groups: Dict[str, List[str]] = {}
     for project in store.list_projects():
         owners = store.owners_of(project["id"])
         owner_ids = {o["user_id"] for o in owners}
+        owner_groups[_project_owner_group_name(project["name"])] = [
+            o["username"] for o in owners if o["username"]
+        ]
         for ns in project["namespaces"]:
             viewer = []
             maintainer = [o["username"] for o in owners]
@@ -1445,7 +1471,16 @@ def internal_access():
         except KeycloakAdminError as e:
             logger.error("Could not list admin role members: %s", e)
 
-    return {"namespaces": namespaces, "admins": admins}
+    # Self-service delegation holders (who may create projects). teams-operator
+    # reconciles this into the Keycloak `project-manager` realm role.
+    project_managers = [m["username"] for m in store.list_project_managers() if m["username"]]
+
+    return {
+        "namespaces": namespaces,
+        "owner_groups": owner_groups,
+        "project_managers": project_managers,
+        "admins": admins,
+    }
 
 
 class GithubConnectionResolve(BaseModel):

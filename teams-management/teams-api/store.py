@@ -57,6 +57,17 @@ CREATE TABLE IF NOT EXISTS project_owners (
     PRIMARY KEY (project_id, user_id)
 );
 
+-- Holders of the `project-manager` capability (self-service delegation: who may
+-- create projects). Formerly a Keycloak realm role assigned directly by teams-api;
+-- now the DB is the source of truth and teams-operator reconciles it into the
+-- Keycloak realm role (see reconcile_keycloak). Keyed on user_id (usernames are
+-- mutable), mirroring project_owners.
+CREATE TABLE IF NOT EXISTS project_managers (
+    user_id     TEXT PRIMARY KEY,
+    username    TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS namespace_grants (
     namespace   TEXT NOT NULL REFERENCES project_namespaces(namespace) ON DELETE CASCADE,
     user_id     TEXT NOT NULL,
@@ -466,6 +477,45 @@ def remove_owner(project_id: str, user_id: str) -> None:
         _db().execute(
             "DELETE FROM project_owners WHERE project_id = ? AND user_id = ?",
             (project_id, user_id),
+        )
+        _db().commit()
+
+
+# --------------------------------------------------------------------------- #
+# Project managers (self-service delegation — who may create projects).
+# teams-operator reconciles this set into the Keycloak `project-manager` realm
+# role; teams-api is the source of truth and never writes Keycloak (see plan).
+# --------------------------------------------------------------------------- #
+def list_project_managers() -> List[dict]:
+    rows = _db().execute(
+        "SELECT user_id, username FROM project_managers ORDER BY username"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def is_project_manager(user_id: str) -> bool:
+    if not user_id:
+        return False
+    row = _db().execute(
+        "SELECT 1 FROM project_managers WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    return row is not None
+
+
+def add_project_manager(user_id: str, username: str = "", created_at: str = "") -> None:
+    with _lock:
+        _db().execute(
+            "INSERT INTO project_managers (user_id, username, created_at) VALUES (?,?,?) "
+            "ON CONFLICT(user_id) DO UPDATE SET username = excluded.username",
+            (user_id, username, created_at),
+        )
+        _db().commit()
+
+
+def remove_project_manager(user_id: str) -> None:
+    with _lock:
+        _db().execute(
+            "DELETE FROM project_managers WHERE user_id = ?", (user_id,)
         )
         _db().commit()
 
