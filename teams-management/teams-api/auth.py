@@ -188,6 +188,7 @@ def _validate_operator_svid(request: Request) -> None:
         raise HTTPException(status_code=403, detail=f"operator SVID invalid: {e}")
     if claims.get("sub") != OPERATOR_SPIFFE_ID:
         raise HTTPException(status_code=403, detail="operator SVID: unexpected SPIFFE ID")
+    return claims
 
 
 def _is_internal(request: Request) -> bool:
@@ -245,10 +246,14 @@ async def authenticate(request: Request) -> None:
     stash the verified claims on request.state for downstream role checks."""
     if not AUTH_ENABLED or _is_public(request):
         return
-    # In svid mode, /internal/* is authenticated by require_operator against
-    # SPIRE's JWKS (the SVID is not a Keycloak token), so skip the Keycloak
-    # decode here. The user-token path below is unchanged in both modes.
+    # In svid mode, /internal/* carries teams-operator's SPIRE JWT-SVID (not a
+    # Keycloak token). Validate it against SPIRE's JWKS and stash its claims —
+    # so the global require_read below passes and require_operator can confirm
+    # the SPIFFE ID. The user-token path further down is unchanged in both modes.
     if INTERNAL_AUTH_MODE == "svid" and _is_internal(request):
+        claims = _validate_operator_svid(request)
+        request.state.claims = claims
+        request.state.user_id = claims.get("sub")
         return
 
     header = request.headers.get("Authorization", "")
@@ -352,7 +357,13 @@ def require_operator(request: Request) -> None:
     if not AUTH_ENABLED:
         return
     if INTERNAL_AUTH_MODE == "svid":
-        _validate_operator_svid(request)
+        # authenticate() already validated the SVID and stashed its claims.
+        claims = getattr(request.state, "claims", None) or {}
+        if claims.get("sub") != OPERATOR_SPIFFE_ID:
+            raise HTTPException(
+                status_code=403,
+                detail="Requires the teams-operator service identity",
+            )
         return
     claims = getattr(request.state, "claims", None) or {}
     if claims.get("azp") != OPERATOR_CLIENT_ID:
