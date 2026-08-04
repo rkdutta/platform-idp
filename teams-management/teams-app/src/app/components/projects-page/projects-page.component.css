@@ -1,18 +1,9 @@
 .main-content {
-  display: grid;
-  grid-template-columns: 1fr 2fr;
+  display: flex;
+  flex-direction: column;
   gap: 30px;
-  align-items: start;
 }
 
-/* No create form (non-admin), so the project list spans full width. */
-.main-content.read-only {
-  grid-template-columns: 1fr;
-}
-
-/* Left column: stacks the create-project form above the (admin-only) repo
-   whitelist. Being a single grid child, it keeps "Existing Projects" pinned
-   to the right column. */
 .form-column {
   display: flex;
   flex-direction: column;
@@ -228,7 +219,6 @@
 
 @media (max-width: 768px) {
   .main-content {
-    grid-template-columns: 1fr;
     gap: 20px;
   }
 }

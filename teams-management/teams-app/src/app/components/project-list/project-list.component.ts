@@ -50,11 +50,10 @@ export class ProjectListComponent implements OnInit, OnDestroy {
   namespaceStatus: { [projectId: string]: { [namespace: string]: NamespaceProvisioningStatus } } = {};
 
   // Project activity feed (teams-operator's Events, aggregated across the
-  // project's namespaces) — collapsed by default, lazy-loaded on first
-  // expand, then auto-refreshed on a timer only while expanded (collapsing
-  // stops the poll, so a long-open tab with many projects doesn't keep
-  // hitting the API for panels nobody's looking at).
-  eventsExpanded: { [projectId: string]: boolean } = {};
+  // project's namespaces) — always visible in the card's activity panel while
+  // the card itself is expanded, auto-refreshed on a timer for as long as
+  // that's true (collapsing the card stops the poll, so a long-open tab with
+  // many projects doesn't keep hitting the API for cards nobody's looking at).
   projectEvents: { [projectId: string]: ProjectEvent[] } = {};
   loadingEvents: { [projectId: string]: boolean } = {};
   private eventsPollHandle: { [projectId: string]: ReturnType<typeof setInterval> } = {};
@@ -150,9 +149,9 @@ export class ProjectListComponent implements OnInit, OnDestroy {
       next: (projects) => {
         this.projects = projects;
         this.isLoading = false;
-        // Recent activity is expanded by default: for every project whose card is
-        // already open (persisted-expanded across refreshes), load + arm its
-        // activity poll. Collapsed cards stay dormant until expanded.
+        // Activity is always shown in an expanded card: for every project whose
+        // card is already open (persisted-expanded across refreshes), load +
+        // arm its activity poll. Collapsed cards stay dormant until expanded.
         for (const p of projects) {
           this.syncEventsPoll(p.id);
           // Eager-load source repos so we can flag/auto-expand projects with none
@@ -173,7 +172,7 @@ export class ProjectListComponent implements OnInit, OnDestroy {
   toggleCollapse(projectId: string) {
     this.collapsed[projectId] = !this.isCollapsed(projectId);
     this.persistCollapsedState();
-    // Expanding a card reveals its (default-open) activity section, so start its
+    // Expanding a card reveals its always-visible activity panel, so start its
     // poll; collapsing hides it, so stop polling.
     this.syncEventsPoll(projectId);
   }
@@ -613,26 +612,14 @@ export class ProjectListComponent implements OnInit, OnDestroy {
     return `${environment.rolloutsDashboardUrl}/rollouts/rollout/${ns}/${app.name}`;
   }
 
-  // Recent activity is expanded by DEFAULT: an unset entry counts as expanded,
-  // so only an explicit `false` (the user collapsed it) hides the section.
-  isEventsExpanded(projectId: string): boolean {
-    return this.eventsExpanded[projectId] !== false;
-  }
-
-  toggleEvents(projectId: string) {
-    this.eventsExpanded[projectId] = !this.isEventsExpanded(projectId);
-    this.syncEventsPoll(projectId);
-  }
-
   /** Reconcile the activity load + background poll with the current UI state:
-   *  active only while the project's CARD is expanded AND its activity section
-   *  is expanded (default). Idempotent — safe to call on load, card toggle, or
-   *  section toggle; it clears any stale interval before re-arming. Keeping the
-   *  poll scoped to a visible section avoids polling events for every collapsed
-   *  card on the page. */
+   *  active only while the project's CARD is expanded (the activity panel is
+   *  always visible within an expanded card). Idempotent — safe to call on
+   *  load or card toggle; it clears any stale interval before re-arming.
+   *  Keeping the poll scoped to expanded cards avoids polling events for
+   *  every collapsed card on the page. */
   private syncEventsPoll(projectId: string) {
-    const active = !this.isCollapsed(projectId) && this.isEventsExpanded(projectId);
-    if (!active) {
+    if (this.isCollapsed(projectId)) {
       this.stopEventsPoll(projectId);
       return;
     }

@@ -1,7 +1,6 @@
 <!-- src/app/components/project-form/project-form.component.html -->
 <form [formGroup]="projectForm" (ngSubmit)="onSubmit()" class="project-form">
-  <div class="form-group">
-    <label for="name">Project Name</label>
+  <div class="form-row">
     <input
       type="text"
       id="name"
@@ -9,29 +8,24 @@
       class="form-control"
       [class.invalid]="name?.invalid && name?.touched"
       placeholder="Enter project name"
+      aria-label="Project name"
     >
-    <div class="error-message" *ngIf="name?.invalid && name?.touched">
-      <span *ngIf="name?.errors?.['required']">Project name is required</span>
-      <span *ngIf="name?.errors?.['minlength']">Project name must be at least 2 characters</span>
-    </div>
+    <button
+      type="submit"
+      class="btn btn-primary"
+      [disabled]="projectForm.invalid || isSubmitting"
+    >
+      <span *ngIf="isSubmitting">Creating...</span>
+      <span *ngIf="!isSubmitting">Create Project</span>
+    </button>
   </div>
 
-  <p class="form-note">
-    Source repositories aren't required to create a project — once it exists,
-    open its card and register a GitHub connection to add repos and start
-    deploying applications.
-  </p>
+  <div class="error-message" *ngIf="name?.invalid && name?.touched">
+    <span *ngIf="name?.errors?.['required']">Project name is required</span>
+    <span *ngIf="name?.errors?.['minlength']">Project name must be at least 2 characters</span>
+  </div>
 
   <div class="error-message" *ngIf="errorMessage">
     {{ errorMessage }}
   </div>
-
-  <button
-    type="submit"
-    class="btn btn-primary"
-    [disabled]="projectForm.invalid || isSubmitting"
-  >
-    <span *ngIf="isSubmitting">Creating...</span>
-    <span *ngIf="!isSubmitting">Create Project</span>
-  </button>
 </form>

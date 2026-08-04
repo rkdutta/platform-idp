@@ -73,6 +73,8 @@
 
       <!-- Collapsible body: hidden when the card is collapsed. -->
       <div class="project-body" *ngIf="!isCollapsed(project.id)">
+      <div class="project-body-grid">
+      <div class="project-main">
       <div class="project-details">
         <p class="project-id">ID: {{ project.id }}</p>
         <p class="project-created">Created: {{ formatDate(project.created_at) }}</p>
@@ -619,24 +621,25 @@
         </div>
       </div>
 
+      </div>
+      <!-- /project-main -->
+
       <!-- Project activity feed: teams-operator's own Events (namespace
            provisioning + per-concern condition transitions), aggregated
            across every namespace of this PROJECT — not per-namespace, and not
            a live probe (see docs/openbao-spiffe-access.md's reasoning on
            why this platform doesn't watch namespaces after provisioning
-           them). Collapsed by default; lazy-loaded and auto-refreshed only
-           while expanded. -->
-      <div class="events-section">
-        <button
-          class="compliance-toggle"
-          (click)="toggleEvents(project.id)"
-          [attr.aria-expanded]="isEventsExpanded(project.id)"
-        >
+           them). Always visible alongside the rest of an expanded card (no
+           collapse toggle) so activity stays in view; auto-refreshed on a
+           poll the whole time the card is open (see syncEventsPoll), and
+           independently scrollable so a long history doesn't grow the card. -->
+      <aside class="project-activity">
+        <div class="activity-header">
           <span class="compliance-label">Recent activity</span>
-          <span class="chevron">{{ isEventsExpanded(project.id) ? "▲" : "▼" }}</span>
-        </button>
+          <span class="live-indicator" title="Auto-refreshes every 15s">● live</span>
+        </div>
 
-        <div class="events-detail" *ngIf="isEventsExpanded(project.id)">
+        <div class="activity-body">
           <div class="detail-loading" *ngIf="loadingEvents[project.id] && !projectEvents[project.id]">
             Loading activity…
           </div>
@@ -662,7 +665,9 @@
             </ul>
           </ng-container>
         </div>
+      </aside>
       </div>
+      <!-- /project-body-grid -->
       </div>
       <!-- /project-body -->
     </div>

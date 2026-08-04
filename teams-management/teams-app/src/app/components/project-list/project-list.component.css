@@ -1013,6 +1013,24 @@
   word-break: break-word;
 }
 
+/* --- Project card body layout: main column + activity side panel --- */
+.project-body-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 20px;
+  align-items: start;
+}
+
+.project-main {
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .project-body-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* --- Project activity feed (teams-operator's Events) --- */
 .events-section {
   margin-top: 15px;
@@ -1022,6 +1040,49 @@
 
 .events-detail {
   margin-top: 12px;
+}
+
+/* Recent activity: always-visible side panel (not collapsible), sticky within
+   the card so it stays in view while scrolling a long main column, with its
+   own scrollable body so a long event history doesn't grow the card. */
+.project-activity {
+  position: sticky;
+  top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-3);
+  padding: 12px;
+}
+
+@media (max-width: 900px) {
+  .project-activity {
+    position: static;
+  }
+}
+
+.activity-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.live-indicator {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--success);
+}
+
+.activity-body {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.project-activity .event {
+  flex-wrap: wrap;
 }
 
 .event-list {
