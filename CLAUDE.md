@@ -9,10 +9,46 @@ here don't imply commits in `platform-infra` (GitOps manifests) or
 runs in-cluster usually needs a commit **here** (code) **and** in
 `platform-infra` (the `image:` tag bump).
 
-> The umbrella `../CLAUDE.md` (capstone-project root) is the canonical
-> reference for platform-wide ops, cluster bring-up, OpenBao/OIDC, and the
-> hard-won operational gotchas. **Read it for anything touching the running
-> cluster.** This file covers only what's specific to developing *this* repo.
+> `../CLAUDE.md` (capstone-project root) has the platform-wide map and a
+> high-level description; `../platform-infra/CLAUDE.md` and
+> `../platform-base/CLAUDE.md` have the cluster/GitOps features and the
+> hard-won operational gotchas. **Read those for anything touching the
+> running cluster.** This file covers what's specific to developing *this*
+> repo: the app source, local run/test loop, and release pipeline.
+
+## What this repo delivers
+
+The **Projects** self-service model (renamed from "Teams" mid-development —
+see gotchas below): a project owner gets one or more k8s namespaces, and
+every cluster-side consequence of that is reconciled continuously from here:
+
+- **teams-api** — the source of truth (ownership, namespace membership,
+  tiers) and the human-facing REST API; also serves `GET /kubeconfig` (OIDC
+  `kubectl` access) and syncs grants/revokes into Keycloak group membership
+  live, with a periodic reconcile pass (`GROUP_RECONCILE_INTERVAL`, default
+  60s) as a self-healing backstop against a missed sync.
+- **teams-operator** — watches teams-api's state (`kopf`) and reconciles it
+  onto the cluster: k8s RBAC (RoleBindings on the built-in `view`/`edit`
+  ClusterRoles + a `teams-admins` ClusterRoleBinding), the per-project Argo
+  CD RBAC Casbin block, OpenBao access (both the SPIFFE/SPIRE workload path
+  and the human-OIDC-SSO path, via `ensure_openbao_access` /
+  `_ensure_openbao_group_alias`), quotas/limits/network policy, and the
+  Harbor pull secret — and tears all of it (including real OpenBao secret
+  data) back down when a project is deleted. See `../platform-infra/CLAUDE.md`
+  for what these targets look like on the cluster side.
+- **teams-app** — the UI; deep-links out to Argo CD, the Argo Rollouts
+  dashboard, and OpenBao (the "Secrets" button lands on OpenBao's
+  create-secret form, not the list view — a brand-new project has nothing to
+  list yet).
+- **teams-cli** — the same self-service surface from a terminal, feeding
+  `kubectl`'s OIDC login.
+
+**Pending**: the operator/API/UI side of self-service cloud resource
+provisioning (a `ResourceAccess`) — teams-operator's OpenBao/SPIFFE access
+wiring + teardown for provisioned cloud resources, and the teams-api/
+teams-app request path. Crossplane's side (XRDs/Compositions, provider
+credentials) is being built in `platform-infra` — full design in
+`platform-infra/docs/multicloud-resource-access.md`.
 
 ## Monorepo layout (`teams-management/`)
 
@@ -126,3 +162,9 @@ images built this way are admission-verifiable without a policy change.
   locally). It's a real file store, not in-memory (the old README says
   in-memory — outdated).
 - **Keycloak realm lives in multiple hand-synced copies** (see above).
+- **`_emit_event` 422s on cluster-scoped objects.** `teams_operator.py`'s
+  `_emit_event` gets `422 Unprocessable Entity` ("does not match
+  event.namespace") whenever the involved object is cluster-scoped (e.g. a
+  `ClusterRoleBinding`) or its target namespace is already gone — logged
+  every reconcile cycle, harmless, never blocks reconciliation. Low-priority
+  cleanup if ever picked up.
