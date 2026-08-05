@@ -35,7 +35,7 @@ class TeamsOperator:
         # can own several namespaces (a default plus any it self-service ordered),
         # so this is a set, reconciled against the team's desired `namespaces` list.
         self.team_namespaces: Dict[str, Set[str]] = {}
-        
+
         # Initialize Kubernetes client
         try:
             # Try in-cluster config first (when running in pod)
@@ -2142,14 +2142,14 @@ class TeamsOperator:
                     }
                 )
             )
-            
+
             # Create the namespace
             self.k8s_core_v1.create_namespace(body=namespace_body)
             logger.info(f"✅ Created namespace '{namespace_name}' for team '{team_name}' (ID: {team_id})")
             self._emit_event(namespace_name, namespace_name, team_id, "NamespaceProvisioned",
                               f"Namespace provisioned for team '{team_name}'")
             return True
-            
+
         except ApiException as e:
             if e.status == 409:  # Namespace already exists
                 logger.warning(f"⚠️ Namespace '{namespace_name}' already exists")
@@ -2160,7 +2160,7 @@ class TeamsOperator:
         except Exception as e:
             logger.error(f"❌ Unexpected error creating namespace: {e}")
             return False
-    
+
     def delete_namespace(self, namespace_name: str, team_name: str, team_id: str) -> bool:
         """Delete a Kubernetes namespace when team is removed, and tear down
         everything this operator ever provisioned for it in OpenBao - secrets,
@@ -2205,7 +2205,7 @@ class TeamsOperator:
         except Exception as e:
             logger.error(f"❌ Unexpected error deleting namespace: {e}")
             return False
-    
+
     async def reconcile_teams(self):
         """Main reconciliation loop - sync teams with namespaces"""
         # Convert any pending GitHub App-Manifest registrations first (so a
@@ -2414,10 +2414,10 @@ class TeamsOperator:
         logger.info(f"🚀 Teams Operator starting...")
         logger.info(f"📡 Teams API URL: {self.teams_api_url}")
         logger.info(f"⏰ Poll interval: {self.poll_interval} seconds")
-        
+
         # Initial reconciliation
         await self.reconcile_teams()
-        
+
         # Main loop
         while True:
             try:

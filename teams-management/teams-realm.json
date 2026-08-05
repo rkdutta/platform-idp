@@ -32,6 +32,22 @@
       "attributes": {
         "post.logout.redirect.uris": "http://platform-auth.127.0.0.1.sslip.io/*##http://localhost:4200/*##http://localhost:4201/*##http://rdutta.coder:*"
       }
+    },
+    {
+      "clientId": "teams-e2e-tests",
+      "name": "E2E test runner",
+      "description": "Password-grant client used ONLY by the local test-suites to obtain a demo user's token directly, instead of driving a real browser login. Not used by any production code path. DEMO secret, rotate or remove if this stops being test-only.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "dev-teams-e2e-tests-secret-change-me",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [],
+      "webOrigins": []
     }
   ],
   "users": [
@@ -77,6 +93,10 @@
       {
         "name": "admin",
         "description": "Full administrative access"
+      },
+      {
+        "name": "project-manager",
+        "description": "Can create projects and manage the ones they are assigned to (self-service Project delegation, granted by an admin)"
       }
     ]
   }

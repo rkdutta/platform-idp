@@ -118,7 +118,7 @@ class TeamsAPI:
                 response = requests.delete(url, headers=headers, verify=self.verify)
             else:
                 raise ValueError(f"Unsupported method: {method}")
-                
+
             response.raise_for_status()
             return response.json()
         except requests.exceptions.SSLError as e:
@@ -156,7 +156,7 @@ class TeamsAPI:
 
     def create_team(self, name: str):
         """Create a new team"""
-        result = self._make_request("POST", "/teams", {"name": name})
+        result = self._make_request("POST", "/projects", {"name": name})
         print(f"✅ Created team: {result['name']}")
         print(f"🆔 Team ID: {result['id']}")
         print(f"📅 Created: {result['created_at']}")
@@ -169,11 +169,11 @@ class TeamsAPI:
 
     def list_teams(self):
         """List all teams"""
-        teams = self._make_request("GET", "/teams")
+        teams = self._make_request("GET", "/projects")
         if not teams:
             print("📭 No teams found")
             return
-            
+
         print(f"📋 Found {len(teams)} team(s):")
         print("-" * 60)
         for team in teams:
@@ -184,14 +184,14 @@ class TeamsAPI:
 
     def get_team(self, team_id: str):
         """Get a specific team by ID"""
-        team = self._make_request("GET", f"/teams/{team_id}")
+        team = self._make_request("GET", f"/projects/{team_id}")
         print(f"🏷️  Name: {team['name']}")
         print(f"🆔 ID: {team['id']}")
         print(f"📅 Created: {team['created_at']}")
 
     def delete_team(self, team_id: str):
         """Delete a team"""
-        result = self._make_request("DELETE", f"/teams/{team_id}")
+        result = self._make_request("DELETE", f"/projects/{team_id}")
         print(f"✅ {result['message']}")
 
     # --- Authentication (OAuth2 Authorization Code + PKCE, loopback) ----------
@@ -423,7 +423,7 @@ Examples:
   teams-cli kubeconfig               # Fetch a working kubeconfig
         """
     )
-    
+
     parser.add_argument(
         "--url",
         default=API_BASE_URL,
@@ -459,31 +459,31 @@ Examples:
 
     # Health command
     subparsers.add_parser("health", help="Check API health")
-    
+
     # Create command
     create_parser = subparsers.add_parser("create", help="Create a new team")
     create_parser.add_argument("name", help="Team name")
-    
+
     # List command
     subparsers.add_parser("list", help="List all teams")
-    
+
     # Get command
     get_parser = subparsers.add_parser("get", help="Get a specific team")
     get_parser.add_argument("team_id", help="Team ID")
-    
+
     # Delete command
     delete_parser = subparsers.add_parser("delete", help="Delete a team")
     delete_parser.add_argument("team_id", help="Team ID")
-    
+
     args = parser.parse_args()
-    
+
     if not args.command:
         parser.print_help()
         return
-    
+
     # Initialize API client
     api = TeamsAPI(args.url, verify=not args.insecure)
-    
+
     # Execute command
     try:
         if args.command == "login":

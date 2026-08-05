@@ -1,0 +1,64 @@
+# Pre-commit hooks: catch formatting, obvious mistakes, secrets, and each
+# component's own unit tests BEFORE they reach CI. Install once with
+# `pre-commit install`. Hooks are path-scoped per component (see `files:`)
+# so an unrelated change doesn't trigger the whole matrix. E2E tests (need a
+# live cluster) are NOT run here — see each component's tests/e2e/, on
+# demand via the capstone-level /test-all command.
+#
+# Each component's test venv is a local prerequisite (see the component's
+# section in ../CLAUDE.md for the one-time `python3 -m venv .venv && ...
+# pip install` setup) — these hooks assume it already exists.
+#
+# Rev fields are pinned tags; `pre-commit autoupdate` (or Renovate) bumps them.
+#
+# Excludes teams-management/teams-api/.local/ — an accidentally-tracked
+# vendored `pip install --user` tree (898 files, not gitignored) found while
+# adding this config. Out of scope to clean up here (removing 898 tracked
+# files needs an explicit decision), but excluding it stops every hygiene
+# hook from churning on third-party vendored code on every commit.
+exclude: ^teams-management/teams-api/\.local/
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: detect-private-key
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      - id: teams-api-unit-tests
+        name: teams-api unit tests
+        entry: teams-management/teams-api/.venv/bin/python -m pytest teams-management/teams-api/tests -q
+        language: system
+        files: ^teams-management/teams-api/
+        pass_filenames: false
+
+      - id: teams-operator-unit-tests
+        name: teams-operator unit tests
+        entry: teams-management/teams-operator/.venv/bin/python -m pytest teams-management/teams-operator/tests -q
+        language: system
+        files: ^teams-management/teams-operator/
+        pass_filenames: false
+
+      - id: teams-cli-unit-tests
+        name: teams-cli unit tests
+        entry: teams-management/teams-cli/.venv/bin/python -m pytest teams-management/teams-cli/tests -q
+        language: system
+        files: ^teams-management/teams-cli/
+        pass_filenames: false
+
+      - id: teams-app-unit-tests
+        name: teams-app unit tests (Karma/Jasmine, headless)
+        entry: bash -c 'cd teams-management/teams-app && npm run test:ci'
+        language: system
+        files: ^teams-management/teams-app/
+        pass_filenames: false

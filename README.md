@@ -1,6 +1,6 @@
 # 👥 Teams Management - Engineering Platform APIs & Developer Experience
 
-Welcome to the Teams Management module! This comprehensive module teaches you to build a complete engineering platform with APIs, CLI tools, and web interfaces for managing engineering teams. You'll learn to create developer-friendly tools that make platform operations simple and scalable. 
+Welcome to the Teams Management module! This comprehensive module teaches you to build a complete engineering platform with APIs, CLI tools, and web interfaces for managing engineering teams. You'll learn to create developer-friendly tools that make platform operations simple and scalable.
 
 ## 🎯 Learning Objectives
 
@@ -561,11 +561,11 @@ For detailed troubleshooting of individual components, refer to:
 
 Upon completing this module, you will have built a complete engineering platform with:
 
-✅ **RESTful API** with comprehensive team management capabilities  
-✅ **Command-line tools** for developers and automation  
-✅ **Modern web interface** for self-service operations  
-✅ **Kubernetes deployment** patterns for production use  
-✅ **End-to-end workflows** from API to user interface  
+✅ **RESTful API** with comprehensive team management capabilities
+✅ **Command-line tools** for developers and automation
+✅ **Modern web interface** for self-service operations
+✅ **Kubernetes deployment** patterns for production use
+✅ **End-to-end workflows** from API to user interface
 
 ### What You've Learned
 - **Platform Engineering**: How to build developer-centric tools
@@ -575,9 +575,9 @@ Upon completing this module, you will have built a complete engineering platform
 - **System Integration**: Connecting multiple components seamlessly
 
 ### Share and next steps
-- **Ready to build platforms that developers love?** 🚀 Your teams management system is now a foundation for building comprehensive engineering platforms that scale with your organization!  
-- **Share what you learned with your team** [Click here](https://pe-architect.platformetrics.com/) for a high-level demo  
-- **Check out our book on platform engineering that talks architecture** [Effective Platform Engineering](https://effectiveplatformengineering.com)   
+- **Ready to build platforms that developers love?** 🚀 Your teams management system is now a foundation for building comprehensive engineering platforms that scale with your organization!
+- **Share what you learned with your team** [Click here](https://pe-architect.platformetrics.com/) for a high-level demo
+- **Check out our book on platform engineering that talks architecture** [Effective Platform Engineering](https://effectiveplatformengineering.com)
 
 ---
 
